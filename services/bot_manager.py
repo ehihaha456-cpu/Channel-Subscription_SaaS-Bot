@@ -563,15 +563,21 @@ class SellerBotManager:
                 title,target=[x.strip() for x in item.split(" - ",1)]
                 if not title or not target: raise ValueError("Button title and target required")
                 if target.startswith(("http://","https://","tg://")) or target.startswith("t.me/"):
-                    if target.startswith("t.me/"): target="https://"+target
+                    if target.startswith("t.me/"):
+                        target="https://"+target
                     row.append({"text":title,"type":"url","value":target})
+                elif target.startswith("@"):
+                    username=target[1:].strip()
+                    if not username or len(username)>32 or not all(ch.isalnum() or ch=="_" for ch in username):
+                        raise ValueError("Invalid Telegram username. Example: Button title - @username")
+                    row.append({"text":title,"type":"url","value":f"https://t.me/{username}"})
                 elif target.startswith("feature:"):
                     feature=target.split(":",1)[1].lower()
                     allowed={"plans":"c_plans","buy":"c_buy","profile":"c_profile","renew":"c_renew","referral":"c_referral","support":"c_support","home":"c_home"}
                     if feature not in allowed: raise ValueError("Unknown feature button")
                     row.append({"text":title,"type":"callback","value":allowed[feature]})
                 else:
-                    raise ValueError("Target must be URL or feature:plans/buy/profile/renew/referral/support/home")
+                    raise ValueError("Target must be URL, @username, or feature:plans/buy/profile/renew/referral/support/home")
             if row: rows.append(row)
         if not rows: raise ValueError("No buttons found")
         return rows
@@ -2145,7 +2151,21 @@ class SellerBotManager:
             item=await get_support_auto_reply(owner,keyword) or {}
             context.user_data.clear(); context.user_data["wait_support_ar_buttons"]=keyword
             await q.edit_message_text(
-                "🔗 Send URL buttons in this format:\nButton title - https://example.com\n\nSame row:\nButton 1 - URL && Button 2 - URL",
+                "🔗 Send URL, Username or Feature buttons\n\n"
+                "• URL Button:\n"
+                "Button Title - https://example.com\n\n"
+                "• Username Button:\n"
+                "Button Title - @username\n\n"
+                "• Same Row:\n"
+                "Plans - feature:plans && Join - https://example.com\n\n"
+                "• Feature Button:\n"
+                "Button Title - feature:plans\n"
+                "Button Title - feature:buy\n"
+                "Button Title - feature:profile\n"
+                "Button Title - feature:renew\n"
+                "Button Title - feature:referral\n"
+                "Button Title - feature:support\n"
+                "Button Title - feature:home",
                 reply_markup=self.support_auto_reply_buttons_menu(keyword,bool(item.get("buttons"))),
             ); return
         if a.startswith("a_support_ar_rmtext_"):
