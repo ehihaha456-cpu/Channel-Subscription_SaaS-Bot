@@ -30,6 +30,7 @@ from database.seller_bots import (
 )
 from database.mongo import get_database
 from database.seller_referrals import seller_referral_stats
+from database.referral_unlock import get_referral_unlock, save_referral_unlock
 from database.live_support import (
     count_support_blocks, delete_support_topic, get_live_support_settings,
     get_private_message_link, get_support_topic, get_topic_by_thread,
@@ -497,7 +498,29 @@ class SellerBotManager:
 
     @staticmethod
     def settings_menu():
-        return InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Bot Name",callback_data="a_set_bot_name")],[InlineKeyboardButton("💬 Welcome Message",callback_data="a_welcome")],[InlineKeyboardButton("📞 Support Username",callback_data="a_set_support")],[InlineKeyboardButton("💵 Currency",callback_data="a_set_currency"),InlineKeyboardButton("🕒 Timezone",callback_data="a_set_timezone")],[InlineKeyboardButton("🔔 Reminder Days",callback_data="a_set_reminder")],[InlineKeyboardButton("🎁 Referral Reward Days",callback_data="a_set_referral_days")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Bot Name",callback_data="a_set_bot_name")],[InlineKeyboardButton("💬 Welcome Message",callback_data="a_welcome")],[InlineKeyboardButton("📞 Support Username",callback_data="a_set_support")],[InlineKeyboardButton("💵 Currency",callback_data="a_set_currency"),InlineKeyboardButton("🕒 Timezone",callback_data="a_set_timezone")],[InlineKeyboardButton("🔔 Reminder Days",callback_data="a_set_reminder")],[InlineKeyboardButton("🎁 Referral Reward Days",callback_data="a_set_referral_days"),InlineKeyboardButton("🔓 Referral Unlock",callback_data="a_referral_unlock")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
+
+    @staticmethod
+    def referral_unlock_menu(settings, channels):
+        enabled=bool(settings.get("referral_unlock_enabled",False))
+        required=int(settings.get("referral_unlock_required",3) or 3)
+        target_title=settings.get("referral_unlock_target_title") or "Not selected"
+        rows=[
+            [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable",callback_data="a_referral_unlock_toggle")],
+            [InlineKeyboardButton(f"👥 Required Referrals: {required}",callback_data="a_referral_unlock_required")],
+            [InlineKeyboardButton(f"📢 Destination: {target_title}",callback_data="a_referral_unlock_destination")],
+        ]
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_settings")])
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def referral_unlock_channels_menu(channels):
+        rows=[]
+        for item in channels:
+            title=str(item.get("title") or item.get("chat_id"))[:40]
+            rows.append([InlineKeyboardButton(title,callback_data=f"a_referral_unlock_chat_{item.get('chat_id')}")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_referral_unlock")])
+        return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def welcome_menu():
@@ -524,8 +547,8 @@ class SellerBotManager:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📋 Plans",callback_data="a_wq_plans"),InlineKeyboardButton("💳 Buy",callback_data="a_wq_buy")],
             [InlineKeyboardButton("👤 My Profile",callback_data="a_wq_profile"),InlineKeyboardButton("🔄 Renew",callback_data="a_wq_renew")],
-            [InlineKeyboardButton("🎁 Referral",callback_data="a_wq_referral"),InlineKeyboardButton("📞 Support",callback_data="a_wq_support")],
-            [InlineKeyboardButton("🏠 Main Menu",callback_data="a_wq_home")],
+            [InlineKeyboardButton("🎁 Referral",callback_data="a_wq_referral"),InlineKeyboardButton("🔓 Referral Unlock",callback_data="a_wq_referral_unlock")],
+            [InlineKeyboardButton("📞 Support",callback_data="a_wq_support"),InlineKeyboardButton("🏠 Main Menu",callback_data="a_wq_home")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_welcome_buttons")],
         ])
 
@@ -573,11 +596,11 @@ class SellerBotManager:
                     row.append({"text":title,"type":"url","value":f"https://t.me/{username}"})
                 elif target.startswith("feature:"):
                     feature=target.split(":",1)[1].lower()
-                    allowed={"plans":"c_plans","buy":"c_buy","profile":"c_profile","renew":"c_renew","referral":"c_referral","support":"c_support","home":"c_home"}
+                    allowed={"plans":"c_plans","buy":"c_buy","profile":"c_profile","renew":"c_renew","referral":"c_referral","referral_unlock":"c_referral_unlock","support":"c_support","home":"c_home"}
                     if feature not in allowed: raise ValueError("Unknown feature button")
                     row.append({"text":title,"type":"callback","value":allowed[feature]})
                 else:
-                    raise ValueError("Target must be URL, @username, or feature:plans/buy/profile/renew/referral/support/home")
+                    raise ValueError("Target must be URL, @username, or feature:plans/buy/profile/renew/referral/referral_unlock/support/home")
             if row: rows.append(row)
         if not rows: raise ValueError("No buttons found")
         return rows
@@ -1415,6 +1438,71 @@ class SellerBotManager:
             await self.safe_query_message(q,text,kb)
             return
 
+        if action=="c_referral_unlock":
+            settings=await get_seller_settings(owner)
+            enabled=bool(settings.get("referral_unlock_enabled",False))
+            required=max(1,int(settings.get("referral_unlock_required",3) or 3))
+            target_chat_id=settings.get("referral_unlock_target_chat_id")
+            target_title=settings.get("referral_unlock_target_title") or "Private Group"
+            successful=await count_successful_referrals(owner,q.from_user.id)
+            progress=min(successful,required)
+            me=await context.bot.get_me()
+            referral_link=f"https://t.me/{me.username}?start=ref_{q.from_user.id}"
+            share_url="https://t.me/share/url?url="+referral_link+"&text=Join%20this%20bot"
+            if not enabled or not target_chat_id:
+                await self.safe_query_message(
+                    q,
+                    "🔓 Referral Unlock is not available right now.\n\nPlease contact support.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back",callback_data="c_home")]]),
+                )
+                return
+            if successful < required:
+                text=(
+                    "🔓 Unlock Private Access\n\n"
+                    f"Invite {required} successful user(s) with your referral link.\n\n"
+                    f"Progress: {progress}/{required}\n\n"
+                    "Your unique referral link:\n"
+                    f"{referral_link}\n\n"
+                    "After the required referrals are completed, open this button again to receive the private invite link."
+                )
+                kb=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Share Referral Link",url=share_url)],
+                    [InlineKeyboardButton("🔄 Check Progress",callback_data="c_referral_unlock")],
+                    [InlineKeyboardButton("⬅ Back",callback_data="c_home")],
+                ])
+                await self.safe_query_message(q,text,kb)
+                return
+            saved=await get_referral_unlock(owner,q.from_user.id)
+            invite_link=(saved or {}).get("invite_link")
+            if not invite_link:
+                try:
+                    invite=await context.bot.create_chat_invite_link(
+                        chat_id=int(target_chat_id), member_limit=1,
+                        name=f"Referral unlock {q.from_user.id}",
+                    )
+                    invite_link=invite.invite_link
+                    await save_referral_unlock(owner,q.from_user.id,int(target_chat_id),invite_link)
+                except Exception:
+                    logger.exception("Referral unlock invite failed owner=%s user=%s",owner,q.from_user.id)
+                    await self.safe_query_message(
+                        q,
+                        "❌ The private invite link could not be created.\n\nPlease contact support.",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back",callback_data="c_home")]]),
+                    )
+                    return
+            await self.safe_query_message(
+                q,
+                "🎉 Referral Target Completed!\n\n"
+                f"Progress: {successful}/{required}\n"
+                f"Destination: {target_title}\n\n"
+                "Use your private one-time invite link below.",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔓 Join Now",url=invite_link)],
+                    [InlineKeyboardButton("⬅ Back",callback_data="c_home")],
+                ]),
+            )
+            return
+
         if action=="c_support":
             support=await get_live_support_settings(owner)
             if not support.get("enabled"):
@@ -1783,7 +1871,7 @@ class SellerBotManager:
             feature=a.replace("a_wq_","")
             config={
                 "plans":("📋 Plans","c_plans"),"buy":("💳 Buy","c_buy"),"profile":("👤 My Profile","c_profile"),
-                "renew":("🔄 Renew","c_renew"),"referral":("🎁 Referral","c_referral"),"support":("📞 Support","c_support"),"home":("🏠 Main Menu","c_home")}
+                "renew":("🔄 Renew","c_renew"),"referral":("🎁 Referral","c_referral"),"referral_unlock":("🔓 Referral Unlock","c_referral_unlock"),"support":("📞 Support","c_support"),"home":("🏠 Main Menu","c_home")}
             title,callback=config[feature]
             s=await get_seller_settings(owner)
             rows=s.get("welcome_buttons") or []
@@ -1823,7 +1911,7 @@ class SellerBotManager:
             return
         if a=="a_welcome_manual":
             context.user_data.clear(); context.user_data["wait_welcome_buttons"]=True
-            await q.edit_message_text("✍ Send buttons in this format:\n\nSingle button:\nJoin Channel - https://t.me/example\n\nSame row:\nPlans - feature:plans && Buy - feature:buy\n\nNew line = new row.\nFeatures: plans, buy, profile, renew, referral, support, home",reply_markup=self.back("a_welcome_buttons")); return
+            await q.edit_message_text("✍ Send buttons in this format:\n\nSingle button:\nJoin Channel - https://t.me/example\n\nSame row:\nPlans - feature:plans && Buy - feature:buy\n\nNew line = new row.\nFeatures: plans, buy, profile, renew, referral, referral_unlock, support, home",reply_markup=self.back("a_welcome_buttons")); return
         if a=="a_welcome_see_buttons":
             s=await get_seller_settings(owner)
             rows=s.get("welcome_buttons") or []
@@ -2164,6 +2252,7 @@ class SellerBotManager:
                 "Button Title - feature:profile\n"
                 "Button Title - feature:renew\n"
                 "Button Title - feature:referral\n"
+                "Button Title - feature:referral_unlock\n"
                 "Button Title - feature:support\n"
                 "Button Title - feature:home",
                 reply_markup=self.support_auto_reply_buttons_menu(keyword,bool(item.get("buttons"))),
@@ -2693,6 +2782,72 @@ class SellerBotManager:
             for cpn in coupons[:20]: lines.append(f"• {cpn['code']} — {cpn['value']:g} {cpn['discount_type']} — {cpn['used_count']}/{cpn['usage_limit']}")
             context.user_data.clear(); context.user_data["wait_coupon_create"]=True
             await q.edit_message_text("\n".join(lines),reply_markup=self.back()); return
+        if a=="a_referral_unlock":
+            settings=await get_seller_settings(owner)
+            channels=await get_channels(owner)
+            enabled=bool(settings.get("referral_unlock_enabled",False))
+            required=int(settings.get("referral_unlock_required",3) or 3)
+            target=settings.get("referral_unlock_target_title") or "Not selected"
+            text=(
+                "🔓 Referral Unlock Setup\n\n"
+                "This button lets users unlock a selected private group or channel after completing the required successful referrals.\n\n"
+                f"Status: {'Enabled ✅' if enabled else 'Disabled ❌'}\n"
+                f"Required successful referrals: {required}\n"
+                f"Destination: {target}\n\n"
+                "Setup steps:\n"
+                "1. Select the required referral count.\n"
+                "2. Select a connected group or channel.\n"
+                "3. Enable Referral Unlock.\n"
+                "4. Add feature:referral_unlock from any supported button editor.\n\n"
+                "Supported editors:\n"
+                "• Welcome Message buttons\n"
+                "• Live Support Template buttons\n"
+                "• Auto Reply buttons\n\n"
+                "Button format:\n"
+                "Unlock Access - feature:referral_unlock"
+            )
+            await q.edit_message_text(text,reply_markup=self.referral_unlock_menu(settings,channels)); return
+        if a=="a_referral_unlock_toggle":
+            settings=await get_seller_settings(owner)
+            new_value=not bool(settings.get("referral_unlock_enabled",False))
+            if new_value and not settings.get("referral_unlock_target_chat_id"):
+                await q.answer("Select a destination first.",show_alert=True); return
+            await set_seller_setting(owner,"referral_unlock_enabled",new_value)
+            settings=await get_seller_settings(owner)
+            await q.edit_message_text("✅ Referral Unlock enabled." if new_value else "✅ Referral Unlock disabled.",reply_markup=self.referral_unlock_menu(settings,await get_channels(owner))); return
+        if a=="a_referral_unlock_required":
+            context.user_data.clear(); context.user_data["wait_referral_unlock_required"]=True
+            await q.edit_message_text(
+                "👥 Set Required Successful Referrals\n\n"
+                "Send a whole number from 1 to 100.\n\n"
+                "Example: 3\n\n"
+                "Only successful referrals are counted. Opening or sharing the link alone does not increase progress.",
+                reply_markup=self.back("a_referral_unlock"),
+            ); return
+        if a=="a_referral_unlock_destination":
+            channels=await get_channels(owner)
+            if not channels:
+                await q.edit_message_text(
+                    "❌ No connected group or channel found.\n\nConnect a destination first from Channels / Groups, then return here.",
+                    reply_markup=self.back("a_referral_unlock"),
+                ); return
+            await q.edit_message_text(
+                "📢 Select Unlock Destination\n\n"
+                "Choose the private group or channel whose invite link will be given after the user completes the referral target.\n\n"
+                "The clone bot must be an administrator and must have permission to create invite links.",
+                reply_markup=self.referral_unlock_channels_menu(channels),
+            ); return
+        if a.startswith("a_referral_unlock_chat_"):
+            chat_id=int(a.replace("a_referral_unlock_chat_","",1))
+            channels=await get_channels(owner)
+            selected=next((item for item in channels if int(item.get("chat_id"))==chat_id),None)
+            if not selected:
+                await q.answer("Destination not found.",show_alert=True); return
+            await set_seller_setting(owner,"referral_unlock_target_chat_id",chat_id)
+            await set_seller_setting(owner,"referral_unlock_target_title",selected.get("title") or str(chat_id))
+            settings=await get_seller_settings(owner)
+            await q.edit_message_text("✅ Unlock destination saved.",reply_markup=self.referral_unlock_menu(settings,channels)); return
+
         if a=="a_seller_referral":
             data=await seller_referral_stats(owner)
             link=f"https://t.me/{MAIN_BOT_USERNAME}?start=refseller_{owner}"
@@ -3451,6 +3606,17 @@ class SellerBotManager:
                     reply_markup=self.settings_menu(),
                 )
                 return
+            if context.user_data.get("wait_referral_unlock_required"):
+                try:
+                    required=int((message.text or "").strip())
+                    if required < 1 or required > 100:
+                        raise ValueError
+                except ValueError:
+                    await message.reply_text("❌ Send a whole number from 1 to 100.",reply_markup=self.back("a_referral_unlock")); return
+                await set_seller_setting(owner,"referral_unlock_required",required)
+                context.user_data.clear()
+                await message.reply_text(f"✅ Required successful referrals set to {required}.",reply_markup=self.back("a_referral_unlock")); return
+
             if context.user_data.get("wait_referral_days"):
                 try:
                     days=int(text)
