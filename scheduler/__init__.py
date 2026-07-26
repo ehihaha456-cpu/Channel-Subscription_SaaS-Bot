@@ -248,15 +248,23 @@ def restart_scheduler() -> bool:
         return False
 
 
-def shutdown_scheduler() -> None:
-    """Stop the scheduler and its watchdog during graceful shutdown."""
+async def shutdown_scheduler() -> None:
+    """Stop the scheduler and wait for its watchdog to exit cleanly."""
     global _shutdown_requested, _watchdog_task
 
     _shutdown_requested = True
 
-    if _watchdog_task and not _watchdog_task.done():
-        _watchdog_task.cancel()
+    watchdog_task = _watchdog_task
     _watchdog_task = None
+
+    if watchdog_task and not watchdog_task.done():
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Scheduler watchdog shutdown failed")
 
     if scheduler.running:
         scheduler.shutdown(wait=False)
