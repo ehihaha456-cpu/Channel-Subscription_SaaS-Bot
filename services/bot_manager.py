@@ -481,14 +481,38 @@ class SellerBotManager:
     @staticmethod
     def support_template_edit_menu(command):
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Edit Text",callback_data=f"a_support_tpl_text_{command}"),InlineKeyboardButton("🗑 Remove Text",callback_data=f"a_support_tpl_rmtext_{command}")],
-            [InlineKeyboardButton("🖼 Edit Media",callback_data=f"a_support_tpl_media_{command}"),InlineKeyboardButton("🗑 Remove Media",callback_data=f"a_support_tpl_rmmedia_{command}")],
-            [InlineKeyboardButton("🔗 Edit Buttons",callback_data=f"a_support_tpl_buttons_{command}"),InlineKeyboardButton("🗑 Remove Buttons",callback_data=f"a_support_tpl_rmbuttons_{command}")],
+            [InlineKeyboardButton("📄 Text",callback_data=f"a_support_tpl_text_{command}")],
+            [InlineKeyboardButton("🖼 Media",callback_data=f"a_support_tpl_media_{command}")],
+            [InlineKeyboardButton("🔗 URL Buttons",callback_data=f"a_support_tpl_buttons_{command}")],
+            [InlineKeyboardButton("👀 Full Preview",callback_data=f"a_support_tpl_preview_{command}")],
             [InlineKeyboardButton("⏱ Template Auto Remove",callback_data=f"a_support_tpl_autodel_{command}")],
-            [InlineKeyboardButton("👀 Preview",callback_data=f"a_support_tpl_preview_{command}")],
             [InlineKeyboardButton("🗑 Delete Command",callback_data=f"a_support_tpl_delete_{command}")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_support_templates")],
         ])
+
+    @staticmethod
+    def support_template_text_menu(command, has_text=False):
+        rows=[]
+        if has_text:
+            rows.append([InlineKeyboardButton("🗑 Remove Text",callback_data=f"a_support_tpl_rmtext_{command}")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")])
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def support_template_media_menu(command, has_media=False):
+        rows=[]
+        if has_media:
+            rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data=f"a_support_tpl_rmmedia_{command}")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")])
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def support_template_buttons_menu(command, has_buttons=False):
+        rows=[]
+        if has_buttons:
+            rows.append([InlineKeyboardButton("🚫 Remove Keyboard",callback_data=f"a_support_tpl_rmbuttons_{command}")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")])
+        return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def support_template_auto_delete_menu(command, current_seconds=0):
@@ -576,22 +600,36 @@ class SellerBotManager:
     @staticmethod
     def welcome_menu():
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Edit Text",callback_data="a_welcome_text"),InlineKeyboardButton("🗑 Remove Text",callback_data="a_welcome_remove_text")],
-            [InlineKeyboardButton("🖼 Edit Media",callback_data="a_welcome_media"),InlineKeyboardButton("🗑 Remove Media",callback_data="a_welcome_remove_media")],
-            [InlineKeyboardButton("🔗 Edit Buttons",callback_data="a_welcome_buttons"),InlineKeyboardButton("🗑 Remove Buttons",callback_data="a_welcome_remove_buttons")],
-            [InlineKeyboardButton("👀 Preview",callback_data="a_welcome_preview")],
+            [InlineKeyboardButton("📄 Text",callback_data="a_welcome_text")],
+            [InlineKeyboardButton("🖼 Media",callback_data="a_welcome_media")],
+            [InlineKeyboardButton("🔗 URL Buttons",callback_data="a_welcome_buttons")],
+            [InlineKeyboardButton("👀 Full Preview",callback_data="a_welcome_preview")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_settings")],
         ])
 
     @staticmethod
-    def welcome_buttons_menu():
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ Choose Bot Button",callback_data="a_welcome_quick")],
-            [InlineKeyboardButton("✍ Write Manually",callback_data="a_welcome_manual")],
-            [InlineKeyboardButton("👀 See Current Buttons",callback_data="a_welcome_see_buttons")],
-            [InlineKeyboardButton("🧹 Remove All Buttons",callback_data="a_welcome_remove_buttons")],
-            [InlineKeyboardButton("⬅ Back",callback_data="a_welcome")],
-        ])
+    def welcome_text_menu(has_text=False):
+        rows=[]
+        if has_text:
+            rows.append([InlineKeyboardButton("🗑 Remove Text",callback_data="a_welcome_remove_text")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_welcome")])
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def welcome_media_menu(has_media=False):
+        rows=[]
+        if has_media:
+            rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data="a_welcome_remove_media")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_welcome")])
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def welcome_buttons_menu(has_buttons=False):
+        rows=[]
+        if has_buttons:
+            rows.append([InlineKeyboardButton("🚫 Remove Keyboard",callback_data="a_welcome_remove_buttons")])
+        rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_welcome")])
+        return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def welcome_quick_menu():
@@ -1977,12 +2015,45 @@ class SellerBotManager:
                   f"🔗 Buttons: {sum(len(r) for r in (s.get('welcome_buttons') or []))}")
             await q.edit_message_text(text,reply_markup=self.welcome_menu()); return
         if a=="a_welcome_text":
+            s=await get_seller_settings(owner)
             context.user_data.clear(); context.user_data["wait_welcome_text"]=True
-            await q.edit_message_text("📝 Send welcome text.\n\nHTML is supported.\nVariables: {ID} {NAME} {SURNAME} {NAMESURNAME} {USERNAME} {LANG} {DATE} {TIME} {WEEKDAY} {MENTION} {BOTNAME}",reply_markup=self.back("a_welcome")); return
+            await q.edit_message_text(
+                "📄 Send the welcome message text.\n\n"
+                "HTML and variables are supported:\n"
+                "{ID} {NAME} {SURNAME} {NAMESURNAME} {USERNAME} {LANG} "
+                "{DATE} {TIME} {WEEKDAY} {MENTION} {BOTNAME}",
+                reply_markup=self.welcome_text_menu(bool(s.get("welcome_message"))),
+            ); return
         if a=="a_welcome_media":
+            s=await get_seller_settings(owner)
             context.user_data.clear(); context.user_data["wait_welcome_media"]=True
-            await q.edit_message_text("🖼 Send photo, video, GIF or document for welcome media.\n\nThe same media will appear in Preview and on /start.",reply_markup=self.back("a_welcome")); return
-        if a=="a_welcome_buttons": await q.edit_message_text("🔗 Welcome Buttons",reply_markup=self.welcome_buttons_menu()); return
+            await q.edit_message_text(
+                "🖼 Send a photo, video, GIF or document.\n\n"
+                "The same media will appear in Full Preview and on /start.",
+                reply_markup=self.welcome_media_menu(bool(s.get("welcome_media_file_id"))),
+            ); return
+        if a=="a_welcome_buttons":
+            s=await get_seller_settings(owner)
+            context.user_data.clear(); context.user_data["wait_welcome_buttons"]=True
+            await q.edit_message_text(
+                "🔗 Send URL, Username or Feature buttons\n\n"
+                "• URL Button:\n"
+                "Button Title - https://example.com\n\n"
+                "• Username Button:\n"
+                "Button Title - @username\n\n"
+                "• Same Row:\n"
+                "Plans - feature:plans && Join - https://example.com\n\n"
+                "• Feature Button:\n"
+                "Button Title - feature:plans\n"
+                "Button Title - feature:buy\n"
+                "Button Title - feature:profile\n"
+                "Button Title - feature:renew\n"
+                "Button Title - feature:referral\n"
+                "Button Title - feature:referral_unlock\n"
+                "Button Title - feature:support\n"
+                "Button Title - feature:home",
+                reply_markup=self.welcome_buttons_menu(bool(s.get("welcome_buttons"))),
+            ); return
         if a=="a_welcome_quick": await q.edit_message_text("⚡ Choose a bot button to add",reply_markup=self.welcome_quick_menu()); return
         if a.startswith("a_wq_"):
             feature=a.replace("a_wq_","")
@@ -2027,8 +2098,27 @@ class SellerBotManager:
             )
             return
         if a=="a_welcome_manual":
+            s=await get_seller_settings(owner)
             context.user_data.clear(); context.user_data["wait_welcome_buttons"]=True
-            await q.edit_message_text("✍ Send buttons in this format:\n\nSingle button:\nJoin Channel - https://t.me/example\n\nSame row:\nPlans - feature:plans && Buy - feature:buy\n\nNew line = new row.\nFeatures: plans, buy, profile, renew, referral, referral_unlock, support, home",reply_markup=self.back("a_welcome_buttons")); return
+            await q.edit_message_text(
+                "🔗 Send URL, Username or Feature buttons\n\n"
+                "• URL Button:\n"
+                "Button Title - https://example.com\n\n"
+                "• Username Button:\n"
+                "Button Title - @username\n\n"
+                "• Same Row:\n"
+                "Plans - feature:plans && Join - https://example.com\n\n"
+                "• Feature Button:\n"
+                "Button Title - feature:plans\n"
+                "Button Title - feature:buy\n"
+                "Button Title - feature:profile\n"
+                "Button Title - feature:renew\n"
+                "Button Title - feature:referral\n"
+                "Button Title - feature:referral_unlock\n"
+                "Button Title - feature:support\n"
+                "Button Title - feature:home",
+                reply_markup=self.welcome_buttons_menu(bool(s.get("welcome_buttons"))),
+            ); return
         if a=="a_welcome_see_buttons":
             s=await get_seller_settings(owner)
             rows=s.get("welcome_buttons") or []
@@ -2126,11 +2216,11 @@ class SellerBotManager:
                     reply_markup=self.welcome_buttons_menu(),
                 )
             return
-        if a=="a_welcome_remove_text": await set_seller_setting(owner,"welcome_message",""); await q.edit_message_text("✅ Welcome text removed.",reply_markup=self.welcome_menu()); return
+        if a=="a_welcome_remove_text": await set_seller_setting(owner,"welcome_message",""); await q.edit_message_text("✅ Welcome text removed.",reply_markup=self.welcome_text_menu(False)); return
         if a=="a_welcome_remove_media":
             await set_seller_setting(owner,"welcome_media_type",""); await set_seller_setting(owner,"welcome_media_file_id","")
-            await q.edit_message_text("✅ Welcome media removed.",reply_markup=self.welcome_menu()); return
-        if a=="a_welcome_remove_buttons": await set_seller_setting(owner,"welcome_buttons",[]); await q.edit_message_text("✅ Welcome buttons removed.",reply_markup=self.welcome_menu()); return
+            await q.edit_message_text("✅ Welcome media removed.",reply_markup=self.welcome_media_menu(False)); return
+        if a=="a_welcome_remove_buttons": await set_seller_setting(owner,"welcome_buttons",[]); await q.edit_message_text("✅ Welcome keyboard removed.",reply_markup=self.welcome_buttons_menu(False)); return
         if a=="a_welcome_preview":
             s=await ensure_seller_defaults(owner,(await get_bot_by_data_owner_id(owner) or {}).get("bot_name","Subscription Bot"))
             try:
@@ -2408,14 +2498,44 @@ class SellerBotManager:
             auto_delete=_format_auto_delete(_template_auto_delete_seconds(tpl))
             await q.edit_message_text(f"⚡ /{command}\n\n📝 Text: {'✅' if tpl.get('text') else '❌'}\n🖼 Media: {'✅' if tpl.get('media_file_id') else '❌'}\n🔗 Buttons: {count}\n⏱ Auto Remove: {auto_delete}",reply_markup=self.support_template_edit_menu(command)); return
         if a.startswith("a_support_tpl_text_"):
-            command=a.replace("a_support_tpl_text_",""); context.user_data.clear(); context.user_data["wait_support_tpl_text"]=command
-            await q.edit_message_text("📝 Template text bhejo.\n\nVariables: {NAME} {ID} {USERNAME} {PLAN} {EXPIRY}",reply_markup=self.back(f"a_support_tpl_view_{command}")); return
+            command=a.replace("a_support_tpl_text_","")
+            tpl=await get_support_template(owner,command) or {}
+            context.user_data.clear(); context.user_data["wait_support_tpl_text"]=command
+            await q.edit_message_text(
+                "📄 Send the template reply text.\n\nHTML and variables are supported: {NAME} {ID} {USERNAME} {PLAN} {EXPIRY}",
+                reply_markup=self.support_template_text_menu(command,bool(tpl.get("text"))),
+            ); return
         if a.startswith("a_support_tpl_media_"):
-            command=a.replace("a_support_tpl_media_",""); context.user_data.clear(); context.user_data["wait_support_tpl_media"]=command
-            await q.edit_message_text("🖼 Photo, video, GIF ya document bhejo.",reply_markup=self.back(f"a_support_tpl_view_{command}")); return
+            command=a.replace("a_support_tpl_media_","")
+            tpl=await get_support_template(owner,command) or {}
+            context.user_data.clear(); context.user_data["wait_support_tpl_media"]=command
+            await q.edit_message_text(
+                "🖼 Send a photo, video, GIF or document.",
+                reply_markup=self.support_template_media_menu(command,bool(tpl.get("media_file_id"))),
+            ); return
         if a.startswith("a_support_tpl_buttons_"):
-            command=a.replace("a_support_tpl_buttons_",""); context.user_data.clear(); context.user_data["wait_support_tpl_buttons"]=command
-            await q.edit_message_text("🔗 Buttons bhejo. Format:\nTitle - https://example.com\n\nSame row:\nButton 1 - URL && Button 2 - URL",reply_markup=self.back(f"a_support_tpl_view_{command}")); return
+            command=a.replace("a_support_tpl_buttons_","")
+            tpl=await get_support_template(owner,command) or {}
+            context.user_data.clear(); context.user_data["wait_support_tpl_buttons"]=command
+            await q.edit_message_text(
+                "🔗 Send URL, Username or Feature buttons\n\n"
+                "• URL Button:\n"
+                "Button Title - https://example.com\n\n"
+                "• Username Button:\n"
+                "Button Title - @username\n\n"
+                "• Same Row:\n"
+                "Plans - feature:plans && Join - https://example.com\n\n"
+                "• Feature Button:\n"
+                "Button Title - feature:plans\n"
+                "Button Title - feature:buy\n"
+                "Button Title - feature:profile\n"
+                "Button Title - feature:renew\n"
+                "Button Title - feature:referral\n"
+                "Button Title - feature:referral_unlock\n"
+                "Button Title - feature:support\n"
+                "Button Title - feature:home",
+                reply_markup=self.support_template_buttons_menu(command,bool(tpl.get("buttons"))),
+            ); return
         if a.startswith("a_support_tpl_autodel_"):
             command=a.replace("a_support_tpl_autodel_","")
             tpl=await get_support_template(owner,command)
@@ -2444,13 +2564,13 @@ class SellerBotManager:
             ); return
         if a.startswith("a_support_tpl_rmtext_"):
             command=a.replace("a_support_tpl_rmtext_",""); await save_support_template(owner,command,text="")
-            await q.edit_message_text("✅ Text removed",reply_markup=self.support_template_edit_menu(command)); return
+            await q.edit_message_text("✅ Text removed",reply_markup=self.support_template_text_menu(command,False)); return
         if a.startswith("a_support_tpl_rmmedia_"):
             command=a.replace("a_support_tpl_rmmedia_",""); await save_support_template(owner,command,media_type="",media_file_id="")
-            await q.edit_message_text("✅ Media removed",reply_markup=self.support_template_edit_menu(command)); return
+            await q.edit_message_text("✅ Media removed",reply_markup=self.support_template_media_menu(command,False)); return
         if a.startswith("a_support_tpl_rmbuttons_"):
             command=a.replace("a_support_tpl_rmbuttons_",""); await save_support_template(owner,command,buttons=[])
-            await q.edit_message_text("✅ Buttons removed",reply_markup=self.support_template_edit_menu(command)); return
+            await q.edit_message_text("✅ Keyboard removed",reply_markup=self.support_template_buttons_menu(command,False)); return
         if a.startswith("a_support_tpl_delete_"):
             command=a.replace("a_support_tpl_delete_",""); await delete_support_template(owner,command)
             await q.edit_message_text(f"✅ /{command} deleted",reply_markup=self.support_templates_menu(await list_support_templates(owner))); return
@@ -3637,12 +3757,12 @@ class SellerBotManager:
                 if context.user_data.get(state): await set_seller_setting(owner,key,val); context.user_data.clear(); await update.effective_message.reply_text("✅ Updated",reply_markup=kb); return
             if context.user_data.get("wait_welcome_text"):
                 await set_seller_setting(owner,"welcome_message",text); context.user_data.clear()
-                await update.effective_message.reply_text("✅ Welcome text saved. Use 👀 Preview to check it.",reply_markup=self.welcome_menu()); return
+                await update.effective_message.reply_text("✅ Welcome text saved. Use 👀 Full Preview to check it.",reply_markup=self.welcome_text_menu(True)); return
             if context.user_data.get("wait_welcome_buttons"):
                 try: rows=self.parse_welcome_buttons(text)
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}"); return
                 await set_seller_setting(owner,"welcome_buttons",rows); context.user_data.clear()
-                await update.effective_message.reply_text("✅ Welcome buttons saved. Use 👀 Preview to check them.",reply_markup=self.welcome_buttons_menu()); return
+                await update.effective_message.reply_text("✅ Welcome buttons saved. Use 👀 Full Preview to check them.",reply_markup=self.welcome_buttons_menu(True)); return
             if context.user_data.get("wait_staff_promote"):
                 try:
                     staff_user_id=int(text.strip())
@@ -4016,7 +4136,7 @@ class SellerBotManager:
         if not file_id: await msg.reply_text("❌ Send photo, video, GIF or document."); return
         await set_seller_setting(owner,"welcome_media_type",media_type)
         await set_seller_setting(owner,"welcome_media_file_id",file_id)
-        context.user_data.clear(); await msg.reply_text("✅ Welcome media saved. Use 👀 Preview to check it.",reply_markup=self.welcome_menu())
+        context.user_data.clear(); await msg.reply_text("✅ Welcome media saved. Use 👀 Full Preview to check it.",reply_markup=self.welcome_media_menu(True))
         raise ApplicationHandlerStop
 
     async def photo_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
