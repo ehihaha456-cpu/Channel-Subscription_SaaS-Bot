@@ -67,6 +67,7 @@ from database.platform_features import (
 from database.seller_data import (
     activate_subscription, fulfill_subscription_payment, active_subscriptions, add_channel, create_payment, create_plan, delete_plan,
     ensure_seller_defaults, expired_subscriptions, get_channels, get_payment,
+    set_channel_auto_invite,
     get_plan, get_plans, get_seller_settings, get_subscription, get_user, mark_expired,
     payment_history, pending_payments, remove_channel, set_payment_status,
     claim_payment_for_processing, finalize_processed_payment,
@@ -1721,11 +1722,59 @@ class SellerBotManager:
                 reply_markup=self.back("a_channels"),
             ); return
         if a=="a_channel_list":
-            channels=await get_channels(owner); lines=["📋 Channels / Groups\n"]; kb=[]
+            channels=await get_channels(owner)
+            lines=[
+                "📋 Channels / Groups\n",
+                "Choose which connected chats should receive automatic invite links after successful automatic payment verification.\n",
+                "✅ Enabled: invite link will be sent\n❌ Disabled: invite link will be skipped",
+            ]
+            kb=[]
             for ch in channels:
-                lines.append(f"• {ch.get('title')}\n  {ch.get('chat_id')}")
-                kb.append([InlineKeyboardButton(f"❌ {ch.get('title','Chat')[:18]}",callback_data=f"a_channel_del_{ch['chat_id']}")])
-            kb.append([InlineKeyboardButton("⬅ Back",callback_data="a_channels")]); await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup(kb)); return
+                enabled=ch.get("auto_invite_enabled", True) is not False
+                status="✅ Enabled" if enabled else "❌ Disabled"
+                title=ch.get("title","Chat")
+                lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
+                kb.append([
+                    InlineKeyboardButton(
+                        f"{'✅' if enabled else '❌'} Auto Invite — {title[:16]}",
+                        callback_data=f"a_channel_autoinvite_{ch['chat_id']}",
+                    )
+                ])
+                kb.append([
+                    InlineKeyboardButton(
+                        f"🗑 Remove — {title[:16]}",
+                        callback_data=f"a_channel_del_{ch['chat_id']}",
+                    )
+                ])
+            kb.append([InlineKeyboardButton("⬅ Back",callback_data="a_channels")])
+            await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup(kb))
+            return
+        if a.startswith("a_channel_autoinvite_"):
+            chat_id=int(a.replace("a_channel_autoinvite_","",1))
+            channels=await get_channels(owner)
+            channel=next((item for item in channels if int(item.get("chat_id"))==chat_id),None)
+            if not channel:
+                await q.answer("Channel or group not found.",show_alert=True)
+                return
+            current=channel.get("auto_invite_enabled",True) is not False
+            await set_channel_auto_invite(owner,chat_id,not current)
+            channels=await get_channels(owner)
+            lines=[
+                "📋 Channels / Groups\n",
+                "Choose which connected chats should receive automatic invite links after successful automatic payment verification.\n",
+                "✅ Enabled: invite link will be sent\n❌ Disabled: invite link will be skipped",
+            ]
+            kb=[]
+            for ch in channels:
+                enabled=ch.get("auto_invite_enabled",True) is not False
+                status="✅ Enabled" if enabled else "❌ Disabled"
+                title=ch.get("title","Chat")
+                lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
+                kb.append([InlineKeyboardButton(f"{'✅' if enabled else '❌'} Auto Invite — {title[:16]}",callback_data=f"a_channel_autoinvite_{ch['chat_id']}")])
+                kb.append([InlineKeyboardButton(f"🗑 Remove — {title[:16]}",callback_data=f"a_channel_del_{ch['chat_id']}")])
+            kb.append([InlineKeyboardButton("⬅ Back",callback_data="a_channels")])
+            await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup(kb))
+            return
         if a=="a_channel_resend":
             channels=await get_channels(owner)
             if not channels:
@@ -4198,9 +4247,23 @@ class SellerBotManager:
 
         bot=running.application.bot
         timezone_name = await self.seller_timezone(int(owner_id))
-        channels=await get_channels(int(owner_id))
-        if not channels:
+        connected_channels=await get_channels(int(owner_id))
+        if not connected_channels:
             return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
+
+        # Existing channel documents default to enabled so current sellers keep
+        # their previous behaviour until they explicitly disable a destination.
+        channels=[
+            channel for channel in connected_channels
+            if channel.get("auto_invite_enabled",True) is not False
+        ]
+        if not channels:
+            return {
+                "sent":0,
+                "already_member":0,
+                "failed":0,
+                "error":"Automatic invite delivery is disabled for every connected channel/group",
+            }
 
         links=[]
         already_member=0
