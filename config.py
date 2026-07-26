@@ -108,16 +108,6 @@ REMINDER_BEFORE_EXPIRY_DAYS = int(
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 10000))
 
-DASHBOARD_USERNAME = os.getenv(
-    "DASHBOARD_USERNAME",
-    "admin"
-)
-
-DASHBOARD_PASSWORD = os.getenv(
-    "DASHBOARD_PASSWORD",
-    "admin"
-)
-
 SECRET_KEY = os.getenv(
     "SECRET_KEY",
     "CHANGE_ME"
@@ -170,3 +160,23 @@ if missing:
     raise RuntimeError(
         f"Missing environment variables: {', '.join(missing)}"
     )
+
+
+def validate_runtime_config(*, strict_security: bool = True) -> None:
+    """Validate startup settings after logging has been initialized."""
+    problems: list[str] = []
+
+    if not BOT_TOKEN:
+        problems.append("BOT_TOKEN is missing")
+    elif ":" not in BOT_TOKEN:
+        problems.append("BOT_TOKEN format is invalid")
+
+    if not MONGO_URI:
+        problems.append("MONGO_URI is missing")
+
+    if strict_security:
+        if SECRET_KEY in {"", "CHANGE_ME"}:
+            problems.append("SECRET_KEY must be changed from its default value")
+
+    if problems:
+        raise RuntimeError("Invalid startup configuration: " + "; ".join(problems))

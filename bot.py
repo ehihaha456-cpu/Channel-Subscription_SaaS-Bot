@@ -6,7 +6,7 @@ from typing import Any
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
 
-from config import ADMIN_IDS, BOT_TOKEN
+from config import ADMIN_IDS, BOT_TOKEN, validate_runtime_config
 from database.admins import initialize_admins
 from database.deleting_messages import initialize_deleting_message_indexes
 from database.broadcast import initialize_broadcast_indexes
@@ -43,7 +43,7 @@ from handlers.subscription import subscription_callback
 from handlers.support import support_callback, support_reply_handler
 from handlers.upload_payment import payment_upload_handlers
 from keep_alive import configure_runtime, keep_alive
-from logging_config import setup_logging
+from services.logger import setup_logging
 from scheduler import (
     add_cron_job,
     add_interval_job,
@@ -61,12 +61,7 @@ Initializer = Callable[[], Awaitable[Any]]
 
 def _validate_startup_config() -> None:
     """Fail early when critical startup configuration is invalid."""
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing.")
-
-    # Telegram bot tokens normally contain a numeric bot ID and a secret part.
-    if ":" not in BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN format is invalid.")
+    validate_runtime_config(strict_security=True)
 
     if not ADMIN_IDS:
         logger.warning(
