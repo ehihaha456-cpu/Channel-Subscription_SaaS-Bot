@@ -6,6 +6,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from database.seller_bots import (
     BotOwnershipError,
@@ -24,6 +25,7 @@ from database.seller_subscriptions import (
     seller_usage,
     get_config,
     plan_limit_warning,
+    start_trial,
     subscription_history,
     choose_verified_plan_purchase,
     pending_plan_purchase,
@@ -47,6 +49,53 @@ from services.payment_gateways import create_checkout, GatewayError
 
 
 logger = logging.getLogger(__name__)
+
+
+def _trial_datetime(value) -> str:
+    if not value:
+        return "Not available"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+
+
+async def _activate_first_clone_trial(message, owner_id: int) -> bool:
+    """Activate and announce the one-time trial after the first clone connects."""
+    try:
+        assignment = await start_trial(owner_id)
+        plan, _ = await effective_plan(owner_id)
+        config = await get_config()
+    except ValueError as exc:
+        logger.info("Free trial not activated owner_id=%s reason=%s", owner_id, exc)
+        return False
+    except Exception:
+        logger.exception("Free trial activation failed owner_id=%s", owner_id)
+        return False
+
+    trial_days = int(config.get("trial_days", 7))
+    plan_name = plan.get("name") or str(assignment.get("plan_id", "Starter")).replace("_", " ").title()
+    text = (
+        "🎉 Welcome to Subscription SaaS!\n\n"
+        "Your Free Trial has been activated successfully.\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"🎁 Plan: {plan_name} (Free Trial)\n"
+        f"📅 Duration: {trial_days} Days\n"
+        f"📅 Activation Date: {_trial_datetime(assignment.get('created_at') or assignment.get('updated_at'))}\n"
+        f"⏳ Expiry Date: {_trial_datetime(assignment.get('expiry_date'))}\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "📊 Free Trial Limits\n"
+        f"• 🤖 Clone Bots: {_display_plan_limit(plan.get('bot_limit'))}\n"
+        f"• 👥 Active Subscribers: {_display_plan_limit(plan.get('active_subscriber_limit'))}\n"
+        f"• 📢 Channels/Groups: {_display_plan_limit(plan.get('channel_limit'))}\n"
+        f"• 📦 Subscription Plans: {_display_plan_limit(plan.get('plan_limit'))}\n"
+        f"• 👨‍💼 Admins: {_display_plan_limit(plan.get('admin_limit'))}\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🚀 Your Clone Bot is now ready to use.\n\n"
+        "When the free trial expires, you can upgrade to a paid plan anytime "
+        "from Profile → Buy/Upgrade Plan."
+    )
+    await message.reply_text(text)
+    return True
 
 
 async def send_seller_upgrade_plan(message, owner_id: int) -> None:
@@ -1192,6 +1241,7 @@ async def receive_seller_token(update: Update, context: ContextTypes.DEFAULT_TYP
     token = text
     owner_id = int(update.effective_user.id)
     replace_bot_id = context.user_data.get("replace_clone_bot_id")
+    first_clone_connection = (await count_owner_bots(owner_id)) == 0 and not replace_bot_id
     try:
         temp = Bot(token=token)
         me = await temp.get_me()
@@ -1262,6 +1312,8 @@ async def receive_seller_token(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ Clone bot connected: @{username}\nRuntime: running",
             reply_markup=selected_bot_markup(record),
         )
+        if first_clone_connection:
+            await _activate_first_clone_trial(update.effective_message, owner_id)
         await _notify_owner_clone_bot_added(
             context=context,
             seller_user=update.effective_user,
