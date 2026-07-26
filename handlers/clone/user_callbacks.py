@@ -1,9 +1,17 @@
-"""Compatibility facade for clone-bot user callbacks.
+"""Clone-bot end-user callback router."""
 
-Public import path is intentionally preserved while implementation is migrated
-feature-by-feature into ``handlers.clone.user_features``.
-"""
+from handlers.common.clone_context import *
+from handlers.clone.user import navigation, payments, profile, referral, support
 
-from handlers.clone.user_features.legacy_callbacks import CloneUserCallbacksMixin
+_USER_HANDLERS = (navigation, payments, profile, referral, support)
 
-__all__ = ["CloneUserCallbacksMixin"]
+class CloneUserCallbacksMixin:
+    async def child_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        await q.answer()
+        owner = self.owner(context)
+        action = q.data
+        for handler in _USER_HANDLERS:
+            if await handler.handle(self, update, context, q, owner, action):
+                return
+        await q.answer("Button action not found", show_alert=True)
