@@ -4,7 +4,7 @@ The implementation is split into focused feature mixins while preserving the
 public import path: ``from services.bot_manager import bot_manager``.
 """
 
-from services.bot_manager_shared import *
+from handlers.common.clone_context import *
 from handlers.clone.menus import CloneMenusMixin
 from handlers.clone.live_support_ui import CloneLiveSupportUIMixin
 from handlers.clone.referral_unlock_ui import CloneReferralUnlockUIMixin
