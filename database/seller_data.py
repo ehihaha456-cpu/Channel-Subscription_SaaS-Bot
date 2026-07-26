@@ -86,9 +86,33 @@ async def delete_plan(owner_id,plan_id): return (await c(PLANS).delete_one({"own
 
 async def add_channel(owner_id,chat_id,title,chat_type):
     now=datetime.now(timezone.utc)
-    await c(CHANNELS).update_one({"owner_id":owner_id,"chat_id":int(chat_id)},{"$set":{"title":title,"chat_type":chat_type,"active":True,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"chat_id":int(chat_id),"created_at":now}},upsert=True)
+    await c(CHANNELS).update_one(
+        {"owner_id":owner_id,"chat_id":int(chat_id)},
+        {
+            "$set":{"title":title,"chat_type":chat_type,"active":True,"updated_at":now},
+            "$setOnInsert":{
+                "owner_id":owner_id,
+                "chat_id":int(chat_id),
+                "auto_invite_enabled":True,
+                "created_at":now,
+            },
+        },
+        upsert=True,
+    )
     return await c(CHANNELS).find_one({"owner_id":owner_id,"chat_id":int(chat_id)})
-async def get_channels(owner_id): return await c(CHANNELS).find({"owner_id":owner_id,"active":True}).to_list(length=100)
+
+
+async def get_channels(owner_id):
+    return await c(CHANNELS).find({"owner_id":owner_id,"active":True}).to_list(length=100)
+
+
+async def set_channel_auto_invite(owner_id:int, chat_id:int, enabled:bool):
+    """Enable or disable automatic post-verification invite delivery for one chat."""
+    result=await c(CHANNELS).update_one(
+        {"owner_id":int(owner_id),"chat_id":int(chat_id),"active":True},
+        {"$set":{"auto_invite_enabled":bool(enabled),"updated_at":datetime.now(timezone.utc)}},
+    )
+    return result.matched_count>0
 
 
 async def save_owner_access_invite_link(owner_id:int, chat_id:int, invite_link:str):
