@@ -1736,7 +1736,7 @@ class SellerBotManager:
                 lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
                 kb.append([
                     InlineKeyboardButton(
-                        f"{'✅ Enabled' if enabled else '❌ Disabled'}",
+                        f"{'✅' if enabled else '❌'} {title[:24]}",
                         callback_data=f"a_channel_autoinvite_{ch['chat_id']}",
                     ),
                     InlineKeyboardButton(
@@ -1770,7 +1770,7 @@ class SellerBotManager:
                 lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
                 kb.append([
                     InlineKeyboardButton(
-                        f"{'✅ Enabled' if enabled else '❌ Disabled'}",
+                        f"{'✅' if enabled else '❌'} {title[:24]}",
                         callback_data=f"a_channel_autoinvite_{ch['chat_id']}",
                     ),
                     InlineKeyboardButton(
