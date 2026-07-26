@@ -28,7 +28,7 @@ from database.payment_gateways import (
     mark_valid_webhook_received,
     update_gateway_transaction,
 )
-from database.seller_data import activate_subscription, get_plan, create_automatic_payment, get_subscription
+from database.seller_data import fulfill_subscription_payment, get_plan, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
 from database.platform_features import create_invoice, audit
 
@@ -640,15 +640,20 @@ async def fulfill_transaction(tx: dict) -> None:
             and previous_expiry > now
         )
 
-        # Only the first fulfillment attempt may add validity. A webhook or
-        # recovery retry must never extend the same purchase a second time.
-        if payment.get("_created_now"):
-            expiry = await activate_subscription(
-                seller_id, tx["payer_user_id"], plan["name"],
-                plan["duration_minutes"], tx["amount"], plan.get("duration_text"),
-            )
-        else:
-            expiry = (existing_sub or {}).get("expiry_date")
+        # Apply validity with the gateway transaction as the idempotency key.
+        # This closes the crash window between saving the payment record and
+        # activating the subscription: retries can safely call this every time
+        # without adding the purchased duration twice.
+        subscription_result = await fulfill_subscription_payment(
+            seller_id,
+            tx["payer_user_id"],
+            f"gateway:{tx['transaction_id']}",
+            plan["name"],
+            plan["duration_minutes"],
+            tx["amount"],
+            plan.get("duration_text"),
+        )
+        expiry = subscription_result.get("expiry_date")
 
         invoice = await create_invoice(seller_id, tx["payer_user_id"], payment, "Seller")
         await audit("child_gateway_payment_paid", tx["payer_user_id"], seller_id, {"transaction_id": tx["transaction_id"], "gateway": tx["gateway"], "invoice_no": invoice.get("invoice_no")})
