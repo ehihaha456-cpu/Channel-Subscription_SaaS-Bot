@@ -1736,15 +1736,13 @@ class SellerBotManager:
                 lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
                 kb.append([
                     InlineKeyboardButton(
-                        f"{'✅' if enabled else '❌'} Auto Invite — {title[:16]}",
+                        f"{'✅ Enabled' if enabled else '❌ Disabled'}",
                         callback_data=f"a_channel_autoinvite_{ch['chat_id']}",
-                    )
-                ])
-                kb.append([
+                    ),
                     InlineKeyboardButton(
-                        f"🗑 Remove — {title[:16]}",
+                        "🗑 Remove",
                         callback_data=f"a_channel_del_{ch['chat_id']}",
-                    )
+                    ),
                 ])
             kb.append([InlineKeyboardButton("⬅ Back",callback_data="a_channels")])
             await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup(kb))
@@ -1770,8 +1768,16 @@ class SellerBotManager:
                 status="✅ Enabled" if enabled else "❌ Disabled"
                 title=ch.get("title","Chat")
                 lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
-                kb.append([InlineKeyboardButton(f"{'✅' if enabled else '❌'} Auto Invite — {title[:16]}",callback_data=f"a_channel_autoinvite_{ch['chat_id']}")])
-                kb.append([InlineKeyboardButton(f"🗑 Remove — {title[:16]}",callback_data=f"a_channel_del_{ch['chat_id']}")])
+                kb.append([
+                    InlineKeyboardButton(
+                        f"{'✅ Enabled' if enabled else '❌ Disabled'}",
+                        callback_data=f"a_channel_autoinvite_{ch['chat_id']}",
+                    ),
+                    InlineKeyboardButton(
+                        "🗑 Remove",
+                        callback_data=f"a_channel_del_{ch['chat_id']}",
+                    ),
+                ])
             kb.append([InlineKeyboardButton("⬅ Back",callback_data="a_channels")])
             await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup(kb))
             return
