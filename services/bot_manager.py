@@ -30,7 +30,12 @@ from database.seller_bots import (
 )
 from database.mongo import get_database
 from database.seller_referrals import seller_referral_stats
-from database.referral_unlock import get_referral_unlock, save_referral_unlock
+from database.referral_unlock import (
+    expired_referral_unlocks,
+    get_referral_unlock,
+    mark_referral_unlock_expired,
+    save_referral_unlock,
+)
 from database.live_support import (
     count_support_blocks, delete_support_topic, get_live_support_settings,
     get_private_message_link, get_support_topic, get_topic_by_thread,
@@ -508,6 +513,7 @@ class SellerBotManager:
         rows=[
             [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable",callback_data="a_referral_unlock_toggle")],
             [InlineKeyboardButton(f"👥 Required Referrals: {required}",callback_data="a_referral_unlock_required")],
+            [InlineKeyboardButton(f"📅 Access Duration: {int(settings.get('referral_unlock_duration_days',30) or 30)} Days",callback_data="a_referral_unlock_duration")],
             [InlineKeyboardButton(f"📢 Destination: {target_title}",callback_data="a_referral_unlock_destination")],
         ]
         rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_settings")])
@@ -1444,6 +1450,7 @@ class SellerBotManager:
             required=max(1,int(settings.get("referral_unlock_required",3) or 3))
             target_chat_id=settings.get("referral_unlock_target_chat_id")
             target_title=settings.get("referral_unlock_target_title") or "Private Group"
+            duration_days=max(1,int(settings.get("referral_unlock_duration_days",30) or 30))
             successful=await count_successful_referrals(owner,q.from_user.id)
             progress=min(successful,required)
             me=await context.bot.get_me()
@@ -1478,10 +1485,11 @@ class SellerBotManager:
                 try:
                     invite=await context.bot.create_chat_invite_link(
                         chat_id=int(target_chat_id), member_limit=1,
+                        expire_date=datetime.now(timezone.utc)+timedelta(days=duration_days),
                         name=f"Referral unlock {q.from_user.id}",
                     )
                     invite_link=invite.invite_link
-                    await save_referral_unlock(owner,q.from_user.id,int(target_chat_id),invite_link)
+                    await save_referral_unlock(owner,q.from_user.id,int(target_chat_id),invite_link,duration_days)
                 except Exception:
                     logger.exception("Referral unlock invite failed owner=%s user=%s",owner,q.from_user.id)
                     await self.safe_query_message(
@@ -2788,17 +2796,20 @@ class SellerBotManager:
             enabled=bool(settings.get("referral_unlock_enabled",False))
             required=int(settings.get("referral_unlock_required",3) or 3)
             target=settings.get("referral_unlock_target_title") or "Not selected"
+            duration_days=max(1,int(settings.get("referral_unlock_duration_days",30) or 30))
             text=(
                 "🔓 Referral Unlock Setup\n\n"
                 "This button lets users unlock a selected private group or channel after completing the required successful referrals.\n\n"
                 f"Status: {'Enabled ✅' if enabled else 'Disabled ❌'}\n"
                 f"Required successful referrals: {required}\n"
+                f"Access duration: {duration_days} day(s)\n"
                 f"Destination: {target}\n\n"
                 "Setup steps:\n"
                 "1. Select the required referral count.\n"
-                "2. Select a connected group or channel.\n"
-                "3. Enable Referral Unlock.\n"
-                "4. Add feature:referral_unlock from any supported button editor.\n\n"
+                "2. Set how many days access will remain active.\n"
+                "3. Select a connected group or channel.\n"
+                "4. Enable Referral Unlock.\n"
+                "5. Add feature:referral_unlock from any supported button editor.\n\n"
                 "Supported editors:\n"
                 "• Welcome Message buttons\n"
                 "• Live Support Template buttons\n"
@@ -2822,6 +2833,15 @@ class SellerBotManager:
                 "Send a whole number from 1 to 100.\n\n"
                 "Example: 3\n\n"
                 "Only successful referrals are counted. Opening or sharing the link alone does not increase progress.",
+                reply_markup=self.back("a_referral_unlock"),
+            ); return
+        if a=="a_referral_unlock_duration":
+            context.user_data.clear(); context.user_data["wait_referral_unlock_duration"]=True
+            await q.edit_message_text(
+                "📅 Set Access Duration\n\n"
+                "Send the number of days the unlocked group or channel access should remain active.\n\n"
+                "Allowed range: 1 to 3650 days\n"
+                "Example: 30",
                 reply_markup=self.back("a_referral_unlock"),
             ); return
         if a=="a_referral_unlock_destination":
@@ -3606,6 +3626,16 @@ class SellerBotManager:
                     reply_markup=self.settings_menu(),
                 )
                 return
+            if context.user_data.get("wait_referral_unlock_duration"):
+                try:
+                    duration_days=int((message.text or "").strip())
+                except (TypeError,ValueError):
+                    duration_days=0
+                if duration_days < 1 or duration_days > 3650:
+                    await message.reply_text("❌ Send a whole number from 1 to 3650.",reply_markup=self.back("a_referral_unlock")); return
+                await set_seller_setting(owner,"referral_unlock_duration_days",duration_days)
+                context.user_data.clear()
+                await message.reply_text(f"✅ Access duration set to {duration_days} day(s).",reply_markup=self.back("a_referral_unlock")); return
             if context.user_data.get("wait_referral_unlock_required"):
                 try:
                     required=int((message.text or "").strip())
@@ -4220,6 +4250,30 @@ class SellerBotManager:
 
     async def expiry_job(self,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
+
+        for unlock in await expired_referral_unlocks(owner):
+            uid=int(unlock.get("user_id"))
+            chat_id=int(unlock.get("chat_id"))
+            invite_link=unlock.get("invite_link")
+            if invite_link:
+                try:
+                    await context.bot.revoke_chat_invite_link(chat_id,invite_link)
+                except Exception:
+                    pass
+            try:
+                await context.bot.ban_chat_member(chat_id,uid)
+                await context.bot.unban_chat_member(chat_id,uid,only_if_banned=True)
+            except Exception:
+                logger.exception("Referral unlock expiry removal failed owner=%s user=%s chat=%s",owner,uid,chat_id)
+            await mark_referral_unlock_expired(owner,uid)
+            try:
+                await context.bot.send_message(
+                    uid,
+                    "⏳ Your referral-unlocked access has expired.\n\nUse the Referral Unlock button again to view the current requirements.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Referral Unlock",callback_data="c_referral_unlock")]]),
+                )
+            except Exception:
+                pass
 
         for sub in await expired_subscriptions(owner):
             uid=sub["user_id"]
