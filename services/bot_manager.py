@@ -23,7 +23,7 @@ from handlers.clone.live_support import CloneLiveSupportMixin
 from handlers.clone.broadcasting import CloneBroadcastMixin
 from handlers.clone.media_handlers import CloneMediaHandlersMixin
 from handlers.clone.channels import CloneChannelsMixin
-from handlers.clone.payments import ClonePaymentDeliveryMixin
+from handlers.clone.payment import ClonePaymentDeliveryMixin
 from handlers.clone.expiry import CloneExpiryMixin
 from handlers.clone.runtime import CloneRuntimeAppMixin
 from handlers.clone.runtime import CloneRuntimeLifecycleMixin
