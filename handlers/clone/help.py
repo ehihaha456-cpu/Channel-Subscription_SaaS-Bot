@@ -1,6 +1,6 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
-from services.bot_manager_shared import *
+from handlers.common.clone_context import *
 
 
 class CloneHelpMixin:
