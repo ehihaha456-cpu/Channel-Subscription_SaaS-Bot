@@ -184,19 +184,38 @@ async def start_trial(owner_id: int):
     config = await get_config()
     if not config.get("trial_enabled", True):
         raise ValueError("Free trial is disabled")
+
+    # Never replace an existing free/paid assignment with a trial.  A trial is
+    # granted only once, when a brand-new seller connects their first clone bot.
     existing = await get_assignment(owner_id)
-    if existing and existing.get("trial_used"):
-        raise ValueError("Free trial already used")
+    if existing:
+        if existing.get("trial_used"):
+            raise ValueError("Free trial already used")
+        raise ValueError("Seller already has a subscription assignment")
+
     now = datetime.now(timezone.utc)
-    expiry = now + timedelta(days=int(config.get("trial_days", 7)))
-    await _assignments().update_one(
-        {"owner_id": int(owner_id)},
-        {"$set": {"plan_id": config.get("trial_plan_id", "starter"),
-                  "expiry_date": expiry, "trial_used": True, "source": "trial",
-                  "updated_at": now},
-         "$setOnInsert": {"owner_id": int(owner_id), "created_at": now}},
-        upsert=True,
-    )
+    trial_days = int(config.get("trial_days", 7))
+    if trial_days <= 0:
+        raise ValueError("Free trial duration must be greater than zero")
+
+    plan_id = str(config.get("trial_plan_id", "starter"))
+    if not await get_paid_plan(plan_id):
+        raise ValueError("Free trial plan does not exist")
+
+    expiry = now + timedelta(days=trial_days)
+    document = {
+        "owner_id": int(owner_id),
+        "plan_id": plan_id,
+        "expiry_date": expiry,
+        "trial_used": True,
+        "source": "trial",
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        await _assignments().insert_one(document)
+    except DuplicateKeyError as exc:
+        raise ValueError("Free trial already assigned") from exc
     return await get_assignment(owner_id)
 
 
