@@ -506,6 +506,44 @@ class SellerBotManager:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Bot Name",callback_data="a_set_bot_name")],[InlineKeyboardButton("💬 Welcome Message",callback_data="a_welcome")],[InlineKeyboardButton("📞 Support Username",callback_data="a_set_support")],[InlineKeyboardButton("💵 Currency",callback_data="a_set_currency"),InlineKeyboardButton("🕒 Timezone",callback_data="a_set_timezone")],[InlineKeyboardButton("🔔 Reminder Days",callback_data="a_set_reminder")],[InlineKeyboardButton("🎁 Referral Reward Days",callback_data="a_set_referral_days"),InlineKeyboardButton("🔓 Referral Unlock",callback_data="a_referral_unlock")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
 
     @staticmethod
+    def referral_unlock_text(settings):
+        enabled=bool(settings.get("referral_unlock_enabled",False))
+        required=int(settings.get("referral_unlock_required",3) or 3)
+        target=settings.get("referral_unlock_target_title") or "Not selected"
+        duration_days=max(1,int(settings.get("referral_unlock_duration_days",30) or 30))
+        count_mode=settings.get("referral_unlock_count_mode","subscription")
+        count_mode_label=(
+            "New user starts the bot"
+            if count_mode == "start"
+            else "Referred user completes a subscription"
+        )
+        return (
+            "🔓 Referral Unlock Setup\n\n"
+            "This button lets users unlock a selected private group or channel after completing the required referrals.\n\n"
+            f"Status: {'Enabled ✅' if enabled else 'Disabled ❌'}\n"
+            f"Required referrals: {required}\n"
+            f"Count condition: {count_mode_label}\n"
+            f"Access duration: {duration_days} day(s)\n"
+            f"Destination: {target}\n\n"
+            "Setup steps:\n"
+            "1. Select the required referral count.\n"
+            "2. Choose when a referral should count.\n"
+            "3. Set how many days access will remain active.\n"
+            "4. Select a connected group or channel.\n"
+            "5. Enable Referral Unlock.\n"
+            "6. Add feature:referral_unlock from any supported button editor.\n\n"
+            "Count options:\n"
+            "• New User Starts: counts after a new referred user starts the bot.\n"
+            "• User Subscribes: counts only after the referred user completes a subscription.\n\n"
+            "Supported editors:\n"
+            "• Welcome Message buttons\n"
+            "• Live Support Template buttons\n"
+            "• Auto Reply buttons\n\n"
+            "Button format:\n"
+            "Unlock Access - feature:referral_unlock"
+        )
+
+    @staticmethod
     def referral_unlock_menu(settings, channels):
         enabled=bool(settings.get("referral_unlock_enabled",False))
         required=int(settings.get("referral_unlock_required",3) or 3)
@@ -513,6 +551,12 @@ class SellerBotManager:
         rows=[
             [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable",callback_data="a_referral_unlock_toggle")],
             [InlineKeyboardButton(f"👥 Required Referrals: {required}",callback_data="a_referral_unlock_required")],
+            [InlineKeyboardButton(
+                "👤 Count When: New User Starts"
+                if settings.get("referral_unlock_count_mode", "subscription") == "start"
+                else "💳 Count When: User Subscribes",
+                callback_data="a_referral_unlock_count_mode",
+            )],
             [InlineKeyboardButton(f"📅 Access Duration: {int(settings.get('referral_unlock_duration_days',30) or 30)} Days",callback_data="a_referral_unlock_duration")],
             [InlineKeyboardButton(f"📢 Destination: {target_title}",callback_data="a_referral_unlock_destination")],
         ]
@@ -1451,8 +1495,13 @@ class SellerBotManager:
             target_chat_id=settings.get("referral_unlock_target_chat_id")
             target_title=settings.get("referral_unlock_target_title") or "Private Group"
             duration_days=max(1,int(settings.get("referral_unlock_duration_days",30) or 30))
-            successful=await count_successful_referrals(owner,q.from_user.id)
-            progress=min(successful,required)
+            count_mode=settings.get("referral_unlock_count_mode","subscription")
+            counted=(
+                await count_all_referrals(owner,q.from_user.id)
+                if count_mode == "start"
+                else await count_successful_referrals(owner,q.from_user.id)
+            )
+            progress=min(counted,required)
             me=await context.bot.get_me()
             referral_link=f"https://t.me/{me.username}?start=ref_{q.from_user.id}"
             share_url="https://t.me/share/url?url="+referral_link+"&text=Join%20this%20bot"
@@ -1463,11 +1512,16 @@ class SellerBotManager:
                     InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back",callback_data="c_home")]]),
                 )
                 return
-            if successful < required:
+            if counted < required:
+                count_instruction=(
+                    f"Invite {required} new user(s) with your referral link.\n\n"
+                    if count_mode == "start"
+                    else f"Invite {required} user(s) who complete a subscription.\n\n"
+                )
                 text=(
                     "🔓 Unlock Private Access\n\n"
-                    f"Invite {required} successful user(s) with your referral link.\n\n"
-                    f"Progress: {progress}/{required}\n\n"
+                    + count_instruction
+                    + f"Progress: {progress}/{required}\n\n"
                     "Your unique referral link:\n"
                     f"{referral_link}\n\n"
                     "After the required referrals are completed, open this button again to receive the private invite link."
@@ -1501,7 +1555,7 @@ class SellerBotManager:
             await self.safe_query_message(
                 q,
                 "🎉 Referral Target Completed!\n\n"
-                f"Progress: {successful}/{required}\n"
+                f"Progress: {counted}/{required}\n"
                 f"Destination: {target_title}\n\n"
                 "Use your private one-time invite link below.",
                 InlineKeyboardMarkup([
@@ -2793,31 +2847,10 @@ class SellerBotManager:
         if a=="a_referral_unlock":
             settings=await get_seller_settings(owner)
             channels=await get_channels(owner)
-            enabled=bool(settings.get("referral_unlock_enabled",False))
-            required=int(settings.get("referral_unlock_required",3) or 3)
-            target=settings.get("referral_unlock_target_title") or "Not selected"
-            duration_days=max(1,int(settings.get("referral_unlock_duration_days",30) or 30))
-            text=(
-                "🔓 Referral Unlock Setup\n\n"
-                "This button lets users unlock a selected private group or channel after completing the required successful referrals.\n\n"
-                f"Status: {'Enabled ✅' if enabled else 'Disabled ❌'}\n"
-                f"Required successful referrals: {required}\n"
-                f"Access duration: {duration_days} day(s)\n"
-                f"Destination: {target}\n\n"
-                "Setup steps:\n"
-                "1. Select the required referral count.\n"
-                "2. Set how many days access will remain active.\n"
-                "3. Select a connected group or channel.\n"
-                "4. Enable Referral Unlock.\n"
-                "5. Add feature:referral_unlock from any supported button editor.\n\n"
-                "Supported editors:\n"
-                "• Welcome Message buttons\n"
-                "• Live Support Template buttons\n"
-                "• Auto Reply buttons\n\n"
-                "Button format:\n"
-                "Unlock Access - feature:referral_unlock"
-            )
-            await q.edit_message_text(text,reply_markup=self.referral_unlock_menu(settings,channels)); return
+            await q.edit_message_text(
+                self.referral_unlock_text(settings),
+                reply_markup=self.referral_unlock_menu(settings,channels),
+            ); return
         if a=="a_referral_unlock_toggle":
             settings=await get_seller_settings(owner)
             new_value=not bool(settings.get("referral_unlock_enabled",False))
@@ -2825,7 +2858,11 @@ class SellerBotManager:
                 await q.answer("Select a destination first.",show_alert=True); return
             await set_seller_setting(owner,"referral_unlock_enabled",new_value)
             settings=await get_seller_settings(owner)
-            await q.edit_message_text("✅ Referral Unlock enabled." if new_value else "✅ Referral Unlock disabled.",reply_markup=self.referral_unlock_menu(settings,await get_channels(owner))); return
+            channels=await get_channels(owner)
+            await q.edit_message_text(
+                self.referral_unlock_text(settings),
+                reply_markup=self.referral_unlock_menu(settings,channels),
+            ); return
         if a=="a_referral_unlock_required":
             context.user_data.clear(); context.user_data["wait_referral_unlock_required"]=True
             await q.edit_message_text(
@@ -2834,6 +2871,17 @@ class SellerBotManager:
                 "Example: 3\n\n"
                 "Only successful referrals are counted. Opening or sharing the link alone does not increase progress.",
                 reply_markup=self.back("a_referral_unlock"),
+            ); return
+        if a=="a_referral_unlock_count_mode":
+            settings=await get_seller_settings(owner)
+            current=settings.get("referral_unlock_count_mode","subscription")
+            new_mode="start" if current != "start" else "subscription"
+            await set_seller_setting(owner,"referral_unlock_count_mode",new_mode)
+            settings=await get_seller_settings(owner)
+            channels=await get_channels(owner)
+            await q.edit_message_text(
+                self.referral_unlock_text(settings),
+                reply_markup=self.referral_unlock_menu(settings,channels),
             ); return
         if a=="a_referral_unlock_duration":
             context.user_data.clear(); context.user_data["wait_referral_unlock_duration"]=True
@@ -2866,7 +2914,10 @@ class SellerBotManager:
             await set_seller_setting(owner,"referral_unlock_target_chat_id",chat_id)
             await set_seller_setting(owner,"referral_unlock_target_title",selected.get("title") or str(chat_id))
             settings=await get_seller_settings(owner)
-            await q.edit_message_text("✅ Unlock destination saved.",reply_markup=self.referral_unlock_menu(settings,channels)); return
+            await q.edit_message_text(
+                self.referral_unlock_text(settings),
+                reply_markup=self.referral_unlock_menu(settings,channels),
+            ); return
 
         if a=="a_seller_referral":
             data=await seller_referral_stats(owner)
@@ -3628,24 +3679,34 @@ class SellerBotManager:
                 return
             if context.user_data.get("wait_referral_unlock_duration"):
                 try:
-                    duration_days=int((message.text or "").strip())
+                    duration_days=int((update.effective_message.text or "").strip())
                 except (TypeError,ValueError):
                     duration_days=0
                 if duration_days < 1 or duration_days > 3650:
-                    await message.reply_text("❌ Send a whole number from 1 to 3650.",reply_markup=self.back("a_referral_unlock")); return
+                    await update.effective_message.reply_text("❌ Send a whole number from 1 to 3650.",reply_markup=self.back("a_referral_unlock")); return
                 await set_seller_setting(owner,"referral_unlock_duration_days",duration_days)
                 context.user_data.clear()
-                await message.reply_text(f"✅ Access duration set to {duration_days} day(s).",reply_markup=self.back("a_referral_unlock")); return
+                settings=await get_seller_settings(owner)
+                channels=await get_channels(owner)
+                await update.effective_message.reply_text(
+                    self.referral_unlock_text(settings),
+                    reply_markup=self.referral_unlock_menu(settings,channels),
+                ); return
             if context.user_data.get("wait_referral_unlock_required"):
                 try:
                     required=int((message.text or "").strip())
                     if required < 1 or required > 100:
                         raise ValueError
                 except ValueError:
-                    await message.reply_text("❌ Send a whole number from 1 to 100.",reply_markup=self.back("a_referral_unlock")); return
+                    await update.effective_message.reply_text("❌ Send a whole number from 1 to 100.",reply_markup=self.back("a_referral_unlock")); return
                 await set_seller_setting(owner,"referral_unlock_required",required)
                 context.user_data.clear()
-                await message.reply_text(f"✅ Required successful referrals set to {required}.",reply_markup=self.back("a_referral_unlock")); return
+                settings=await get_seller_settings(owner)
+                channels=await get_channels(owner)
+                await update.effective_message.reply_text(
+                    self.referral_unlock_text(settings),
+                    reply_markup=self.referral_unlock_menu(settings,channels),
+                ); return
 
             if context.user_data.get("wait_referral_days"):
                 try:
