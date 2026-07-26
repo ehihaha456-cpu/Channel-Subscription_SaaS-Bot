@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from handlers.common.editor_engine import url_buttons_header
 
 
 class CloneAdminCallbacksMixin:
@@ -415,22 +416,7 @@ class CloneAdminCallbacksMixin:
             s=await get_seller_settings(owner)
             context.user_data.clear(); context.user_data["wait_welcome_buttons"]=True
             await q.edit_message_text(
-                "🔗 Send URL, Username or Feature buttons\n\n"
-                "• URL Button:\n"
-                "Button Title - https://example.com\n\n"
-                "• Username Button:\n"
-                "Button Title - @username\n\n"
-                "• Same Row:\n"
-                "Plans - feature:plans && Join - https://example.com\n\n"
-                "• Feature Button:\n"
-                "Button Title - feature:plans\n"
-                "Button Title - feature:buy\n"
-                "Button Title - feature:profile\n"
-                "Button Title - feature:renew\n"
-                "Button Title - feature:referral\n"
-                "Button Title - feature:referral_unlock\n"
-                "Button Title - feature:support\n"
-                "Button Title - feature:home",
+                url_buttons_header(),
                 reply_markup=self.welcome_buttons_menu(bool(s.get("welcome_buttons"))),
             ); return
         if a=="a_welcome_quick": await q.edit_message_text("⚡ Choose a bot button to add",reply_markup=self.welcome_quick_menu()); return
@@ -480,22 +466,7 @@ class CloneAdminCallbacksMixin:
             s=await get_seller_settings(owner)
             context.user_data.clear(); context.user_data["wait_welcome_buttons"]=True
             await q.edit_message_text(
-                "🔗 Send URL, Username or Feature buttons\n\n"
-                "• URL Button:\n"
-                "Button Title - https://example.com\n\n"
-                "• Username Button:\n"
-                "Button Title - @username\n\n"
-                "• Same Row:\n"
-                "Plans - feature:plans && Join - https://example.com\n\n"
-                "• Feature Button:\n"
-                "Button Title - feature:plans\n"
-                "Button Title - feature:buy\n"
-                "Button Title - feature:profile\n"
-                "Button Title - feature:renew\n"
-                "Button Title - feature:referral\n"
-                "Button Title - feature:referral_unlock\n"
-                "Button Title - feature:support\n"
-                "Button Title - feature:home",
+                url_buttons_header(),
                 reply_markup=self.welcome_buttons_menu(bool(s.get("welcome_buttons"))),
             ); return
         if a=="a_welcome_see_buttons":
@@ -825,22 +796,7 @@ class CloneAdminCallbacksMixin:
             item=await get_support_auto_reply(owner,keyword) or {}
             context.user_data.clear(); context.user_data["wait_support_ar_buttons"]=keyword
             await q.edit_message_text(
-                "🔗 Send URL, Username or Feature buttons\n\n"
-                "• URL Button:\n"
-                "Button Title - https://example.com\n\n"
-                "• Username Button:\n"
-                "Button Title - @username\n\n"
-                "• Same Row:\n"
-                "Plans - feature:plans && Join - https://example.com\n\n"
-                "• Feature Button:\n"
-                "Button Title - feature:plans\n"
-                "Button Title - feature:buy\n"
-                "Button Title - feature:profile\n"
-                "Button Title - feature:renew\n"
-                "Button Title - feature:referral\n"
-                "Button Title - feature:referral_unlock\n"
-                "Button Title - feature:support\n"
-                "Button Title - feature:home",
+                url_buttons_header(),
                 reply_markup=self.support_auto_reply_buttons_menu(keyword,bool(item.get("buttons"))),
             ); return
         if a.startswith("a_support_ar_rmtext_"):
@@ -897,22 +853,7 @@ class CloneAdminCallbacksMixin:
             tpl=await get_support_template(owner,command) or {}
             context.user_data.clear(); context.user_data["wait_support_tpl_buttons"]=command
             await q.edit_message_text(
-                "🔗 Send URL, Username or Feature buttons\n\n"
-                "• URL Button:\n"
-                "Button Title - https://example.com\n\n"
-                "• Username Button:\n"
-                "Button Title - @username\n\n"
-                "• Same Row:\n"
-                "Plans - feature:plans && Join - https://example.com\n\n"
-                "• Feature Button:\n"
-                "Button Title - feature:plans\n"
-                "Button Title - feature:buy\n"
-                "Button Title - feature:profile\n"
-                "Button Title - feature:renew\n"
-                "Button Title - feature:referral\n"
-                "Button Title - feature:referral_unlock\n"
-                "Button Title - feature:support\n"
-                "Button Title - feature:home",
+                url_buttons_header(),
                 reply_markup=self.support_template_buttons_menu(command,bool(tpl.get("buttons"))),
             ); return
         if a.startswith("a_support_tpl_autodel_"):
