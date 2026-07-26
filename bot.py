@@ -241,7 +241,7 @@ async def post_shutdown(application: Application) -> None:
     logger.info("Application shutdown started.")
 
     try:
-        shutdown_scheduler()
+        await shutdown_scheduler()
     except Exception:
         logger.exception("Scheduler shutdown failed.")
 
@@ -333,21 +333,12 @@ def register_handlers(application: Application) -> None:
     )
 
 
-def _ensure_main_thread_event_loop() -> None:
-    """Create a current event loop for runtimes where none exists by default."""
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
-
 def main() -> None:
     setup_logging()
     logger.info("Starting Telegram Subscription SaaS Bot.")
 
     try:
         _validate_startup_config()
-        _ensure_main_thread_event_loop()
         keep_alive()
 
         application = build_application()
