@@ -27,8 +27,8 @@ def back(target="sub_mgmt_home"): return kb([[InlineKeyboardButton("⬅ Back", c
 
 def main_menu():
     return kb([
-        [InlineKeyboardButton("📋 Plan Manage", callback_data="sub_mgmt_plans"), InlineKeyboardButton("💳 Payment Setting", callback_data="sub_mgmt_payment")],
-        [InlineKeyboardButton("🆓 Free Plan Manage", callback_data="sub_mgmt_free"), InlineKeyboardButton("💎 Paid Plan Manage", callback_data="sub_mgmt_paid")],
+        [InlineKeyboardButton("💳 Payment Setting", callback_data="sub_mgmt_payment")],
+        [InlineKeyboardButton("💎 Plan Manage", callback_data="sub_mgmt_paid"), InlineKeyboardButton("🆓 Free Plan Manage", callback_data="sub_mgmt_free")],
         [InlineKeyboardButton("🎁 Free Trial", callback_data="sub_mgmt_trial"), InlineKeyboardButton("🧾 Pending Payments", callback_data="sub_mgmt_pending")],
         [InlineKeyboardButton("👤 Assign / Suspend Seller", callback_data="sub_mgmt_seller_control")],
         [InlineKeyboardButton("📜 Subscription History", callback_data="sub_mgmt_history"), InlineKeyboardButton("💰 Seller Revenue", callback_data="sub_mgmt_revenue")],
@@ -180,7 +180,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear(); context.user_data["sub_wait"]="free"
         await q.edit_message_text("Send: Bots | Subscribers | Channels | Plans | Admins", reply_markup=back("sub_mgmt_free")); return
     if a=="sub_mgmt_paid":
-        rows=[]; lines=["💎 Paid Plan Manage\n"]
+        rows=[]; lines=["💎 Plan Manage\n"]
         for p in cfg.get("paid_plans",[]):
             lines.append(f"• {p['name']} — ₹{p['price']:g} / {p['duration_days']}d")
             rows.append([InlineKeyboardButton(f"✏ {p['name']}",callback_data=f"sub_mgmt_paid_edit_{p['plan_id']}"),InlineKeyboardButton("🗑",callback_data=f"sub_mgmt_paid_del_{p['plan_id']}")])
