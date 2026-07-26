@@ -1,0 +1,176 @@
+"""Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
+
+from services.bot_manager_shared import *
+
+
+class CloneMenusMixin:
+    def main_menu():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Plans",callback_data="c_plans"),InlineKeyboardButton("💳 Buy",callback_data="c_buy")],
+            [InlineKeyboardButton("👤 My Profile",callback_data="c_profile"),InlineKeyboardButton("🔄 Renew",callback_data="c_renew")],
+            [InlineKeyboardButton("🎁 Referral",callback_data="c_referral"),InlineKeyboardButton("📞 Support",callback_data="c_support")],
+        ])
+
+    @staticmethod
+    def admin_menu():
+        """Compact clone-bot seller panel. Existing callbacks are preserved."""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("👤 Seller Profile", callback_data="a_seller_profile")],
+            [InlineKeyboardButton("📦 Manage Plans", callback_data="a_plans"), InlineKeyboardButton("💳 Payment Settings", callback_data="a_payment")],
+            [InlineKeyboardButton("📨 Pending Payments", callback_data="a_pending"), InlineKeyboardButton("📜 Payment History", callback_data="a_history")],
+            [InlineKeyboardButton("📢 Channels / Groups", callback_data="a_channels"), InlineKeyboardButton("⚙️ Bot Settings", callback_data="a_settings")],
+            [InlineKeyboardButton("👥 User Management", callback_data="a_users"), InlineKeyboardButton("👮 Staff Management", callback_data="a_staff")],
+            [InlineKeyboardButton("📣 Broadcast", callback_data="a_broadcast"), InlineKeyboardButton("📊 Statistics", callback_data="a_stats")],
+            [InlineKeyboardButton("🗑 Deleting Messages", callback_data="dm_home"), InlineKeyboardButton("🔒 Content Protection", callback_data="cp_home")],
+            [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support")],
+            [InlineKeyboardButton("🛡 Subscription Guard", callback_data="sg_home")],
+            [InlineKeyboardButton("🗓 Scheduled", callback_data="a_broadcast_schedule"), InlineKeyboardButton("🎟 Coupons", callback_data="a_coupons")],
+            [InlineKeyboardButton("🔁 Retry Failed", callback_data="a_retry_failed"), InlineKeyboardButton("🤝 Seller Referral", callback_data="a_seller_referral")],
+            [InlineKeyboardButton("📜 Terms & Policy", callback_data="a_terms")],
+            [InlineKeyboardButton("🆘 Help & Commands", callback_data="a_help")],
+        ])
+
+    async def admin_panel_text(self, owner_id:int, seller_user=None):
+        """Build the live summary shown above the clone-bot admin buttons."""
+        try:
+            plan, _assignment = await effective_plan(owner_id)
+            bot_record = await get_bot_by_data_owner_id(owner_id) or {}
+            settings = await get_seller_settings(owner_id)
+            db = get_database()
+            now_utc = datetime.now(timezone.utc)
+            try:
+                local_tz = ZoneInfo(settings.get("timezone") or "Asia/Kolkata")
+            except (ZoneInfoNotFoundError, ValueError):
+                local_tz = ZoneInfo("Asia/Kolkata")
+            local_now = now_utc.astimezone(local_tz)
+            local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_utc = local_start.astimezone(timezone.utc)
+
+            active_users = await db["seller_subscriptions"].count_documents({
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now_utc},
+            })
+            revenue_rows = await db["seller_payments"].aggregate([
+                {"$match": {
+                    "owner_id": owner_id,
+                    "status": "approved",
+                    "$or": [
+                        {"processed_at": {"$gte": start_utc}},
+                        {"updated_at": {"$gte": start_utc}},
+                        {"created_at": {"$gte": start_utc}},
+                    ],
+                }},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+            ]).to_list(length=1)
+            today_revenue = revenue_rows[0].get("total", 0) if revenue_rows else 0
+
+            seller_username = getattr(seller_user, "username", None)
+            seller_label = f"@{seller_username}" if seller_username else str(getattr(seller_user, "full_name", None) or owner_id)
+            clone_username = (bot_record.get("bot_username") or "Not configured").lstrip("@")
+            clone_label = f"@{clone_username}" if clone_username != "Not configured" else clone_username
+            currency = settings.get("currency") or "INR"
+            symbol = "₹" if str(currency).upper() == "INR" else f"{currency} "
+            runtime_status = str(bot_record.get("runtime_status") or "").lower()
+            online = self.is_running(owner_id) or runtime_status in {"running", "online", "started"}
+            status_text = "🟢 Online" if online else "🔴 Offline"
+
+            return (
+                "🛠 <b>ADMIN PANEL</b>\n\n"
+                f"👤 Seller: <b>{html.escape(seller_label)}</b>\n"
+                f"🤖 Clone Bot: <b>{html.escape(clone_label)}</b>\n"
+                f"💎 Plan: <b>{html.escape(str(plan.get('name', 'Free')))}</b>\n"
+                f"👥 Active Users: <b>{active_users:,}</b>\n"
+                f"💰 Today Revenue: <b>{symbol}{float(today_revenue or 0):,.2f}</b>\n"
+                f"{status_text}"
+            )
+        except Exception:
+            logger.exception("Failed to build seller admin summary owner=%s", owner_id)
+            return "🛠 <b>ADMIN PANEL</b>\n\n⚠️ Live summary is temporarily unavailable."
+
+    @staticmethod
+    def back(target="a_home"): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back",callback_data=target)]])
+
+    @staticmethod
+    def limit_keyboard(back_target="a_home"):
+        """Buttons shown when a seller reaches a clone-bot plan limit.
+
+        Seller-plan purchases are handled by the main SaaS bot. A URL button is
+        used here because callbacks from a clone bot cannot be processed by the
+        main bot. The current-plan button stays inside the clone bot and opens
+        the existing seller profile/current-plan page.
+        """
+        main_bot_username = os.getenv(
+            "MAIN_BOT_USERNAME", "Subscripti0n_Manage_bot"
+        ).strip().lstrip("@")
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "💳 Buy / Change Plan",
+                url=f"https://t.me/{main_bot_username}?start=sellerplan",
+            )],
+            [InlineKeyboardButton(
+                "📊 View Current Plan",
+                callback_data="seller_current_plan",
+            )],
+            [InlineKeyboardButton("❌ Close", callback_data=back_target)],
+        ])
+
+    @staticmethod
+    def plans_admin_menu():
+        return InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add Plan",callback_data="a_plan_add")],[InlineKeyboardButton("📋 View Plans",callback_data="a_plan_list")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
+
+    @staticmethod
+    def channels_menu():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Channel/Group",callback_data="a_channel_add")],
+            [InlineKeyboardButton("📋 Channel List",callback_data="a_channel_list")],
+            [InlineKeyboardButton(
+                "🔗 Resend Invite Links to Active Subscribers",
+                callback_data="a_channel_resend",
+            )],
+            [InlineKeyboardButton("⬅ Back",callback_data="a_home")],
+        ])
+
+    @staticmethod
+    def payment_menu():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 Automatic Payment Gateway",callback_data="a_pg_home")],
+            [InlineKeyboardButton("💵 Manual Payment",callback_data="a_manual_payment")],
+            [InlineKeyboardButton("⬅ Back",callback_data="a_home")],
+        ])
+
+    @staticmethod
+    def manual_payment_menu(manual_enabled: bool):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"{'✅' if manual_enabled else '❌'} {'Disable' if manual_enabled else 'Enable'} Manual Payment",
+                callback_data="a_manual_toggle",
+            )],
+            [InlineKeyboardButton("🏦 Set UPI ID",callback_data="a_set_upi_id")],
+            [InlineKeyboardButton("👤 Set UPI Name",callback_data="a_set_upi_name")],
+            [InlineKeyboardButton("🖼 Upload / Change QR",callback_data="a_set_qr")],
+            [InlineKeyboardButton("🗑 Remove QR",callback_data="a_remove_qr")],
+            [InlineKeyboardButton("👀 Preview Payment Details",callback_data="a_payment_preview")],
+            [InlineKeyboardButton("⬅ Back",callback_data="a_payment")],
+        ])
+
+    @staticmethod
+    def settings_menu():
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Bot Name",callback_data="a_set_bot_name")],[InlineKeyboardButton("💬 Welcome Message",callback_data="a_welcome")],[InlineKeyboardButton("📞 Support Username",callback_data="a_set_support")],[InlineKeyboardButton("💵 Currency",callback_data="a_set_currency"),InlineKeyboardButton("🕒 Timezone",callback_data="a_set_timezone")],[InlineKeyboardButton("🔔 Reminder Days",callback_data="a_set_reminder")],[InlineKeyboardButton("🎁 Referral Reward Days",callback_data="a_set_referral_days"),InlineKeyboardButton("🔓 Referral Unlock",callback_data="a_referral_unlock")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
+
+    @staticmethod
+    def staff_menu():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Promote Admin", callback_data="a_staff_add_admin"), InlineKeyboardButton("➕ Promote Moderator", callback_data="a_staff_add_moderator")],
+            [InlineKeyboardButton("📋 Staff List", callback_data="a_staff_list")],
+            [InlineKeyboardButton("⬅ Back", callback_data="a_home")],
+        ])
+
+    @staticmethod
+    def staff_item_menu(user_id:int, suspended:bool=False):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Activate" if suspended else "⏸ Suspend", callback_data=f"a_staff_status_{user_id}_{'active' if suspended else 'suspended'}")],
+            [InlineKeyboardButton("❌ Remove Staff", callback_data=f"a_staff_remove_{user_id}")],
+            [InlineKeyboardButton("⬅ Staff List", callback_data="a_staff_list")],
+        ])
+
