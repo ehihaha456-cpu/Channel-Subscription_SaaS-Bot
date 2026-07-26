@@ -39,6 +39,11 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
         "welcome_media_file_id":"",
         "welcome_buttons":[],
         "referral_reward_days":7,
+        "referral_unlock_enabled":False,
+        "referral_unlock_required":3,
+        "referral_unlock_duration_days":30,
+        "referral_unlock_target_chat_id":None,
+        "referral_unlock_target_title":"",
         "created_at":now,
         "updated_at":now,
     }
@@ -59,7 +64,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
 
 async def get_seller_settings(owner_id:int): return await c(SETTINGS).find_one({"owner_id":owner_id}) or {}
 async def set_seller_setting(owner_id:int,key:str,value):
-    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days"}
+    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title"}
     if key not in allowed: raise ValueError("Unsupported setting")
     now=datetime.now(timezone.utc)
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
