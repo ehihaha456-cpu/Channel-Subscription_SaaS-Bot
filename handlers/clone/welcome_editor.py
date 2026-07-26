@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from handlers.common.editor_engine import build_editor_keyboard, parse_editor_buttons
 
 
 class CloneWelcomeEditorMixin:
@@ -71,47 +72,11 @@ class CloneWelcomeEditorMixin:
 
     @staticmethod
     def parse_welcome_buttons(text):
-        rows=[]
-        for raw_line in text.splitlines():
-            raw_line=raw_line.strip()
-            if not raw_line: continue
-            row=[]
-            for item in raw_line.split("&&"):
-                item=item.strip()
-                if " - " not in item: raise ValueError("Use: Button title - URL")
-                title,target=[x.strip() for x in item.split(" - ",1)]
-                if not title or not target: raise ValueError("Button title and target required")
-                if target.startswith(("http://","https://","tg://")) or target.startswith("t.me/"):
-                    if target.startswith("t.me/"):
-                        target="https://"+target
-                    row.append({"text":title,"type":"url","value":target})
-                elif target.startswith("@"):
-                    username=target[1:].strip()
-                    if not username or len(username)>32 or not all(ch.isalnum() or ch=="_" for ch in username):
-                        raise ValueError("Invalid Telegram username. Example: Button title - @username")
-                    row.append({"text":title,"type":"url","value":f"https://t.me/{username}"})
-                elif target.startswith("feature:"):
-                    feature=target.split(":",1)[1].lower()
-                    allowed={"plans":"c_plans","buy":"c_buy","profile":"c_profile","renew":"c_renew","referral":"c_referral","referral_unlock":"c_referral_unlock","support":"c_support","home":"c_home"}
-                    if feature not in allowed: raise ValueError("Unknown feature button")
-                    row.append({"text":title,"type":"callback","value":allowed[feature]})
-                else:
-                    raise ValueError("Target must be URL, @username, or feature:plans/buy/profile/renew/referral/referral_unlock/support/home")
-            if row: rows.append(row)
-        if not rows: raise ValueError("No buttons found")
-        return rows
+        return parse_editor_buttons(text)
 
     @staticmethod
     def build_welcome_keyboard(rows):
-        if not rows: return None
-        keyboard=[]
-        for row in rows:
-            built=[]
-            for item in row:
-                if item.get("type")=="url": built.append(InlineKeyboardButton(item.get("text","Button"),url=item.get("value")))
-                else: built.append(InlineKeyboardButton(item.get("text","Button"),callback_data=item.get("value","c_home")))
-            if built: keyboard.append(built)
-        return InlineKeyboardMarkup(keyboard) if keyboard else None
+        return build_editor_keyboard(rows)
 
     async def send_welcome(self,message,context,settings,user):
         # Seller ka editable welcome text optional hai. Agar seller text remove
