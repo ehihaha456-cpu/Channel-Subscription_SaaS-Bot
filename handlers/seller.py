@@ -7,6 +7,16 @@ from telegram.error import InvalidToken, TelegramError
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from uuid import uuid4
+from telethon import TelegramClient
+from telethon.errors import (
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    PhoneNumberInvalidError,
+    SessionPasswordNeededError,
+    PasswordHashInvalidError,
+)
+from telethon.sessions import StringSession
 
 from database.seller_bots import (
     BotOwnershipError,
@@ -37,17 +47,19 @@ from database.seller_data import (
     get_seller_settings, set_seller_setting, stats as seller_stats,
     get_channels, add_channel, remove_channel,
     get_business_accounts, count_business_accounts, business_automation_stats,
-    disconnect_business_account,
+    disconnect_business_account, get_business_account,
+    save_business_account_session,
 )
 from database.seller_referrals import seller_referral_stats
 from database.platform_features import get_policy
 from database.mongo import get_database
 from database.sellers import get_or_create_seller, get_seller
 from utils.timezone_ui import timezone_guide, timezone_keyboard, timezone_from_key, normalize_timezone
-from config import ADMIN_IDS
+from config import ADMIN_IDS, TELEGRAM_API_ID, TELEGRAM_API_HASH
 from database.users import get_user as get_platform_user
 from database.payment_gateways import SUPPORTED_GATEWAYS, get_gateway_config, create_gateway_transaction
 from services.payment_gateways import create_checkout, GatewayError
+from utils.crypto import encrypt_secret, decrypt_secret
 
 
 logger = logging.getLogger(__name__)
@@ -316,6 +328,177 @@ def business_automation_keyboard(connected_count:int, enabled:bool):
     return InlineKeyboardMarkup(rows)
 
 
+def business_settings_keyboard(settings:dict):
+    enabled=bool(settings.get("business_automation_enabled"))
+    once=bool(settings.get("business_welcome_once",True))
+    ignore_outgoing=bool(settings.get("business_ignore_outgoing",True))
+    anti_loop=bool(settings.get("business_anti_loop",True))
+    flood=bool(settings.get("business_flood_protection",True))
+    working=bool(settings.get("business_working_hours_enabled",False))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Disable Automation" if enabled else "Enable Automation",callback_data="seller_business_toggle")],
+        [InlineKeyboardButton("Disable Welcome Once" if once else "Enable Welcome Once",callback_data="seller_business_once")],
+        [InlineKeyboardButton("Allow Own Messages" if ignore_outgoing else "Ignore Own Messages",callback_data="seller_business_ignore_outgoing")],
+        [InlineKeyboardButton("Disable Anti-loop" if anti_loop else "Enable Anti-loop",callback_data="seller_business_anti_loop")],
+        [InlineKeyboardButton("Disable Flood Protection" if flood else "Enable Flood Protection",callback_data="seller_business_flood")],
+        [InlineKeyboardButton("Disable Working Hours" if working else "Enable Working Hours",callback_data="seller_business_working_toggle")],
+        [InlineKeyboardButton("🕒 Set Working Hours",callback_data="seller_business_working_hours")],
+        [InlineKeyboardButton("⏱ Set Reply Delay",callback_data="seller_business_settings_delay")],
+        [InlineKeyboardButton("🔘 Action Button Mode",callback_data="seller_business_action_mode")],
+        [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
+    ])
+
+
+def business_settings_text(settings:dict) -> str:
+    start=str(settings.get("business_working_hours_start") or "09:00")
+    end=str(settings.get("business_working_hours_end") or "21:00")
+    tz=str(settings.get("business_working_hours_timezone") or settings.get("timezone") or "Asia/Kolkata")
+    mode=str(settings.get("business_action_button_mode") or "clone_bot")
+    return (
+        "⚙️ Business Automation Settings\n\n"
+        f"Automation: {'Enabled' if settings.get('business_automation_enabled') else 'Disabled'}\n"
+        f"Welcome Once: {'Enabled' if settings.get('business_welcome_once',True) else 'Disabled'}\n"
+        f"Ignore Own Messages: {'Enabled' if settings.get('business_ignore_outgoing',True) else 'Disabled'}\n"
+        f"Anti-loop: {'Enabled' if settings.get('business_anti_loop',True) else 'Disabled'}\n"
+        f"Flood Protection: {'Enabled' if settings.get('business_flood_protection',True) else 'Disabled'}\n"
+        f"Working Hours: {'Enabled' if settings.get('business_working_hours_enabled',False) else 'Disabled'} ({start}-{end}, {tz})\n"
+        f"Reply Delay: {int(settings.get('business_reply_delay_seconds',0) or 0)} seconds\n"
+        f"Action Buttons: {'Open Clone Bot' if mode == 'clone_bot' else 'Stay in Account Chat'}"
+    )
+
+
+def business_welcome_keyboard(settings:dict):
+    enabled=bool(settings.get("business_welcome_enabled",True))
+    has_media=bool(settings.get("business_welcome_media_file_id"))
+    button_count=sum(len(row) for row in (settings.get("business_welcome_buttons") or []))
+    rows=[
+        [InlineKeyboardButton("Disable Welcome" if enabled else "Enable Welcome",callback_data="seller_business_welcome_toggle")],
+        [InlineKeyboardButton("✏️ Set Welcome Text",callback_data="seller_business_welcome_text")],
+        [InlineKeyboardButton("🖼 Set Welcome Media",callback_data="seller_business_welcome_media")],
+    ]
+    if has_media:
+        rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data="seller_business_welcome_media_remove")])
+    rows.extend([
+        [InlineKeyboardButton("➕ Add URL Button",callback_data="seller_business_welcome_button_add")],
+        [InlineKeyboardButton(f"🗑 Clear URL Buttons ({button_count})",callback_data="seller_business_welcome_buttons_clear")],
+        [InlineKeyboardButton("👁 Preview",callback_data="seller_business_welcome_preview")],
+        [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def business_welcome_text(settings:dict) -> str:
+    buttons=sum(len(row) for row in (settings.get("business_welcome_buttons") or []))
+    return (
+        "👋 Business Welcome Message\n\n"
+        f"Status: {'Enabled' if settings.get('business_welcome_enabled',True) else 'Disabled'}\n"
+        f"Text: {'Added' if settings.get('business_welcome_message') else 'Not added'}\n"
+        f"Media: {'Added' if settings.get('business_welcome_media_file_id') else 'Not added'}\n"
+        f"URL Buttons: {buttons}\n\n"
+        "This shared welcome setup applies to every connected Telegram account."
+    )
+
+
+def business_replies_keyboard(settings:dict):
+    auto_enabled=bool(settings.get("business_auto_reply_enabled",True))
+    templates_enabled=bool(settings.get("business_templates_enabled",True))
+    template_count=len(settings.get("business_reply_templates") or [])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💬 Auto Reply ({'On' if auto_enabled else 'Off'})",callback_data="seller_business_auto_reply")],
+        [InlineKeyboardButton(f"📝 Reply Templates ({template_count})",callback_data="seller_business_templates")],
+        [InlineKeyboardButton("Disable Templates" if templates_enabled else "Enable Templates",callback_data="seller_business_templates_toggle")],
+        [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
+    ])
+
+
+def business_auto_reply_keyboard(settings:dict):
+    enabled=bool(settings.get("business_auto_reply_enabled",True))
+    has_media=bool(settings.get("business_auto_reply_media_file_id"))
+    button_count=sum(len(row) for row in (settings.get("business_auto_reply_buttons") or []))
+    rows=[
+        [InlineKeyboardButton("Disable Auto Reply" if enabled else "Enable Auto Reply",callback_data="seller_business_auto_reply_toggle")],
+        [InlineKeyboardButton("✏️ Set Reply Text",callback_data="seller_business_auto_reply_text")],
+        [InlineKeyboardButton("🖼 Set Reply Media",callback_data="seller_business_auto_reply_media")],
+    ]
+    if has_media:
+        rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data="seller_business_auto_reply_media_remove")])
+    rows.extend([
+        [InlineKeyboardButton("➕ Add URL Button",callback_data="seller_business_auto_reply_button_add")],
+        [InlineKeyboardButton(f"🗑 Clear URL Buttons ({button_count})",callback_data="seller_business_auto_reply_buttons_clear")],
+        [InlineKeyboardButton("⏱ Set Reply Delay",callback_data="seller_business_auto_reply_delay")],
+        [InlineKeyboardButton("👁 Preview",callback_data="seller_business_auto_reply_preview")],
+        [InlineKeyboardButton("⬅ Auto Reply & Templates",callback_data="seller_business_replies")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def business_auto_reply_text(settings:dict) -> str:
+    buttons=sum(len(row) for row in (settings.get("business_auto_reply_buttons") or []))
+    return (
+        "💬 Business Auto Reply\n\n"
+        f"Status: {'Enabled' if settings.get('business_auto_reply_enabled',True) else 'Disabled'}\n"
+        f"Text: {'Added' if settings.get('business_auto_reply_message') else 'Not added'}\n"
+        f"Media: {'Added' if settings.get('business_auto_reply_media_file_id') else 'Not added'}\n"
+        f"URL Buttons: {buttons}\n"
+        f"Reply Delay: {int(settings.get('business_reply_delay_seconds',0) or 0)} seconds\n\n"
+        "This shared auto reply applies to every connected Telegram account."
+    )
+
+
+def _business_templates(settings:dict) -> list:
+    return list(settings.get("business_reply_templates") or [])
+
+
+def _business_find_template(settings:dict, template_id:str):
+    for item in _business_templates(settings):
+        if str(item.get("id"))==str(template_id):
+            return item
+    return None
+
+
+def business_templates_keyboard(settings:dict):
+    rows=[]
+    for item in _business_templates(settings)[:40]:
+        title=str(item.get("name") or item.get("shortcut") or "Template")[:35]
+        rows.append([InlineKeyboardButton(f"📝 {title}",callback_data=f"seller_business_template_{item.get('id')}")])
+    rows.append([InlineKeyboardButton("➕ Add Reply Template",callback_data="seller_business_template_add")])
+    rows.append([InlineKeyboardButton("⬅ Auto Reply & Templates",callback_data="seller_business_replies")])
+    return InlineKeyboardMarkup(rows)
+
+
+def business_template_keyboard(template:dict):
+    tid=str(template.get("id"))
+    has_media=bool(template.get("media_file_id"))
+    button_count=sum(len(row) for row in (template.get("buttons") or []))
+    rows=[
+        [InlineKeyboardButton("✏️ Edit Name & Shortcut",callback_data=f"seller_business_template_meta_{tid}")],
+        [InlineKeyboardButton("✏️ Set Template Text",callback_data=f"seller_business_template_text_{tid}")],
+        [InlineKeyboardButton("🖼 Set Template Media",callback_data=f"seller_business_template_media_{tid}")],
+    ]
+    if has_media:
+        rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data=f"seller_business_template_media_remove_{tid}")])
+    rows.extend([
+        [InlineKeyboardButton("➕ Add URL Button",callback_data=f"seller_business_template_button_{tid}")],
+        [InlineKeyboardButton(f"🗑 Clear URL Buttons ({button_count})",callback_data=f"seller_business_template_buttons_clear_{tid}")],
+        [InlineKeyboardButton("👁 Preview",callback_data=f"seller_business_template_preview_{tid}")],
+        [InlineKeyboardButton("🗑 Delete Template",callback_data=f"seller_business_template_delete_{tid}")],
+        [InlineKeyboardButton("⬅ Reply Templates",callback_data="seller_business_templates")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def business_template_text(template:dict) -> str:
+    buttons=sum(len(row) for row in (template.get("buttons") or []))
+    return (
+        "📝 Reply Template\n\n"
+        f"Name: {template.get('name') or '-'}\n"
+        f"Shortcut: {template.get('shortcut') or '-'}\n"
+        f"Text: {'Added' if template.get('text') else 'Not added'}\n"
+        f"Media: {'Added' if template.get('media_file_id') else 'Not added'}\n"
+        f"URL Buttons: {buttons}"
+    )
+
+
 async def business_automation_text(owner_id:int):
     settings=await get_seller_settings(owner_id)
     connected=await count_business_accounts(owner_id)
@@ -571,6 +754,83 @@ async def selected_panel_text(owner_id: int, record, user) -> str:
         f"📢 Channels / Groups: {channels_used}/{lim(channel_limit)}\n"
         f"📦 Subscription Plans: {plans_used}/{lim(plan_limit)}"
     )
+
+
+def _business_mtproto_ready() -> bool:
+    return bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
+
+
+def _normalize_phone(value: str) -> str:
+    phone = "".join(ch for ch in str(value or "").strip() if ch.isdigit() or ch == "+")
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    if not phone.startswith("+"):
+        raise ValueError("Phone number must include the country code, for example +919876543210.")
+    if len(phone) < 8 or len(phone) > 16 or not phone[1:].isdigit():
+        raise ValueError("Invalid phone number format.")
+    return phone
+
+
+async def _business_send_code(context: ContextTypes.DEFAULT_TYPE, phone: str) -> None:
+    client = TelegramClient(StringSession(), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    await client.connect()
+    try:
+        sent = await client.send_code_request(phone)
+        context.user_data["business_auth"] = {
+            "step": "code",
+            "phone": phone,
+            "phone_code_hash": sent.phone_code_hash,
+            "session": client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def _business_complete_connection(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    client: TelegramClient,
+) -> None:
+    me = await client.get_me()
+    if not me:
+        raise RuntimeError("Telegram account details could not be loaded.")
+    encrypted_session = encrypt_secret(client.session.save())
+    await save_business_account_session(
+        int(update.effective_user.id),
+        int(me.id),
+        encrypted_session=encrypted_session,
+        phone=str(getattr(me, "phone", "") or ""),
+        username=str(getattr(me, "username", "") or ""),
+        first_name=str(getattr(me, "first_name", "") or "Telegram Account"),
+    )
+    context.user_data.pop("business_auth", None)
+    username_text = f"@{me.username}" if getattr(me, "username", None) else "Not set"
+    await update.effective_message.reply_text(
+        "✅ Telegram account connected successfully.\n\n"
+        f"Account: {getattr(me, 'first_name', None) or 'Telegram Account'}\n"
+        f"Username: {username_text}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💼 Business Automation", callback_data="seller_business")]
+        ]),
+    )
+
+
+async def _business_log_out_account(record: dict) -> None:
+    encrypted = str(record.get("encrypted_session") or "")
+    if not encrypted or not _business_mtproto_ready():
+        return
+    client = TelegramClient(
+        StringSession(decrypt_secret(encrypted)),
+        TELEGRAM_API_ID,
+        TELEGRAM_API_HASH,
+    )
+    await client.connect()
+    try:
+        if await client.is_user_authorized():
+            await client.log_out()
+    finally:
+        await client.disconnect()
 
 
 async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1102,85 +1362,320 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for index,item in enumerate(accounts,1):
                 name=item.get("first_name") or "Telegram Account"
                 username=f"@{item.get('username')}" if item.get("username") else "No username"
-                lines.append(f"{index}. {name} — {username}\n   Status: {item.get('connection_status','connected').title()}")
+                phone=item.get("phone") or "Hidden"
+                lines.append(
+                    f"{index}. {name} — {username}\n"
+                    f"   Phone: {phone}\n"
+                    f"   Status: {item.get('connection_status','connected').title()}"
+                )
         await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
         return
 
     if action == "seller_business_connect":
+        if not _business_mtproto_ready():
+            await q.edit_message_text(
+                "⚠️ Telegram Account Connection Is Not Configured\n\n"
+                "Add TELEGRAM_API_ID and TELEGRAM_API_HASH to the Render environment, "
+                "then redeploy the service. These credentials are created at Telegram's "
+                "official developer portal and are shared by the SaaS platform; sellers "
+                "do not need to create their own API credentials.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")
+                ]]),
+            )
+            return
+        context.user_data.clear()
+        context.user_data["business_auth"]={"step":"phone"}
         await q.edit_message_text(
             "🔗 Connect Telegram Account\n\n"
-            "Multi-account connection foundation is ready. The secure phone, login-code, two-step-verification and encrypted-session flow will be enabled in the next verified batch.\n\n"
-            "All accounts connected later will automatically use the same Business Automation settings.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
+            "Send the Telegram phone number with country code.\n\n"
+            "Example: +919876543210\n\n"
+            "Telegram will send a login code to that account. The authorized session is encrypted before it is stored.\n\n"
+            "Send /cancel to stop this connection process.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_connect_cancel")]]),
         )
         return
 
-    if action == "seller_business_welcome":
-        settings=await get_seller_settings(owner_id)
-        buttons=sum(len(row) for row in (settings.get("business_welcome_buttons") or []))
-        text=(
-            "👋 Business Welcome Message\n\n"
-            f"Status: {'Enabled' if settings.get('business_welcome_enabled',True) else 'Disabled'}\n"
-            f"Text: {'Added' if settings.get('business_welcome_message') else 'Not added'}\n"
-            f"Media: {'Added' if settings.get('business_welcome_media_file_id') else 'Not added'}\n"
-            f"URL Buttons: {buttons}\n\n"
-            "This editor uses shared Business Automation settings for every connected account."
-        )
-        await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
-        return
-
-    if action == "seller_business_replies":
-        await q.edit_message_text(
-            "💬 Auto Reply & Reply Templates\n\n"
-            "Auto Reply: a saved trigger from a user sends its configured text, media and URL buttons.\n\n"
-            "Reply Template: when the seller sends a saved shortcut, automation replaces it with the configured text, media and URL buttons.\n\n"
-            "One shared reply setup will apply to every connected account.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
-        )
-        return
-
-    if action == "seller_business_settings":
-        settings=await get_seller_settings(owner_id)
-        enabled=bool(settings.get("business_automation_enabled"))
-        once=bool(settings.get("business_welcome_once",True))
-        await q.edit_message_text(
-            "⚙️ Business Automation Settings\n\n"
-            f"Automation: {'Enabled' if enabled else 'Disabled'}\n"
-            f"Welcome Once: {'Enabled' if once else 'Disabled'}\n"
-            f"Reply Delay: {int(settings.get('business_reply_delay_seconds',0))} seconds",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Disable Automation" if enabled else "Enable Automation",callback_data="seller_business_toggle")],
-                [InlineKeyboardButton("Disable Welcome Once" if once else "Enable Welcome Once",callback_data="seller_business_once")],
-                [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
-            ]),
-        )
-        return
-
-    if action == "seller_business_toggle":
-        settings=await get_seller_settings(owner_id)
-        await set_seller_setting(owner_id,"business_automation_enabled",not bool(settings.get("business_automation_enabled")))
+    if action == "seller_business_connect_cancel":
+        context.user_data.pop("business_auth",None)
         text,connected,enabled=await business_automation_text(owner_id)
         await q.edit_message_text(text,reply_markup=business_automation_keyboard(connected,enabled))
         return
 
-    if action == "seller_business_once":
+    if action == "seller_business_welcome":
         settings=await get_seller_settings(owner_id)
-        await set_seller_setting(owner_id,"business_welcome_once",not bool(settings.get("business_welcome_once",True)))
-        await q.answer("Setting updated.")
+        await q.edit_message_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+        return
+
+    if action == "seller_business_welcome_toggle":
         settings=await get_seller_settings(owner_id)
-        enabled=bool(settings.get("business_automation_enabled"))
-        once=bool(settings.get("business_welcome_once",True))
+        await set_seller_setting(owner_id,"business_welcome_enabled",not bool(settings.get("business_welcome_enabled",True)))
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+        return
+
+    if action == "seller_business_welcome_text":
+        context.user_data["business_editor"]={"field":"welcome_text"}
         await q.edit_message_text(
-            "⚙️ Business Automation Settings\n\n"
-            f"Automation: {'Enabled' if enabled else 'Disabled'}\n"
-            f"Welcome Once: {'Enabled' if once else 'Disabled'}\n"
-            f"Reply Delay: {int(settings.get('business_reply_delay_seconds',0))} seconds",
+            "✏️ Send the new Business Automation welcome text.\n\nSend /cancel to stop.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_welcome")]]),
+        )
+        return
+
+    if action == "seller_business_welcome_media":
+        context.user_data["business_editor"]={"field":"welcome_media"}
+        await q.edit_message_text(
+            "🖼 Send one photo or video for the Business Automation welcome message.\n\nSend /cancel to stop.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_welcome")]]),
+        )
+        return
+
+    if action == "seller_business_welcome_media_remove":
+        await set_seller_setting(owner_id,"business_welcome_media_type","")
+        await set_seller_setting(owner_id,"business_welcome_media_file_id","")
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+        return
+
+    if action == "seller_business_welcome_button_add":
+        context.user_data["business_editor"]={"field":"welcome_button"}
+        await q.edit_message_text(
+            "➕ Send the URL button in this format:\n\nButton Name | https://example.com\n\nSend /cancel to stop.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_welcome")]]),
+        )
+        return
+
+    if action == "seller_business_welcome_buttons_clear":
+        await set_seller_setting(owner_id,"business_welcome_buttons",[])
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+        return
+
+    if action == "seller_business_welcome_preview":
+        settings=await get_seller_settings(owner_id)
+        preview_text=settings.get("business_welcome_message") or "👋 Welcome!"
+        raw_buttons=settings.get("business_welcome_buttons") or []
+        rows=[]
+        for row in raw_buttons:
+            buttons=[]
+            for item in row:
+                if isinstance(item,dict) and item.get("text") and item.get("url"):
+                    buttons.append(InlineKeyboardButton(str(item["text"]),url=str(item["url"])))
+            if buttons:
+                rows.append(buttons)
+        markup=InlineKeyboardMarkup(rows) if rows else None
+        media_type=settings.get("business_welcome_media_type")
+        file_id=settings.get("business_welcome_media_file_id")
+        if media_type=="photo" and file_id:
+            await q.message.reply_photo(file_id,caption=preview_text,reply_markup=markup)
+        elif media_type=="video" and file_id:
+            await q.message.reply_video(file_id,caption=preview_text,reply_markup=markup)
+        else:
+            await q.message.reply_text(preview_text,reply_markup=markup)
+        await q.answer("Preview sent.")
+        return
+
+    if action == "seller_business_replies":
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(
+            "💬 Auto Reply & Reply Templates\n\n"
+            "Configure one shared auto reply and reusable seller shortcuts for every connected Telegram account.",
+            reply_markup=business_replies_keyboard(settings),
+        )
+        return
+
+    if action == "seller_business_auto_reply":
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+        return
+
+    if action == "seller_business_auto_reply_toggle":
+        settings=await get_seller_settings(owner_id)
+        await set_seller_setting(owner_id,"business_auto_reply_enabled",not bool(settings.get("business_auto_reply_enabled",True)))
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+        return
+
+    if action == "seller_business_auto_reply_text":
+        context.user_data["business_editor"]={"field":"auto_reply_text"}
+        await q.edit_message_text("✏️ Send the auto reply text.\n\nSend /cancel to stop.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_auto_reply")]]))
+        return
+
+    if action == "seller_business_auto_reply_media":
+        context.user_data["business_editor"]={"field":"auto_reply_media"}
+        await q.edit_message_text("🖼 Send one photo or video for the auto reply.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_auto_reply")]]))
+        return
+
+    if action == "seller_business_auto_reply_media_remove":
+        await set_seller_setting(owner_id,"business_auto_reply_media_type","")
+        await set_seller_setting(owner_id,"business_auto_reply_media_file_id","")
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+        return
+
+    if action == "seller_business_auto_reply_button_add":
+        context.user_data["business_editor"]={"field":"auto_reply_button"}
+        await q.edit_message_text("➕ Send the URL button in this format:\nButton Name | https://example.com",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_auto_reply")]]))
+        return
+
+    if action == "seller_business_auto_reply_buttons_clear":
+        await set_seller_setting(owner_id,"business_auto_reply_buttons",[])
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+        return
+
+    if action == "seller_business_auto_reply_delay":
+        context.user_data["business_editor"]={"field":"auto_reply_delay"}
+        await q.edit_message_text("⏱ Send reply delay in seconds (0-300).",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_auto_reply")]]))
+        return
+
+    if action == "seller_business_auto_reply_preview":
+        settings=await get_seller_settings(owner_id)
+        preview_text=settings.get("business_auto_reply_message") or "Hello! Thanks for your message."
+        raw_buttons=settings.get("business_auto_reply_buttons") or []
+        rows=[[InlineKeyboardButton(str(btn.get("text") or "Open"),url=str(btn.get("url"))) for btn in row if btn.get("url")] for row in raw_buttons]
+        markup=InlineKeyboardMarkup([row for row in rows if row]) if rows else None
+        media_type=settings.get("business_auto_reply_media_type")
+        file_id=settings.get("business_auto_reply_media_file_id")
+        if media_type=="photo" and file_id:
+            await q.message.reply_photo(file_id,caption=preview_text,reply_markup=markup)
+        elif media_type=="video" and file_id:
+            await q.message.reply_video(file_id,caption=preview_text,reply_markup=markup)
+        else:
+            await q.message.reply_text(preview_text,reply_markup=markup)
+        await q.answer("Preview sent.")
+        return
+
+    if action == "seller_business_templates_toggle":
+        settings=await get_seller_settings(owner_id)
+        await set_seller_setting(owner_id,"business_templates_enabled",not bool(settings.get("business_templates_enabled",True)))
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text("💬 Auto Reply & Reply Templates",reply_markup=business_replies_keyboard(settings))
+        return
+
+    if action == "seller_business_templates":
+        settings=await get_seller_settings(owner_id)
+        templates=_business_templates(settings)
+        await q.edit_message_text(f"📝 Reply Templates\n\nTemplates: {len(templates)}\n\nSend a shortcut from a connected account to replace it with the saved template.",reply_markup=business_templates_keyboard(settings))
+        return
+
+    if action == "seller_business_template_add":
+        context.user_data["business_editor"]={"field":"template_add"}
+        await q.edit_message_text("➕ Send template details in this format:\nShortcut | Template Name\n\nExample: /price | Price Details",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_templates")]]))
+        return
+
+    if action.startswith("seller_business_template_"):
+        settings=await get_seller_settings(owner_id)
+        prefixes=("meta_","text_","media_remove_","media_","button_","buttons_clear_","preview_","delete_")
+        suffix=action[len("seller_business_template_"):]
+        operation="open"
+        tid=suffix
+        for prefix in prefixes:
+            if suffix.startswith(prefix):
+                operation=prefix[:-1]
+                tid=suffix[len(prefix):]
+                break
+        template=_business_find_template(settings,tid)
+        if not template:
+            await q.answer("Template not found.",show_alert=True)
+            return
+        if operation=="open":
+            await q.edit_message_text(business_template_text(template),reply_markup=business_template_keyboard(template))
+            return
+        if operation in {"meta","text","media","button"}:
+            context.user_data["business_editor"]={"field":f"template_{operation}","template_id":tid}
+            prompts={
+                "meta":"Send: Shortcut | Template Name",
+                "text":"Send the new template text.",
+                "media":"Send one photo or video.",
+                "button":"Send: Button Name | https://example.com",
+            }
+            await q.edit_message_text(prompts[operation],reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data=f"seller_business_template_{tid}")]]))
+            return
+        templates=_business_templates(settings)
+        if operation=="media_remove":
+            template["media_type"]=""; template["media_file_id"]=""
+        elif operation=="buttons_clear":
+            template["buttons"]=[]
+        elif operation=="delete":
+            templates=[item for item in templates if str(item.get("id"))!=str(tid)]
+            await set_seller_setting(owner_id,"business_reply_templates",templates)
+            settings=await get_seller_settings(owner_id)
+            await q.edit_message_text("✅ Reply template deleted.",reply_markup=business_templates_keyboard(settings))
+            return
+        elif operation=="preview":
+            preview_text=template.get("text") or template.get("name") or "Reply template"
+            rows=[[InlineKeyboardButton(str(btn.get("text") or "Open"),url=str(btn.get("url"))) for btn in row if btn.get("url")] for row in (template.get("buttons") or [])]
+            markup=InlineKeyboardMarkup([row for row in rows if row]) if rows else None
+            if template.get("media_type")=="photo" and template.get("media_file_id"):
+                await q.message.reply_photo(template["media_file_id"],caption=preview_text,reply_markup=markup)
+            elif template.get("media_type")=="video" and template.get("media_file_id"):
+                await q.message.reply_video(template["media_file_id"],caption=preview_text,reply_markup=markup)
+            else:
+                await q.message.reply_text(preview_text,reply_markup=markup)
+            await q.answer("Preview sent.")
+            return
+        await set_seller_setting(owner_id,"business_reply_templates",templates)
+        settings=await get_seller_settings(owner_id)
+        template=_business_find_template(settings,tid)
+        await q.edit_message_text(business_template_text(template),reply_markup=business_template_keyboard(template))
+        return
+
+    if action == "seller_business_settings":
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_settings_text(settings),reply_markup=business_settings_keyboard(settings))
+        return
+
+    if action in {"seller_business_toggle","seller_business_once","seller_business_ignore_outgoing","seller_business_anti_loop","seller_business_flood","seller_business_working_toggle"}:
+        settings=await get_seller_settings(owner_id)
+        key_map={
+            "seller_business_toggle":("business_automation_enabled",False),
+            "seller_business_once":("business_welcome_once",True),
+            "seller_business_ignore_outgoing":("business_ignore_outgoing",True),
+            "seller_business_anti_loop":("business_anti_loop",True),
+            "seller_business_flood":("business_flood_protection",True),
+            "seller_business_working_toggle":("business_working_hours_enabled",False),
+        }
+        key,default=key_map[action]
+        await set_seller_setting(owner_id,key,not bool(settings.get(key,default)))
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_settings_text(settings),reply_markup=business_settings_keyboard(settings))
+        return
+
+    if action == "seller_business_working_hours":
+        context.user_data["business_editor"]={"field":"working_hours"}
+        await q.edit_message_text(
+            "🕒 Send working hours in this format:\nHH:MM | HH:MM | Timezone\n\nExample: 09:00 | 21:00 | Asia/Kolkata",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_settings")]]),
+        )
+        return
+
+    if action == "seller_business_settings_delay":
+        context.user_data["business_editor"]={"field":"settings_delay"}
+        await q.edit_message_text(
+            "⏱ Send reply delay in seconds (0-300).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="seller_business_settings")]]),
+        )
+        return
+
+    if action == "seller_business_action_mode":
+        settings=await get_seller_settings(owner_id)
+        mode=str(settings.get("business_action_button_mode") or "clone_bot")
+        await q.edit_message_text(
+            "🔘 Action Button Mode\n\nChoose what Plans, Renew, Profile and Referral buttons should do.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Disable Automation" if enabled else "Enable Automation",callback_data="seller_business_toggle")],
-                [InlineKeyboardButton("Disable Welcome Once" if once else "Enable Welcome Once",callback_data="seller_business_once")],
-                [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
+                [InlineKeyboardButton(("✅ " if mode=="clone_bot" else "")+"Open Clone Bot",callback_data="seller_business_action_clone_bot")],
+                [InlineKeyboardButton(("✅ " if mode=="account_chat" else "")+"Stay in Account Chat",callback_data="seller_business_action_account_chat")],
+                [InlineKeyboardButton("⬅ Settings",callback_data="seller_business_settings")],
             ]),
         )
+        return
+
+    if action in {"seller_business_action_clone_bot","seller_business_action_account_chat"}:
+        mode="clone_bot" if action.endswith("clone_bot") else "account_chat"
+        await set_seller_setting(owner_id,"business_action_button_mode",mode)
+        settings=await get_seller_settings(owner_id)
+        await q.edit_message_text(business_settings_text(settings),reply_markup=business_settings_keyboard(settings))
         return
 
     if action == "seller_business_statistics":
@@ -1188,15 +1683,30 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "📊 Business Automation Statistics\n\n"
             f"Connected Accounts: {int(stats.get('accounts',0))}\n"
+            f"Conversations: {int(stats.get('conversations',0))}\n"
             f"Welcome Messages Sent: {int(stats.get('welcome_sent',0))}\n"
             f"Auto Replies Sent: {int(stats.get('auto_replies_sent',0))}\n"
-            f"Reply Templates Used: {int(stats.get('templates_used',0))}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
+            f"Reply Templates Used: {int(stats.get('templates_used',0))}\n\n"
+            f"Plans Opened: {int(stats.get('plans_opened',0))}\n"
+            f"Renew Opened: {int(stats.get('renew_opened',0))}\n"
+            f"Profile Opened: {int(stats.get('profile_opened',0))}\n"
+            f"Referral Opened: {int(stats.get('referral_opened',0))}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh",callback_data="seller_business_statistics")],[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
         )
         return
 
     if action.startswith("seller_business_disconnect_"):
         account_user_id=int(action.rsplit("_",1)[1])
+        record=await get_business_account(owner_id,account_user_id)
+        if record:
+            try:
+                await _business_log_out_account(record)
+            except Exception:
+                logger.exception(
+                    "Business account remote logout failed owner_id=%s account_user_id=%s",
+                    owner_id,
+                    account_user_id,
+                )
         removed=await disconnect_business_account(owner_id,account_user_id)
         await q.answer("Account disconnected." if removed else "Account not found.",show_alert=not removed)
         text,connected,enabled=await business_automation_text(owner_id)
@@ -1280,6 +1790,260 @@ async def receive_seller_token(update: Update, context: ContextTypes.DEFAULT_TYP
     owner_id = int(update.effective_user.id)
     text = (update.effective_message.text or "").strip()
     bot_id = int(context.user_data.get("selected_clone_bot_id") or 0)
+
+    auth = context.user_data.get("business_auth")
+    if auth:
+        step = str(auth.get("step") or "phone")
+        if text.lower() == "/cancel":
+            context.user_data.pop("business_auth", None)
+            await update.effective_message.reply_text(
+                "Connection cancelled.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💼 Business Automation", callback_data="seller_business")
+                ]]),
+            )
+            return
+
+        if not _business_mtproto_ready():
+            context.user_data.pop("business_auth", None)
+            await update.effective_message.reply_text(
+                "❌ Telegram account connection is not configured on this server."
+            )
+            return
+
+        if step == "phone":
+            try:
+                phone = _normalize_phone(text)
+                await _business_send_code(context, phone)
+                await update.effective_message.reply_text(
+                    "📩 Login code sent by Telegram.\n\n"
+                    "Send the code here. Spaces are allowed.\n"
+                    "Example: 1 2 3 4 5\n\n"
+                    "Use the Cancel button to stop.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌ Cancel", callback_data="seller_business_connect_cancel")
+                    ]]),
+                )
+            except (ValueError, PhoneNumberInvalidError) as exc:
+                await update.effective_message.reply_text(f"❌ {exc}")
+            except Exception:
+                logger.exception("Could not send business login code owner_id=%s", owner_id)
+                await update.effective_message.reply_text(
+                    "❌ Telegram could not send the login code. Check the phone number and try again later."
+                )
+            return
+
+        session_value = str(auth.get("session") or "")
+        client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.connect()
+        try:
+            if step == "code":
+                code = "".join(ch for ch in text if ch.isdigit())
+                if not code:
+                    await update.effective_message.reply_text("❌ Send the numeric Telegram login code.")
+                    return
+                try:
+                    await client.sign_in(
+                        phone=str(auth.get("phone") or ""),
+                        code=code,
+                        phone_code_hash=str(auth.get("phone_code_hash") or ""),
+                    )
+                except SessionPasswordNeededError:
+                    auth["step"] = "password"
+                    auth["session"] = client.session.save()
+                    context.user_data["business_auth"] = auth
+                    await update.effective_message.reply_text(
+                        "🔐 Two-step verification is enabled.\n\n"
+                        "Send the Telegram account password. The password is used only for this login and is not stored.",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("❌ Cancel", callback_data="seller_business_connect_cancel")
+                        ]]),
+                    )
+                    return
+                await _business_complete_connection(update, context, client=client)
+                return
+
+            if step == "password":
+                await client.sign_in(password=text)
+                await _business_complete_connection(update, context, client=client)
+                return
+        except PhoneCodeInvalidError:
+            await update.effective_message.reply_text("❌ Incorrect login code. Send the latest code again.")
+        except PhoneCodeExpiredError:
+            context.user_data["business_auth"] = {"step": "phone"}
+            await update.effective_message.reply_text(
+                "❌ Login code expired. Send the phone number again to request a new code."
+            )
+        except PasswordHashInvalidError:
+            await update.effective_message.reply_text("❌ Incorrect two-step verification password. Try again.")
+        except Exception:
+            logger.exception("Business account authorization failed owner_id=%s step=%s", owner_id, step)
+            await update.effective_message.reply_text(
+                "❌ Telegram account could not be connected. Please try again."
+            )
+        finally:
+            await client.disconnect()
+        return
+
+    editor=context.user_data.get("business_editor")
+    if editor:
+        editor_field=str(editor.get("field") or "")
+        template_id=str(editor.get("template_id") or "")
+        if text.lower()=="/cancel":
+            context.user_data.pop("business_editor",None)
+            settings=await get_seller_settings(owner_id)
+            if editor_field in {"working_hours","settings_delay"}:
+                await update.effective_message.reply_text(business_settings_text(settings),reply_markup=business_settings_keyboard(settings))
+            elif editor_field.startswith("auto_reply"):
+                await update.effective_message.reply_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+            elif editor_field.startswith("template"):
+                template=_business_find_template(settings,template_id)
+                if template:
+                    await update.effective_message.reply_text(business_template_text(template),reply_markup=business_template_keyboard(template))
+                else:
+                    await update.effective_message.reply_text("📝 Reply Templates",reply_markup=business_templates_keyboard(settings))
+            else:
+                await update.effective_message.reply_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+            return
+
+        if editor_field=="welcome_text":
+            if len(text)>4096:
+                await update.effective_message.reply_text("❌ Welcome text must be 4096 characters or less.")
+                return
+            await set_seller_setting(owner_id,"business_welcome_message",text)
+        elif editor_field=="welcome_button":
+            if "|" not in text:
+                await update.effective_message.reply_text("❌ Use this format: Button Name | https://example.com")
+                return
+            label,url=[part.strip() for part in text.split("|",1)]
+            if not label or not url.lower().startswith(("https://","http://")):
+                await update.effective_message.reply_text("❌ Enter a button name and a valid http/https URL.")
+                return
+            settings=await get_seller_settings(owner_id)
+            buttons=list(settings.get("business_welcome_buttons") or [])
+            buttons.append([{"text":label[:64],"url":url}])
+            await set_seller_setting(owner_id,"business_welcome_buttons",buttons)
+        elif editor_field=="auto_reply_text":
+            if len(text)>4096:
+                await update.effective_message.reply_text("❌ Auto reply text must be 4096 characters or less.")
+                return
+            await set_seller_setting(owner_id,"business_auto_reply_message",text)
+        elif editor_field=="auto_reply_button":
+            if "|" not in text:
+                await update.effective_message.reply_text("❌ Use this format: Button Name | https://example.com")
+                return
+            label,url=[part.strip() for part in text.split("|",1)]
+            if not label or not url.lower().startswith(("https://","http://")):
+                await update.effective_message.reply_text("❌ Enter a button name and a valid http/https URL.")
+                return
+            settings=await get_seller_settings(owner_id)
+            buttons=list(settings.get("business_auto_reply_buttons") or [])
+            buttons.append([{"text":label[:64],"url":url}])
+            await set_seller_setting(owner_id,"business_auto_reply_buttons",buttons)
+        elif editor_field in {"auto_reply_delay","settings_delay"}:
+            try:
+                delay=int(text)
+            except ValueError:
+                await update.effective_message.reply_text("❌ Send a whole number from 0 to 300.")
+                return
+            if delay<0 or delay>300:
+                await update.effective_message.reply_text("❌ Reply delay must be between 0 and 300 seconds.")
+                return
+            await set_seller_setting(owner_id,"business_reply_delay_seconds",delay)
+        elif editor_field=="working_hours":
+            parts=[part.strip() for part in text.split("|")]
+            if len(parts)!=3:
+                await update.effective_message.reply_text("❌ Use: HH:MM | HH:MM | Timezone")
+                return
+            start_time,end_time,tz_name=parts
+            try:
+                datetime.strptime(start_time,"%H:%M")
+                datetime.strptime(end_time,"%H:%M")
+                ZoneInfo(tz_name)
+            except Exception:
+                await update.effective_message.reply_text("❌ Invalid time or timezone. Example: 09:00 | 21:00 | Asia/Kolkata")
+                return
+            await set_seller_setting(owner_id,"business_working_hours_start",start_time)
+            await set_seller_setting(owner_id,"business_working_hours_end",end_time)
+            await set_seller_setting(owner_id,"business_working_hours_timezone",tz_name)
+        elif editor_field=="template_add":
+            if "|" not in text:
+                await update.effective_message.reply_text("❌ Use this format: Shortcut | Template Name")
+                return
+            shortcut,name=[part.strip() for part in text.split("|",1)]
+            if not shortcut or not name:
+                await update.effective_message.reply_text("❌ Shortcut and template name are required.")
+                return
+            settings=await get_seller_settings(owner_id)
+            templates=_business_templates(settings)
+            normalized=shortcut.lower()
+            if any(str(item.get("shortcut") or "").lower()==normalized for item in templates):
+                await update.effective_message.reply_text("❌ This shortcut already exists.")
+                return
+            template_id=uuid4().hex[:12]
+            templates.append({"id":template_id,"shortcut":shortcut[:64],"name":name[:80],"text":"","media_type":"","media_file_id":"","buttons":[]})
+            await set_seller_setting(owner_id,"business_reply_templates",templates)
+        elif editor_field in {"template_meta","template_text","template_button"}:
+            settings=await get_seller_settings(owner_id)
+            templates=_business_templates(settings)
+            template=next((item for item in templates if str(item.get("id"))==template_id),None)
+            if not template:
+                context.user_data.pop("business_editor",None)
+                await update.effective_message.reply_text("❌ Reply template not found.")
+                return
+            if editor_field=="template_meta":
+                if "|" not in text:
+                    await update.effective_message.reply_text("❌ Use this format: Shortcut | Template Name")
+                    return
+                shortcut,name=[part.strip() for part in text.split("|",1)]
+                if not shortcut or not name:
+                    await update.effective_message.reply_text("❌ Shortcut and template name are required.")
+                    return
+                normalized=shortcut.lower()
+                if any(str(item.get("id"))!=template_id and str(item.get("shortcut") or "").lower()==normalized for item in templates):
+                    await update.effective_message.reply_text("❌ This shortcut already exists.")
+                    return
+                template["shortcut"]=shortcut[:64]; template["name"]=name[:80]
+            elif editor_field=="template_text":
+                if len(text)>4096:
+                    await update.effective_message.reply_text("❌ Template text must be 4096 characters or less.")
+                    return
+                template["text"]=text
+            else:
+                if "|" not in text:
+                    await update.effective_message.reply_text("❌ Use this format: Button Name | https://example.com")
+                    return
+                label,url=[part.strip() for part in text.split("|",1)]
+                if not label or not url.lower().startswith(("https://","http://")):
+                    await update.effective_message.reply_text("❌ Enter a button name and a valid http/https URL.")
+                    return
+                buttons=list(template.get("buttons") or [])
+                buttons.append([{"text":label[:64],"url":url}])
+                template["buttons"]=buttons
+            await set_seller_setting(owner_id,"business_reply_templates",templates)
+        else:
+            await update.effective_message.reply_text("❌ Send a photo or video for this step.")
+            return
+
+        context.user_data.pop("business_editor",None)
+        settings=await get_seller_settings(owner_id)
+        if editor_field in {"working_hours","settings_delay"}:
+            await update.effective_message.reply_text("✅ Business automation settings updated.")
+            await update.effective_message.reply_text(business_settings_text(settings),reply_markup=business_settings_keyboard(settings))
+        elif editor_field.startswith("auto_reply"):
+            await update.effective_message.reply_text("✅ Business auto reply updated.")
+            await update.effective_message.reply_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+        elif editor_field.startswith("template"):
+            template=_business_find_template(settings,template_id)
+            await update.effective_message.reply_text("✅ Reply template updated.")
+            if template:
+                await update.effective_message.reply_text(business_template_text(template),reply_markup=business_template_keyboard(template))
+            else:
+                await update.effective_message.reply_text("📝 Reply Templates",reply_markup=business_templates_keyboard(settings))
+        else:
+            await update.effective_message.reply_text("✅ Business welcome updated.")
+            await update.effective_message.reply_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+        return
 
     field = context.user_data.get("seller_edit_field")
     if field:
@@ -1508,6 +2272,55 @@ async def receive_seller_token(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def receive_seller_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    editor=context.user_data.get("business_editor") or {}
+    editor_field=str(editor.get("field") or "")
+    if editor_field in {"welcome_media","auto_reply_media","template_media"}:
+        message=update.effective_message
+        media_type=""
+        file_id=""
+        if message.photo:
+            media_type="photo"
+            file_id=message.photo[-1].file_id
+        elif message.video:
+            media_type="video"
+            file_id=message.video.file_id
+        if not file_id:
+            await message.reply_text("❌ Send one photo or video.")
+            return
+        owner_id=int(update.effective_user.id)
+        if editor_field=="welcome_media":
+            await set_seller_setting(owner_id,"business_welcome_media_type",media_type)
+            await set_seller_setting(owner_id,"business_welcome_media_file_id",file_id)
+            context.user_data.pop("business_editor",None)
+            settings=await get_seller_settings(owner_id)
+            await message.reply_text("✅ Business welcome media updated.")
+            await message.reply_text(business_welcome_text(settings),reply_markup=business_welcome_keyboard(settings))
+            return
+        if editor_field=="auto_reply_media":
+            await set_seller_setting(owner_id,"business_auto_reply_media_type",media_type)
+            await set_seller_setting(owner_id,"business_auto_reply_media_file_id",file_id)
+            context.user_data.pop("business_editor",None)
+            settings=await get_seller_settings(owner_id)
+            await message.reply_text("✅ Business auto reply media updated.")
+            await message.reply_text(business_auto_reply_text(settings),reply_markup=business_auto_reply_keyboard(settings))
+            return
+        template_id=str(editor.get("template_id") or "")
+        settings=await get_seller_settings(owner_id)
+        templates=_business_templates(settings)
+        template=next((item for item in templates if str(item.get("id"))==template_id),None)
+        if not template:
+            context.user_data.pop("business_editor",None)
+            await message.reply_text("❌ Reply template not found.")
+            return
+        template["media_type"]=media_type
+        template["media_file_id"]=file_id
+        await set_seller_setting(owner_id,"business_reply_templates",templates)
+        context.user_data.pop("business_editor",None)
+        settings=await get_seller_settings(owner_id)
+        template=_business_find_template(settings,template_id)
+        await message.reply_text("✅ Reply template media updated.")
+        await message.reply_text(business_template_text(template),reply_markup=business_template_keyboard(template))
+        return
     if not context.user_data.get("seller_waiting_qr") or not update.effective_message.photo:
         return
     owner_id=int(update.effective_user.id); bot_id=int(context.user_data.get("selected_clone_bot_id") or 0)
@@ -1616,6 +2429,6 @@ def _decision_result_text(purchase: dict) -> str:
 def seller_handlers():
     return [
         CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace_\d+|pause_\d+|resume_\d+|remove_\d+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
-        MessageHandler(filters.PHOTO, receive_seller_qr),
+        MessageHandler(filters.PHOTO | filters.VIDEO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]
