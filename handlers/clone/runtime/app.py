@@ -35,6 +35,8 @@ class CloneRuntimeAppMixin:
                 ),
             )
         )
+        app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
+        app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
         app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^a_"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
