@@ -23,6 +23,10 @@ class CloneMenusMixin:
             [InlineKeyboardButton("📣 Broadcast", callback_data="a_broadcast"), InlineKeyboardButton("📊 Statistics", callback_data="a_stats")],
             [InlineKeyboardButton("🗑 Deleting Messages", callback_data="dm_home"), InlineKeyboardButton("🔒 Content Protection", callback_data="cp_home")],
             [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support")],
+            [InlineKeyboardButton(
+                "💼 Business Automation",
+                url=f"https://t.me/{MAIN_BOT_USERNAME}?start=businessautomation",
+            )],
             [InlineKeyboardButton("🛡 Subscription Guard", callback_data="sg_home")],
             [InlineKeyboardButton("🗓 Scheduled", callback_data="a_broadcast_schedule"), InlineKeyboardButton("🎟 Coupons", callback_data="a_coupons")],
             [InlineKeyboardButton("🔁 Retry Failed", callback_data="a_retry_failed"), InlineKeyboardButton("🤝 Seller Referral", callback_data="a_seller_referral")],
