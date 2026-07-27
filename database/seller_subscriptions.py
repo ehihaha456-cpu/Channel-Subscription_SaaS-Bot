@@ -25,17 +25,17 @@ DEFAULT_FREE = {
 }
 
 DEFAULT_PAID = [
-    {"plan_id": "starter", "name": "Starter", "price": 299.0, "duration_days": 30,
+    {"plan_id": "starter", "name": "Starter", "price": 299.0, "stars_price": 199, "duration_days": 30,
      "bot_limit": 3, "active_subscriber_limit": 250, "channel_limit": 3,
      "plan_limit": 10, "admin_limit": 2, "broadcast_enabled": True,
      "coupon_enabled": True, "referral_enabled": True, "analytics_enabled": True,
      "branding_enabled": True, "active": True},
-    {"plan_id": "professional", "name": "Professional", "price": 699.0, "duration_days": 30,
+    {"plan_id": "professional", "name": "Professional", "price": 699.0, "stars_price": 399, "duration_days": 30,
      "bot_limit": 10, "active_subscriber_limit": 2000, "channel_limit": 10,
      "plan_limit": 30, "admin_limit": 5, "broadcast_enabled": True,
      "coupon_enabled": True, "referral_enabled": True, "analytics_enabled": True,
      "branding_enabled": True, "active": True},
-    {"plan_id": "business", "name": "Business", "price": 1499.0, "duration_days": 30,
+    {"plan_id": "business", "name": "Business", "price": 1499.0, "stars_price": 799, "duration_days": 30,
      "bot_limit": 30, "active_subscriber_limit": 10000, "channel_limit": 30,
      "plan_limit": 100, "admin_limit": 10, "broadcast_enabled": True,
      "coupon_enabled": True, "referral_enabled": True, "analytics_enabled": True,

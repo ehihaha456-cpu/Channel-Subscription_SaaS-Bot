@@ -71,8 +71,8 @@ async def set_seller_setting(owner_id:int,key:str,value):
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
 
 
-async def create_plan(owner_id,name,duration_text,duration_minutes,price):
-    now=datetime.now(timezone.utc); doc={"owner_id":owner_id,"plan_id":uuid4().hex[:12],"name":name.strip(),"duration_text":duration_text,"duration_minutes":int(duration_minutes),"price":float(price),"active":True,"created_at":now,"updated_at":now}
+async def create_plan(owner_id,name,duration_text,duration_minutes,price,stars_price=0):
+    now=datetime.now(timezone.utc); doc={"owner_id":owner_id,"plan_id":uuid4().hex[:12],"name":name.strip(),"duration_text":duration_text,"duration_minutes":int(duration_minutes),"price":float(price),"stars_price":int(stars_price or 0),"active":True,"created_at":now,"updated_at":now}
     await c(PLANS).insert_one(doc); return doc
 async def get_plan(owner_id,plan_id): return await c(PLANS).find_one({"owner_id":owner_id,"plan_id":plan_id})
 async def get_plans(owner_id,active_only=False):

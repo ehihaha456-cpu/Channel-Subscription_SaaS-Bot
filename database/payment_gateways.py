@@ -65,6 +65,7 @@ async def get_gateway_config(scope: str, owner_id: int = 0, decrypt: bool = Fals
         "owner_id": int(owner_id),
         "default_gateway": "manual",
         "manual_enabled": True,
+        "stars_enabled": False,
         "gateways": {},
     }
     if not decrypt:
@@ -141,6 +142,7 @@ async def set_gateway_preferences(
     *,
     default_gateway: str | None = None,
     manual_enabled: bool | None = None,
+    stars_enabled: bool | None = None,
 ):
     updates = {"updated_at": datetime.now(timezone.utc)}
     if default_gateway is not None:
@@ -149,6 +151,8 @@ async def set_gateway_preferences(
         updates["default_gateway"] = default_gateway
     if manual_enabled is not None:
         updates["manual_enabled"] = bool(manual_enabled)
+    if stars_enabled is not None:
+        updates["stars_enabled"] = bool(stars_enabled)
     await _configs().update_one(
         {"scope": scope, "owner_id": int(owner_id)},
         {"$set": updates, "$setOnInsert": {"scope": scope, "owner_id": int(owner_id), "created_at": datetime.now(timezone.utc)}},
