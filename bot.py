@@ -53,6 +53,7 @@ from scheduler import (
 from scheduler_jobs.seller_subscriptions import run_seller_subscription_reminders, run_scheduled_plan_activations
 from services.bot_manager import bot_manager
 from services.broadcast_service import resume_broadcasts
+from services.business_automation_runtime import business_automation_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,14 @@ async def post_init(application: Application) -> None:
         logger.exception("Scheduler startup failed.")
         raise RuntimeError("Unable to start scheduler.") from None
 
+    await _initialize_component(
+        "business automation runtimes",
+        business_automation_runtime.start_all,
+        timeout=120,
+        attempts=2,
+        critical=False,
+    )
+
     resumed_broadcasts = await resume_broadcasts(application.bot)
     logger.info("Resumed broadcast queues=%s", resumed_broadcasts)
 
@@ -244,6 +253,11 @@ async def post_shutdown(application: Application) -> None:
         await shutdown_scheduler()
     except Exception:
         logger.exception("Scheduler shutdown failed.")
+
+    try:
+        await business_automation_runtime.shutdown()
+    except Exception:
+        logger.exception("Business Automation runtime shutdown failed.")
 
     try:
         await asyncio.wait_for(bot_manager.shutdown_all(), timeout=90)
