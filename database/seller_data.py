@@ -5,7 +5,7 @@ from database.mongo import get_database
 
 SETTINGS="seller_settings"; PLANS="seller_plans"; CHANNELS="seller_channels"; USERS="seller_users"
 PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_referrals"
-BUSINESS_ACCOUNTS="seller_business_accounts"
+BUSINESS_ACCOUNTS="seller_business_accounts"; BUSINESS_CONTACTS="seller_business_contacts"
 
 
 def c(name): return get_database()[name]
@@ -23,6 +23,7 @@ async def initialize_seller_data_indexes():
     await c(REFERRALS).create_index([("owner_id",1),("referrer_user_id",1),("rewarded",1)])
     await c(BUSINESS_ACCOUNTS).create_index([("owner_id",1),("account_user_id",1)], unique=True)
     await c(BUSINESS_ACCOUNTS).create_index([("owner_id",1),("active",1),("created_at",1)])
+    await c(BUSINESS_CONTACTS).create_index([("owner_id",1),("account_user_id",1),("peer_user_id",1)], unique=True)
 
 
 async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
@@ -259,6 +260,46 @@ async def disconnect_business_account(owner_id:int, account_user_id:int):
         },
     )
     return result.matched_count>0
+
+
+async def get_all_active_business_accounts():
+    return await c(BUSINESS_ACCOUNTS).find({
+        "active":True,
+        "encrypted_session":{"$exists":True,"$ne":""},
+    }).to_list(length=None)
+
+
+async def claim_business_welcome(
+    owner_id:int,
+    account_user_id:int,
+    peer_user_id:int,
+    *,
+    welcome_once:bool=True,
+):
+    """Atomically claim a first conversation/welcome for one private peer."""
+    now=datetime.now(timezone.utc)
+    query={
+        "owner_id":int(owner_id),
+        "account_user_id":int(account_user_id),
+        "peer_user_id":int(peer_user_id),
+    }
+    existing=await c(BUSINESS_CONTACTS).find_one(query,{"_id":1})
+    if existing:
+        await c(BUSINESS_CONTACTS).update_one(query,{"$set":{"last_message_at":now},"$inc":{"message_count":1}})
+        return not bool(welcome_once)
+    try:
+        await c(BUSINESS_CONTACTS).insert_one({
+            **query,
+            "first_message_at":now,
+            "last_message_at":now,
+            "message_count":1,
+        })
+        await increment_business_account_stat(owner_id,account_user_id,"conversations")
+        return True
+    except Exception:
+        # A concurrent message may have inserted the same unique contact.
+        await c(BUSINESS_CONTACTS).update_one(query,{"$set":{"last_message_at":now},"$inc":{"message_count":1}})
+        return not bool(welcome_once)
 
 
 async def business_automation_stats(owner_id:int):
