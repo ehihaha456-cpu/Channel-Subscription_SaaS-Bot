@@ -16,8 +16,10 @@ class CloneCommonUtilsMixin:
     @classmethod
     def parse_plan(cls,text:str):
         p=[x.strip() for x in text.split("|")]
-        if len(p)!=3: raise ValueError("Use: Plan Name | Duration | Price")
-        return p[0],p[1].lower(),cls.parse_duration(p[1]),float(p[2])
+        if len(p)!=4: raise ValueError("Use: Plan Name | Duration | Price | Stars")
+        stars=int(p[3])
+        if stars < 0 or stars > 2500: raise ValueError("Stars must be between 0 and 2500")
+        return p[0],p[1].lower(),cls.parse_duration(p[1]),float(p[2]),stars
 
     def owner(self,context): return int(context.application.bot_data["seller_owner_id"])
 

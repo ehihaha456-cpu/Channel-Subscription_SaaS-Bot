@@ -254,10 +254,10 @@ class CloneLiveSupportMixin:
                 return
             if context.user_data.get("wait_plan_add") or context.user_data.get("wait_plan_edit"):
                 try:
-                    name,dtext,dmins,price=self.parse_plan(text)
+                    name,dtext,dmins,price,stars=self.parse_plan(text)
                     pid=context.user_data.get("wait_plan_edit")
-                    if pid: await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price)
-                    else: await create_plan(owner,name,dtext,dmins,price)
+                    if pid: await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars)
+                    else: await create_plan(owner,name,dtext,dmins,price,stars)
                     context.user_data.clear(); await update.effective_message.reply_text("✅ Plan saved",reply_markup=self.plans_admin_menu())
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}")
                 return

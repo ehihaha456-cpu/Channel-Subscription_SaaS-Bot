@@ -135,6 +135,7 @@ class CloneMenusMixin:
     def payment_menu():
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 Automatic Payment Gateway",callback_data="a_pg_home")],
+            [InlineKeyboardButton("⭐ Telegram Stars",callback_data="a_stars_toggle")],
             [InlineKeyboardButton("💵 Manual Payment",callback_data="a_manual_payment")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_home")],
         ])
