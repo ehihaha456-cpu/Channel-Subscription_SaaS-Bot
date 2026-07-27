@@ -19,6 +19,11 @@ from telethon.sessions import StringSession
 
 from config import TELEGRAM_API_HASH, TELEGRAM_API_ID
 from database.seller_bots import get_bot_by_data_owner_id
+from database.business_automation import (
+    get_business_auto_reply,
+    get_business_welcome,
+    list_business_reply_templates,
+)
 from database.seller_data import (
     claim_business_welcome,
     get_business_accounts,
@@ -128,15 +133,26 @@ class BusinessAutomationRuntime:
             logger.exception("Invalid Business Automation working-hours settings")
             return True
 
-    @staticmethod
-    def _telethon_buttons(rows) -> list[list[Button]] | None:
+    async def _telethon_buttons(self, owner_id: int, rows) -> list[list[Button]] | None:
         result = []
+        bot_record = None
         for row in rows or []:
             clean = []
             for item in row or []:
-                url = str(item.get("url") or "").strip()
-                if url:
-                    clean.append(Button.url(str(item.get("text") or "Open")[:64], url))
+                value = str(item.get("value") or item.get("url") or "").strip()
+                item_type = str(item.get("type") or ("url" if item.get("url") else ""))
+                if item_type == "callback":
+                    # User accounts cannot send bot callback buttons. Convert shared
+                    # feature buttons into a Clone Bot deep link.
+                    if bot_record is None:
+                        bot_record = await get_bot_by_data_owner_id(int(owner_id))
+                    username = str((bot_record or {}).get("bot_username") or "").lstrip("@")
+                    feature = value.removeprefix("c_")
+                    if username:
+                        value = f"https://t.me/{username}?start={feature}"
+                        item_type = "url"
+                if item_type == "url" and value:
+                    clean.append(Button.url(str(item.get("text") or "Open")[:64], value))
             if clean:
                 result.append(clean)
         return result or None
@@ -171,7 +187,7 @@ class BusinessAutomationRuntime:
         media_file_id: str,
         button_rows,
     ) -> None:
-        buttons = self._telethon_buttons(button_rows)
+        buttons = await self._telethon_buttons(owner_id, button_rows)
         if media_file_id:
             media = await self._download_clone_media(owner_id, media_file_id)
             if media is not None:
@@ -189,6 +205,8 @@ class BusinessAutomationRuntime:
                 return
 
             settings = await get_seller_settings(owner_id)
+            welcome = await get_business_welcome(owner_id)
+            auto_reply = await get_business_auto_reply(owner_id)
             if not settings.get("business_automation_enabled"):
                 return
             if not self._inside_working_hours(settings):
@@ -206,35 +224,35 @@ class BusinessAutomationRuntime:
                 await asyncio.sleep(delay)
 
             welcome_sent = False
-            if settings.get("business_welcome_enabled", True) and first_contact:
-                text = str(settings.get("business_welcome_message") or "").strip()
-                media_file_id = str(settings.get("business_welcome_media_file_id") or "")
+            if welcome.get("enabled", True) and first_contact:
+                text = str(welcome.get("text") or "").strip()
+                media_file_id = str(welcome.get("media_file_id") or "")
                 if text or media_file_id:
                     await self._send_configured_message(
                         client,
                         peer_id,
                         owner_id,
                         text=text,
-                        media_type=str(settings.get("business_welcome_media_type") or ""),
+                        media_type=str(welcome.get("media_type") or ""),
                         media_file_id=media_file_id,
-                        button_rows=settings.get("business_welcome_buttons") or [],
+                        button_rows=welcome.get("buttons") or [],
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
 
             # Do not send two automatic messages on the user's first message.
-            if not welcome_sent and settings.get("business_auto_reply_enabled", True):
-                text = str(settings.get("business_auto_reply_message") or "").strip()
-                media_file_id = str(settings.get("business_auto_reply_media_file_id") or "")
+            if not welcome_sent and auto_reply.get("enabled", True):
+                text = str(auto_reply.get("text") or "").strip()
+                media_file_id = str(auto_reply.get("media_file_id") or "")
                 if text or media_file_id:
                     await self._send_configured_message(
                         client,
                         peer_id,
                         owner_id,
                         text=text,
-                        media_type=str(settings.get("business_auto_reply_media_type") or ""),
+                        media_type=str(auto_reply.get("media_type") or ""),
                         media_file_id=media_file_id,
-                        button_rows=settings.get("business_auto_reply_buttons") or [],
+                        button_rows=auto_reply.get("buttons") or [],
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
         except asyncio.CancelledError:
