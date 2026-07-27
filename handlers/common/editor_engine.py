@@ -132,3 +132,78 @@ def build_editor_keyboard(
             keyboard.append(built)
 
     return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+
+def editor_header(title: str, item: dict[str, Any], *, variables: str = "") -> str:
+    """Shared editor summary used by welcome, auto-reply, and templates."""
+    button_count = sum(len(row) for row in (item.get("buttons") or []))
+    lines = [
+        title,
+        "",
+        f"Status: {'🟢 Enabled' if item.get('enabled', True) else '🔴 Disabled'}",
+        f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}",
+        f"🖼 Media: {'✅ Added' if item.get('media_file_id') else '❌ Not added'}",
+        f"🔗 Buttons: {button_count}",
+    ]
+    if variables:
+        lines.extend(["", f"Variables: {variables}"])
+    lines.extend([
+        "",
+        "Use the options below to add, replace, preview, or remove each part.",
+    ])
+    return "\n".join(lines)
+
+
+def editor_menu_keyboard(
+    prefix: str,
+    item: dict[str, Any],
+    *,
+    back_callback: str,
+    allow_toggle: bool = True,
+    delete_callback: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Shared full editor keyboard with the same layout for every message type."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if allow_toggle:
+        rows.append([
+            InlineKeyboardButton(
+                "🔴 Disable" if item.get("enabled", True) else "🟢 Enable",
+                callback_data=f"{prefix}_toggle",
+            )
+        ])
+    rows.extend([
+        [
+            InlineKeyboardButton("📝 Text", callback_data=f"{prefix}_text"),
+            InlineKeyboardButton("🖼 Media", callback_data=f"{prefix}_media"),
+        ],
+        [InlineKeyboardButton("🔗 Buttons", callback_data=f"{prefix}_buttons")],
+        [InlineKeyboardButton("👁 Full Preview", callback_data=f"{prefix}_preview")],
+    ])
+    remove_row: list[InlineKeyboardButton] = []
+    if item.get("text"):
+        remove_row.append(InlineKeyboardButton("🗑 Text", callback_data=f"{prefix}_rmtext"))
+    if item.get("media_file_id"):
+        remove_row.append(InlineKeyboardButton("🗑 Media", callback_data=f"{prefix}_rmmedia"))
+    if item.get("buttons"):
+        remove_row.append(InlineKeyboardButton("🗑 Buttons", callback_data=f"{prefix}_rmbuttons"))
+    if remove_row:
+        rows.append(remove_row)
+    if delete_callback:
+        rows.append([InlineKeyboardButton("🗑 Delete", callback_data=delete_callback)])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_callback)])
+    return InlineKeyboardMarkup(rows)
+
+
+def editor_text_prompt(title: str, *, variables: str = "") -> str:
+    text = f"📝 {title}\n\nSend the message text. HTML formatting is supported."
+    if variables:
+        text += f"\n\nAvailable variables:\n{variables}"
+    return text + "\n\nSend /cancel to stop."
+
+
+def editor_media_prompt(title: str) -> str:
+    return (
+        f"🖼 {title}\n\n"
+        "Send a photo, video, GIF, or document. The new media replaces the current media.\n\n"
+        "Send /cancel to stop."
+    )
