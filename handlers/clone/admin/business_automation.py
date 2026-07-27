@@ -60,6 +60,39 @@ def _buttons_count(rows):
     return sum(len(row) for row in (rows or []))
 
 
+def _home_keyboard(connected: int, enabled: bool):
+    return _kb([
+        [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="ba_connect")],
+        [InlineKeyboardButton(f"📱 Connected Accounts ({connected})", callback_data="ba_accounts")],
+        [InlineKeyboardButton("👋 Welcome Message", callback_data="ba_welcome")],
+        [
+            InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
+            InlineKeyboardButton("📝 Reply Templates", callback_data="ba_templates"),
+        ],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="ba_settings")],
+        [InlineKeyboardButton("📊 Statistics", callback_data="ba_stats")],
+        [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
+    ])
+
+
+async def _home(owner: int):
+    settings = await get_seller_settings(owner)
+    connected = await count_business_accounts(owner)
+    enabled = bool(settings.get("business_automation_enabled"))
+    text = (
+        "💼 Business Automation\n\n"
+        f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
+        f"Connected Accounts: {connected}\n\n"
+        "All connected Telegram accounts use one shared configuration:\n"
+        "• Welcome message and media\n"
+        "• URL buttons\n"
+        "• Auto replies\n"
+        "• Reply templates\n"
+        "• Settings and statistics"
+    )
+    return text, _home_keyboard(connected, enabled)
+
+
 async def _editor_state(owner: int) -> tuple[dict, dict, list[dict]]:
     welcome = await get_business_welcome(owner)
     auto_reply = await get_business_auto_reply(owner)
