@@ -308,8 +308,23 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await q.answer("Account disconnected." if removed else "Account not found.", show_alert=not removed)
         text, markup = await _home(owner); await q.edit_message_text(text, reply_markup=markup); return True
 
+    # Load only the data needed by the selected section.  Previously all three
+    # editor collections were loaded for Settings and Statistics too, so one
+    # editor-storage error made every Business Automation button appear dead.
     s = await get_seller_settings(owner)
-    welcome, auto_reply, templates = await _editor_state(owner)
+
+    if action.startswith("ba_welcome"):
+        welcome = await get_business_welcome(owner)
+    else:
+        welcome = None
+    if action.startswith("ba_auto"):
+        auto_reply = await get_business_auto_reply(owner)
+    else:
+        auto_reply = None
+    if action == "ba_templates" or action.startswith("ba_tpl_"):
+        templates = await list_business_reply_templates(owner)
+    else:
+        templates = []
 
     if action == "ba_welcome":
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
