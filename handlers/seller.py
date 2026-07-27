@@ -2,9 +2,9 @@ import asyncio
 import logging
 from html import escape
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import InvalidToken, TelegramError
-from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, PreCheckoutQueryHandler, filters
+from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -29,8 +29,6 @@ from database.seller_subscriptions import (
     subscription_history,
     choose_verified_plan_purchase,
     pending_plan_purchase,
-    process_verified_plan_purchase,
-    get_paid_plan,
 )
 from services.bot_manager import bot_manager
 from services.invite_resend_lock import resend_invites_safely
@@ -38,6 +36,8 @@ from database.subscription_guard import get_active_invite, save_invite
 from database.seller_data import (
     get_seller_settings, set_seller_setting, stats as seller_stats,
     get_channels, add_channel, remove_channel,
+    get_business_accounts, count_business_accounts, business_automation_stats,
+    disconnect_business_account,
 )
 from database.seller_referrals import seller_referral_stats
 from database.platform_features import get_policy
@@ -293,11 +293,44 @@ def main_seller_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🤖 Manage My Clone Bots", callback_data="seller_bots_list")],
         [InlineKeyboardButton("➕ Create New Clone Bot", callback_data="seller_connect")],
+        [InlineKeyboardButton("💼 Business Automation", callback_data="seller_business")],
         [InlineKeyboardButton("💳 Buy / Change Plan", callback_data="seller_upgrade_plan")],
         [InlineKeyboardButton("📊 View Current Plan", callback_data="seller_current_plan")],
         [InlineKeyboardButton("📜 Plan History", callback_data="seller_plan_history")],
         [InlineKeyboardButton("🌐 Official Links", callback_data="official_links_open")],
     ])
+
+
+def business_automation_keyboard(connected_count:int, enabled:bool):
+    rows=[
+        [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="seller_business_connect")],
+        [InlineKeyboardButton(f"📱 Connected Accounts ({connected_count})", callback_data="seller_business_accounts")],
+        [InlineKeyboardButton("👋 Welcome Message", callback_data="seller_business_welcome")],
+        [InlineKeyboardButton("💬 Auto Reply & Reply Templates", callback_data="seller_business_replies")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="seller_business_settings")],
+        [InlineKeyboardButton("📊 Statistics", callback_data="seller_business_statistics")],
+    ]
+    if connected_count:
+        rows.append([InlineKeyboardButton("🔌 Disconnect Account", callback_data="seller_business_disconnect")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="main_home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def business_automation_text(owner_id:int):
+    settings=await get_seller_settings(owner_id)
+    connected=await count_business_accounts(owner_id)
+    enabled=bool(settings.get("business_automation_enabled"))
+    return (
+        "💼 Business Automation\n\n"
+        f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
+        f"Connected Accounts: {connected}\n\n"
+        "All connected Telegram accounts use one shared configuration:\n"
+        "• Same welcome message and media\n"
+        "• Same URL buttons\n"
+        "• Same auto replies\n"
+        "• Same reply templates\n"
+        "• Same settings and statistics"
+    ), connected, enabled
 
 
 def limit_keyboard():
@@ -935,7 +968,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["💎 Buy / Change Seller Plan", ""]
         current, _ = await effective_plan(owner_id)
         for p in plans:
-            lines.append(f"• {p.get('name','Plan')} — ₹{p.get('price',0):g} / ⭐{int(p.get('stars_price',0) or 0)} / {p.get('duration_days',30)} days")
+            lines.append(f"• {p.get('name','Plan')} — ₹{p.get('price',0):g} / {p.get('duration_days',30)} days")
             typ = "upgrade" if float(p.get("price", 0)) >= float(current.get("price", 0)) else "downgrade"
             rows.append([InlineKeyboardButton(f"Select {p.get('name')}", callback_data=f"seller_buy_{typ}_{p.get('plan_id')}")])
         if action == "seller_upgrade_plan_profile":
@@ -982,7 +1015,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             enabled_gateways.remove(default_gateway)
             enabled_gateways.insert(0, default_gateway)
         manual_enabled = bool(gateway_cfg.get("manual_enabled", True))
-        stars_enabled = bool(gateway_cfg.get("stars_enabled", False))
 
         rows = []
         text = ""
@@ -1006,17 +1038,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except GatewayError as exc:
                 text = f"❌ Gateway error: {exc}"
 
-        stars_price = int(plan.get("stars_price", 0) or 0)
-        if stars_enabled and stars_price > 0:
-            rows.append([InlineKeyboardButton(
-                f"⭐ Pay {stars_price} Stars",
-                callback_data=f"seller_star_{request_type}_{plan_id}",
-            )])
-            stars_line = f"⭐ Telegram Stars: {stars_price}"
-            text = f"{text}\n\n{stars_line}" if text else (
-                f"💳 Payment\n\nPlan: {plan.get('name')}\n{stars_line}"
-            )
-
         if manual_enabled:
             manual_text = (
                 f"Plan: {plan.get('name')}\nAmount: ₹{plan.get('price',0):g}\n"
@@ -1027,7 +1048,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{text}\n\n{manual_text}" if text else f"💳 Payment\n\n{manual_text}"
             rows.append([InlineKeyboardButton("📤 Upload Payment Screenshot", callback_data=f"seller_manual_{request_type}_{plan_id}")])
 
-        if not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
+        if not enabled_gateways and not manual_enabled:
             text = "⚠️ No payment method is currently available. Please contact support."
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
         kb = InlineKeyboardMarkup(rows)
@@ -1040,25 +1061,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(q.message.chat_id, cfg["payment_qr_file_id"], caption=text, reply_markup=kb)
         else:
             await q.edit_message_text(text, reply_markup=kb)
-        return
-
-    if action.startswith("seller_star_"):
-        _, _, request_type, plan_id = action.split("_", 3)
-        gateway_cfg = await get_gateway_config("owner", 0, decrypt=True)
-        plan = await get_paid_plan(plan_id)
-        stars = int((plan or {}).get("stars_price", 0) or 0)
-        if not gateway_cfg.get("stars_enabled") or not plan or stars <= 0:
-            await q.answer("Telegram Stars is unavailable for this plan.", show_alert=True)
-            return
-        await context.bot.send_invoice(
-            chat_id=owner_id,
-            title=f"{plan.get('name')} Seller Plan",
-            description=f"{int(plan.get('duration_days', 30))} day seller plan",
-            payload=f"stars:owner:{owner_id}:{request_type}:{plan_id}",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(plan.get("name", "Seller Plan"), stars)],
-        )
         return
 
     if action.startswith("seller_manual_"):
@@ -1084,6 +1086,134 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"  Date: {date_text}"
                 )
         await q.edit_message_text("\n\n".join(lines), reply_markup=seller_plan_page_keyboard())
+        return
+
+    if action == "seller_business":
+        text,connected,enabled=await business_automation_text(owner_id)
+        await q.edit_message_text(text,reply_markup=business_automation_keyboard(connected,enabled))
+        return
+
+    if action == "seller_business_accounts":
+        accounts=await get_business_accounts(owner_id)
+        lines=["📱 Connected Telegram Accounts",""]
+        if not accounts:
+            lines.append("No Telegram account is connected yet.")
+        else:
+            for index,item in enumerate(accounts,1):
+                name=item.get("first_name") or "Telegram Account"
+                username=f"@{item.get('username')}" if item.get("username") else "No username"
+                lines.append(f"{index}. {name} — {username}\n   Status: {item.get('connection_status','connected').title()}")
+        await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
+        return
+
+    if action == "seller_business_connect":
+        await q.edit_message_text(
+            "🔗 Connect Telegram Account\n\n"
+            "Multi-account connection foundation is ready. The secure phone, login-code, two-step-verification and encrypted-session flow will be enabled in the next verified batch.\n\n"
+            "All accounts connected later will automatically use the same Business Automation settings.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
+        )
+        return
+
+    if action == "seller_business_welcome":
+        settings=await get_seller_settings(owner_id)
+        buttons=sum(len(row) for row in (settings.get("business_welcome_buttons") or []))
+        text=(
+            "👋 Business Welcome Message\n\n"
+            f"Status: {'Enabled' if settings.get('business_welcome_enabled',True) else 'Disabled'}\n"
+            f"Text: {'Added' if settings.get('business_welcome_message') else 'Not added'}\n"
+            f"Media: {'Added' if settings.get('business_welcome_media_file_id') else 'Not added'}\n"
+            f"URL Buttons: {buttons}\n\n"
+            "This editor uses shared Business Automation settings for every connected account."
+        )
+        await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
+        return
+
+    if action == "seller_business_replies":
+        await q.edit_message_text(
+            "💬 Auto Reply & Reply Templates\n\n"
+            "Auto Reply: a saved trigger from a user sends its configured text, media and URL buttons.\n\n"
+            "Reply Template: when the seller sends a saved shortcut, automation replaces it with the configured text, media and URL buttons.\n\n"
+            "One shared reply setup will apply to every connected account.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
+        )
+        return
+
+    if action == "seller_business_settings":
+        settings=await get_seller_settings(owner_id)
+        enabled=bool(settings.get("business_automation_enabled"))
+        once=bool(settings.get("business_welcome_once",True))
+        await q.edit_message_text(
+            "⚙️ Business Automation Settings\n\n"
+            f"Automation: {'Enabled' if enabled else 'Disabled'}\n"
+            f"Welcome Once: {'Enabled' if once else 'Disabled'}\n"
+            f"Reply Delay: {int(settings.get('business_reply_delay_seconds',0))} seconds",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Disable Automation" if enabled else "Enable Automation",callback_data="seller_business_toggle")],
+                [InlineKeyboardButton("Disable Welcome Once" if once else "Enable Welcome Once",callback_data="seller_business_once")],
+                [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
+            ]),
+        )
+        return
+
+    if action == "seller_business_toggle":
+        settings=await get_seller_settings(owner_id)
+        await set_seller_setting(owner_id,"business_automation_enabled",not bool(settings.get("business_automation_enabled")))
+        text,connected,enabled=await business_automation_text(owner_id)
+        await q.edit_message_text(text,reply_markup=business_automation_keyboard(connected,enabled))
+        return
+
+    if action == "seller_business_once":
+        settings=await get_seller_settings(owner_id)
+        await set_seller_setting(owner_id,"business_welcome_once",not bool(settings.get("business_welcome_once",True)))
+        await q.answer("Setting updated.")
+        settings=await get_seller_settings(owner_id)
+        enabled=bool(settings.get("business_automation_enabled"))
+        once=bool(settings.get("business_welcome_once",True))
+        await q.edit_message_text(
+            "⚙️ Business Automation Settings\n\n"
+            f"Automation: {'Enabled' if enabled else 'Disabled'}\n"
+            f"Welcome Once: {'Enabled' if once else 'Disabled'}\n"
+            f"Reply Delay: {int(settings.get('business_reply_delay_seconds',0))} seconds",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Disable Automation" if enabled else "Enable Automation",callback_data="seller_business_toggle")],
+                [InlineKeyboardButton("Disable Welcome Once" if once else "Enable Welcome Once",callback_data="seller_business_once")],
+                [InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")],
+            ]),
+        )
+        return
+
+    if action == "seller_business_statistics":
+        stats=await business_automation_stats(owner_id)
+        await q.edit_message_text(
+            "📊 Business Automation Statistics\n\n"
+            f"Connected Accounts: {int(stats.get('accounts',0))}\n"
+            f"Welcome Messages Sent: {int(stats.get('welcome_sent',0))}\n"
+            f"Auto Replies Sent: {int(stats.get('auto_replies_sent',0))}\n"
+            f"Reply Templates Used: {int(stats.get('templates_used',0))}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]),
+        )
+        return
+
+    if action.startswith("seller_business_disconnect_"):
+        account_user_id=int(action.rsplit("_",1)[1])
+        removed=await disconnect_business_account(owner_id,account_user_id)
+        await q.answer("Account disconnected." if removed else "Account not found.",show_alert=not removed)
+        text,connected,enabled=await business_automation_text(owner_id)
+        await q.edit_message_text(text,reply_markup=business_automation_keyboard(connected,enabled))
+        return
+
+    if action == "seller_business_disconnect":
+        accounts=await get_business_accounts(owner_id)
+        if not accounts:
+            await q.answer("No connected account.",show_alert=True)
+            return
+        rows=[]
+        for item in accounts:
+            name=item.get("username") or item.get("first_name") or str(item.get("account_user_id"))
+            rows.append([InlineKeyboardButton(f"Disconnect {name}",callback_data=f"seller_business_disconnect_{int(item['account_user_id'])}")])
+        rows.append([InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")])
+        await q.edit_message_text("🔌 Select the Telegram account to disconnect.",reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if action == "seller_connect" or action.startswith("seller_replace_"):
@@ -1483,69 +1613,9 @@ def _decision_result_text(purchase: dict) -> str:
     )
 
 
-async def seller_stars_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    try:
-        kind, scope, owner_text, request_type, plan_id = str(query.invoice_payload or "").split(":", 4)
-        if kind != "stars" or scope != "owner" or int(owner_text) != int(query.from_user.id):
-            raise ValueError("invalid invoice")
-        cfg = await get_gateway_config("owner", 0, decrypt=True)
-        plan = await get_paid_plan(plan_id)
-        expected = int((plan or {}).get("stars_price", 0) or 0)
-        if not cfg.get("stars_enabled") or not plan or expected <= 0 or query.currency != "XTR" or query.total_amount != expected:
-            raise ValueError("plan changed")
-        await query.answer(ok=True)
-    except Exception:
-        await query.answer(ok=False, error_message="This Stars invoice is no longer valid. Reopen the payment page.")
-
-
-async def seller_stars_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    payment = update.effective_message.successful_payment
-    if not payment or payment.currency != "XTR":
-        return
-    try:
-        kind, scope, owner_text, request_type, plan_id = payment.invoice_payload.split(":", 4)
-        owner_id = int(owner_text)
-        if kind != "stars" or scope != "owner" or owner_id != int(update.effective_user.id):
-            raise ValueError("invalid payment")
-        plan = await get_paid_plan(plan_id)
-        expected = int((plan or {}).get("stars_price", 0) or 0)
-        if not plan or payment.total_amount != expected:
-            raise ValueError("price mismatch")
-        purchase = await process_verified_plan_purchase(
-            owner_id,
-            plan_id,
-            int(plan.get("duration_days", 30)),
-            source="telegram_stars",
-            amount=0,
-            payment_reference=payment.telegram_payment_charge_id,
-            approved_by=0,
-        )
-        if purchase.get("status") == "decision_required":
-            await update.effective_message.reply_text(
-                plan_change_text(purchase),
-                reply_markup=plan_change_keyboard(purchase["payment_id"]),
-            )
-        else:
-            await update.effective_message.reply_text(
-                "✅ Telegram Stars Payment Verified\n\n"
-                f"Plan: {plan.get('name')}\n"
-                f"Stars Paid: ⭐{payment.total_amount}\n"
-                f"Transaction ID: {payment.telegram_payment_charge_id}\n"
-                "Status: Activated"
-            )
-    except Exception:
-        logger.exception("Seller Stars fulfillment failed user=%s", update.effective_user.id)
-        await update.effective_message.reply_text(
-            "⚠️ Your Stars payment was received, but activation needs support review. Keep this receipt and contact support."
-        )
-
-
 def seller_handlers():
     return [
-        PreCheckoutQueryHandler(seller_stars_precheckout),
-        MessageHandler(filters.SUCCESSFUL_PAYMENT, seller_stars_success),
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace_\d+|pause_\d+|resume_\d+|remove_\d+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|star_.*|selected_.*|set_.*|channel_.*)$"),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace_\d+|pause_\d+|resume_\d+|remove_\d+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
         MessageHandler(filters.PHOTO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]

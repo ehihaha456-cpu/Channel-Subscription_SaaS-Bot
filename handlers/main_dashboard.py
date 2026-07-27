@@ -76,6 +76,7 @@ def seller_dashboard_keyboard(record=None):
             ],
             [InlineKeyboardButton("🔄 Replace Token", callback_data="seller_replace")],
             [InlineKeyboardButton("🗑 Remove Bot", callback_data="seller_remove")],
+            [InlineKeyboardButton("💼 Business Automation", callback_data="seller_business")],
             [InlineKeyboardButton("💳 Buy / Change Plan", callback_data="seller_upgrade_plan_home")],
             [InlineKeyboardButton("📊 View Current Plan", callback_data="seller_current_plan")],
             [InlineKeyboardButton("📜 Plan History", callback_data="seller_plan_history")],
@@ -85,6 +86,7 @@ def seller_dashboard_keyboard(record=None):
         rows.append([
             InlineKeyboardButton("➕ Create / Connect Clone Bot", callback_data="seller_connect")
         ])
+        rows.append([InlineKeyboardButton("💼 Business Automation", callback_data="seller_business")])
         rows.extend([
             [InlineKeyboardButton("💳 Buy / Change Plan", callback_data="seller_upgrade_plan_home")],
             [InlineKeyboardButton("📊 View Current Plan", callback_data="seller_current_plan")],
