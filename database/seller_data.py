@@ -5,7 +5,7 @@ from database.mongo import get_database
 
 SETTINGS="seller_settings"; PLANS="seller_plans"; CHANNELS="seller_channels"; USERS="seller_users"
 PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_referrals"
-BUSINESS_ACCOUNTS="seller_business_accounts"; BUSINESS_AUTH="seller_business_auth"
+BUSINESS_ACCOUNTS="seller_business_accounts"
 
 
 def c(name): return get_database()[name]
@@ -23,8 +23,6 @@ async def initialize_seller_data_indexes():
     await c(REFERRALS).create_index([("owner_id",1),("referrer_user_id",1),("rewarded",1)])
     await c(BUSINESS_ACCOUNTS).create_index([("owner_id",1),("account_user_id",1)], unique=True)
     await c(BUSINESS_ACCOUNTS).create_index([("owner_id",1),("active",1),("created_at",1)])
-    await c(BUSINESS_AUTH).create_index("owner_id", unique=True)
-    await c(BUSINESS_AUTH).create_index("expires_at", expireAfterSeconds=0)
 
 
 async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
@@ -91,31 +89,73 @@ async def set_seller_setting(owner_id:int,key:str,value):
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
 
 
-
-
-async def save_business_auth_state(owner_id:int, *, step:str, phone:str, encrypted_session:str, phone_code_hash:str="", ttl_minutes:int=10):
+async def save_business_pending_auth(
+    owner_id:int,
+    *,
+    attempt_id:str,
+    step:str,
+    phone:str,
+    encrypted_session:str,
+    phone_code_hash:str="",
+    expires_at=None,
+):
+    """Persist the current MTProto login attempt so OTP and 2FA use the same auth key."""
     now=datetime.now(timezone.utc)
-    expires_at=now+timedelta(minutes=max(1,int(ttl_minutes)))
-    await c(BUSINESS_AUTH).update_one(
+    if expires_at is None:
+        expires_at=now+timedelta(minutes=10)
+    payload={
+        "attempt_id":str(attempt_id),
+        "step":str(step),
+        "phone":str(phone),
+        "encrypted_session":str(encrypted_session),
+        "phone_code_hash":str(phone_code_hash or ""),
+        "created_at":now,
+        "updated_at":now,
+        "expires_at":expires_at,
+    }
+    await c(SETTINGS).update_one(
         {"owner_id":int(owner_id)},
-        {"$set":{
-            "step":str(step),
-            "phone":str(phone),
-            "encrypted_session":str(encrypted_session),
-            "phone_code_hash":str(phone_code_hash or ""),
-            "updated_at":now,
-            "expires_at":expires_at,
-        },"$setOnInsert":{"owner_id":int(owner_id),"created_at":now}},
+        {
+            "$set":{"business_pending_auth":payload,"updated_at":now},
+            "$setOnInsert":{"owner_id":int(owner_id),"created_at":now},
+        },
         upsert=True,
     )
+    return payload
 
 
-async def get_business_auth_state(owner_id:int):
-    return await c(BUSINESS_AUTH).find_one({"owner_id":int(owner_id),"expires_at":{"$gt":datetime.now(timezone.utc)}})
+async def get_business_pending_auth(owner_id:int):
+    doc=await c(SETTINGS).find_one(
+        {"owner_id":int(owner_id)},
+        {"business_pending_auth":1},
+    )
+    auth=(doc or {}).get("business_pending_auth")
+    if not isinstance(auth,dict):
+        return None
+    expires_at=auth.get("expires_at")
+    now=datetime.now(timezone.utc)
+    if expires_at is not None:
+        if getattr(expires_at,"tzinfo",None) is None:
+            expires_at=expires_at.replace(tzinfo=timezone.utc)
+        if expires_at<=now:
+            await clear_business_pending_auth(owner_id,attempt_id=auth.get("attempt_id"))
+            return None
+    return auth
 
 
-async def clear_business_auth_state(owner_id:int):
-    await c(BUSINESS_AUTH).delete_one({"owner_id":int(owner_id)})
+async def clear_business_pending_auth(owner_id:int, attempt_id:str|None=None):
+    query={"owner_id":int(owner_id)}
+    if attempt_id:
+        query["business_pending_auth.attempt_id"]=str(attempt_id)
+    result=await c(SETTINGS).update_one(
+        query,
+        {
+            "$unset":{"business_pending_auth":""},
+            "$set":{"updated_at":datetime.now(timezone.utc)},
+        },
+    )
+    return result.modified_count>0
+
 
 async def get_business_accounts(owner_id:int, active_only:bool=True):
     query={"owner_id":int(owner_id)}
