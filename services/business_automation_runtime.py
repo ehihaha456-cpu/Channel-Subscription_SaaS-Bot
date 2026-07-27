@@ -157,7 +157,7 @@ class BusinessAutomationRuntime:
                 result.append(clean)
         return result or None
 
-    async def _download_clone_media(self, owner_id: int, file_id: str) -> io.BytesIO | None:
+    async def _download_clone_media(self, owner_id: int, file_id: str, media_type: str = "") -> io.BytesIO | None:
         try:
             bot_record = await get_bot_by_data_owner_id(int(owner_id))
             if not bot_record:
@@ -170,7 +170,13 @@ class BusinessAutomationRuntime:
                 tg_file = await bot.get_file(file_id)
                 data = await tg_file.download_as_bytearray()
             stream = io.BytesIO(bytes(data))
-            stream.name = "business_media"
+            extension = {
+                "photo": ".jpg",
+                "video": ".mp4",
+                "animation": ".gif",
+                "document": ".bin",
+            }.get(str(media_type or "").lower(), ".bin")
+            stream.name = f"business_media{extension}"
             return stream
         except Exception:
             logger.exception("Business Automation media download failed owner=%s", owner_id)
@@ -189,9 +195,15 @@ class BusinessAutomationRuntime:
     ) -> None:
         buttons = await self._telethon_buttons(owner_id, button_rows)
         if media_file_id:
-            media = await self._download_clone_media(owner_id, media_file_id)
+            media = await self._download_clone_media(owner_id, media_file_id, media_type)
             if media is not None:
-                await client.send_file(peer_id, media, caption=text or "", buttons=buttons)
+                await client.send_file(
+                    peer_id,
+                    media,
+                    caption=text or "",
+                    buttons=buttons,
+                    force_document=str(media_type or "").lower() == "document",
+                )
                 return
         await client.send_message(peer_id, text or "Welcome!", buttons=buttons)
 
