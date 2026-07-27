@@ -13,6 +13,7 @@ from telethon.errors import (
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
     SessionPasswordNeededError,
+    FloodWaitError,
 )
 from telethon.sessions import StringSession
 
@@ -25,6 +26,9 @@ from database.seller_data import (
     get_business_accounts,
     get_seller_settings,
     save_business_account_session,
+    save_business_auth_state,
+    get_business_auth_state,
+    clear_business_auth_state,
     set_seller_setting,
 )
 from utils.crypto import decrypt_secret, encrypt_secret
@@ -226,27 +230,70 @@ def _mtproto_ready():
     return bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
 
 
-async def _send_code(context, phone):
+async def _send_code(owner, phone):
     client = TelegramClient(StringSession(), int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
-    await client.connect()
-    sent = await client.send_code_request(phone)
-    context.user_data["ba_auth"] = {"step": "code", "phone": phone, "phone_code_hash": sent.phone_code_hash, "client": client}
+    try:
+        await client.connect()
+        sent = await client.send_code_request(phone)
+        temp_session = StringSession.save(client.session)
+        await save_business_auth_state(
+            owner,
+            step="code",
+            phone=phone,
+            encrypted_session=encrypt_secret(temp_session),
+            phone_code_hash=sent.phone_code_hash,
+            ttl_minutes=10,
+        )
+    finally:
+        await client.disconnect()
 
 
-async def _finish_auth(context, owner, code=None, password=None):
-    auth = context.user_data.get("ba_auth") or {}
-    client = auth.get("client")
-    if not client:
-        raise RuntimeError("Login session expired")
-    if password is not None:
-        await client.sign_in(password=password)
-    else:
-        await client.sign_in(phone=auth["phone"], code=code, phone_code_hash=auth["phone_code_hash"])
-    me = await client.get_me()
-    encrypted = encrypt_secret(StringSession.save(client.session))
-    await save_business_account_session(owner, int(me.id), encrypted_session=encrypted, phone=auth.get("phone", ""), username=getattr(me, "username", "") or "", first_name=getattr(me, "first_name", "") or "")
-    await client.disconnect()
-    context.user_data.pop("ba_auth", None)
+async def _finish_auth(owner, code=None, password=None):
+    auth = await get_business_auth_state(owner)
+    if not auth:
+        raise PhoneCodeExpiredError(request=None)
+    encrypted_session = auth.get("encrypted_session")
+    if not encrypted_session:
+        raise PhoneCodeExpiredError(request=None)
+    client = TelegramClient(
+        StringSession(decrypt_secret(encrypted_session)),
+        int(TELEGRAM_API_ID),
+        TELEGRAM_API_HASH,
+    )
+    try:
+        await client.connect()
+        if password is not None:
+            await client.sign_in(password=password)
+        else:
+            await client.sign_in(
+                phone=auth.get("phone"),
+                code=code,
+                phone_code_hash=auth.get("phone_code_hash"),
+            )
+        me = await client.get_me()
+        encrypted = encrypt_secret(StringSession.save(client.session))
+        await save_business_account_session(
+            owner,
+            int(me.id),
+            encrypted_session=encrypted,
+            phone=auth.get("phone", ""),
+            username=getattr(me, "username", "") or "",
+            first_name=getattr(me, "first_name", "") or "",
+        )
+        await clear_business_auth_state(owner)
+        return me
+    except SessionPasswordNeededError:
+        await save_business_auth_state(
+            owner,
+            step="password",
+            phone=auth.get("phone", ""),
+            encrypted_session=encrypt_secret(StringSession.save(client.session)),
+            phone_code_hash=auth.get("phone_code_hash", ""),
+            ttl_minutes=10,
+        )
+        raise
+    finally:
+        await client.disconnect()
 
 
 async def _logout(record):
@@ -283,6 +330,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     if action == "ba_connect":
         if not _mtproto_ready():
             await q.edit_message_text("⚠️ Telegram API credentials are not configured by the platform owner.", reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
+        await clear_business_auth_state(owner)
         context.user_data["ba_auth"] = {"step": "phone"}
         await q.edit_message_text("🔗 Connect Telegram Account\n\nSend the phone number with country code.\nExample: +919876543210\n\nSend /cancel to stop."); return True
     if action == "ba_disconnect":
@@ -366,25 +414,44 @@ async def handle_text(self, update, context):
         return False
     text = (update.effective_message.text or "").strip()
     auth = context.user_data.get("ba_auth")
+    if not auth:
+        saved_auth = await get_business_auth_state(owner)
+        if saved_auth:
+            auth = {"step": saved_auth.get("step", "code")}
+            context.user_data["ba_auth"] = auth
     if auth:
         if text.lower() == "/cancel":
-            client=auth.get("client")
-            if client:
-                try: await client.disconnect()
-                except Exception: pass
+            await clear_business_auth_state(owner)
             context.user_data.pop("ba_auth",None); await update.effective_message.reply_text("Connection cancelled.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
         try:
             step=auth.get("step")
             if step == "phone":
-                await _send_code(context,text); await update.effective_message.reply_text("✅ Login code sent by Telegram. Send the code here."); return True
+                await _send_code(owner,text); auth={"step":"code"}; context.user_data["ba_auth"]=auth; await update.effective_message.reply_text("✅ Login code sent by Telegram. Send the latest code here within 10 minutes."); return True
             if step == "code":
-                try: await _finish_auth(context,owner,code=text.replace(" ",""))
+                try: await _finish_auth(owner,code=text.replace(" ",""))
                 except SessionPasswordNeededError: auth["step"]="password"; context.user_data["ba_auth"]=auth; await update.effective_message.reply_text("🔐 Two-step verification is enabled. Send your Telegram password."); return True
                 await update.effective_message.reply_text("✅ Telegram account connected successfully.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
             if step == "password":
-                await _finish_auth(context,owner,password=text); await update.effective_message.reply_text("✅ Telegram account connected successfully.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
-        except (PhoneNumberInvalidError,PhoneCodeInvalidError,PhoneCodeExpiredError,PasswordHashInvalidError) as exc:
-            await update.effective_message.reply_text(f"❌ Telegram login failed: {type(exc).__name__}. Please try again."); return True
+                await _finish_auth(owner,password=text); await update.effective_message.reply_text("✅ Telegram account connected successfully.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
+        except PhoneCodeExpiredError:
+            await clear_business_auth_state(owner)
+            context.user_data["ba_auth"]={"step":"phone"}
+            await update.effective_message.reply_text("❌ The login code expired. Send your phone number again to receive a new code.")
+            return True
+        except PhoneCodeInvalidError:
+            await update.effective_message.reply_text("❌ Invalid login code. Check the latest Telegram code and try again.")
+            return True
+        except PasswordHashInvalidError:
+            await update.effective_message.reply_text("❌ Incorrect two-step verification password. Try again or send /cancel.")
+            return True
+        except PhoneNumberInvalidError:
+            await clear_business_auth_state(owner)
+            context.user_data["ba_auth"]={"step":"phone"}
+            await update.effective_message.reply_text("❌ Invalid phone number. Send it with country code, for example +919876543210.")
+            return True
+        except FloodWaitError as exc:
+            await update.effective_message.reply_text(f"⏳ Telegram rate limit. Please wait {int(exc.seconds)} seconds and try again.")
+            return True
         except Exception:
             logger.exception("Business account login failed owner=%s",owner); await update.effective_message.reply_text("❌ Telegram account could not be connected. Please try again."); return True
 
