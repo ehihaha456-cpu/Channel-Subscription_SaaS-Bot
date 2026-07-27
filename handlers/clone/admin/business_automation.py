@@ -2,10 +2,18 @@
 
 import logging
 from datetime import datetime
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from handlers.common.editor_engine import (
+    build_editor_keyboard,
+    editor_header,
+    editor_media_prompt,
+    editor_menu_keyboard,
+    editor_text_prompt,
+    parse_editor_buttons,
+    url_buttons_header,
+)
 from telethon import TelegramClient
 from telethon.errors import (
     PasswordHashInvalidError,
@@ -27,6 +35,17 @@ from database.seller_data import (
     save_business_account_session,
     set_seller_setting,
 )
+from database.business_automation import (
+    create_business_reply_template,
+    delete_business_reply_template,
+    get_business_auto_reply,
+    get_business_reply_template,
+    get_business_welcome,
+    list_business_reply_templates,
+    update_business_auto_reply,
+    update_business_reply_template,
+    update_business_welcome,
+)
 from utils.crypto import decrypt_secret, encrypt_secret
 from services.business_automation_runtime import business_automation_runtime
 
@@ -41,142 +60,82 @@ def _buttons_count(rows):
     return sum(len(row) for row in (rows or []))
 
 
-def _templates(settings):
-    return [dict(x) for x in (settings.get("business_reply_templates") or []) if isinstance(x, dict)]
+async def _editor_state(owner: int) -> tuple[dict, dict, list[dict]]:
+    welcome = await get_business_welcome(owner)
+    auto_reply = await get_business_auto_reply(owner)
+    templates = await list_business_reply_templates(owner)
+    return welcome, auto_reply, templates
 
 
-def _template(settings, template_id):
-    return next((x for x in _templates(settings) if str(x.get("id")) == str(template_id)), None)
-
-
-def _home_keyboard(connected, enabled):
-    rows = [
-        [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="ba_connect")],
-        [InlineKeyboardButton(f"📱 Connected Accounts ({connected})", callback_data="ba_accounts")],
-        [InlineKeyboardButton("👋 Welcome Message", callback_data="ba_welcome")],
-        [
-            InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
-            InlineKeyboardButton("📝 Reply Templates", callback_data="ba_templates"),
-        ],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="ba_settings")],
-        [InlineKeyboardButton("📊 Statistics", callback_data="ba_stats")],
-        [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
-    ]
-    return _kb(rows)
-
-
-async def _home(owner):
-    settings = await get_seller_settings(owner)
-    connected = await count_business_accounts(owner)
-    enabled = bool(settings.get("business_automation_enabled"))
-    text = (
-        "💼 Business Automation\n\n"
-        f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
-        f"Connected Accounts: {connected}\n\n"
-        "All connected Telegram accounts use one shared configuration:\n"
-        "• Welcome message and media\n• URL buttons\n• Auto replies\n"
-        "• Reply templates\n• Settings and statistics"
-    )
-    return text, _home_keyboard(connected, enabled)
-
-
-def _welcome_text(s):
-    return (
-        "👋 Business Welcome Message\n\n"
-        f"Status: {'Enabled' if s.get('business_welcome_enabled', True) else 'Disabled'}\n"
-        f"Text: {'Added' if s.get('business_welcome_message') else 'Not added'}\n"
-        f"Media: {'Added' if s.get('business_welcome_media_file_id') else 'Not added'}\n"
-        f"URL Buttons: {_buttons_count(s.get('business_welcome_buttons'))}"
+def _welcome_text(item):
+    return editor_header(
+        "👋 Business Welcome Message",
+        item,
+        variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
     )
 
 
-def _welcome_keyboard(s):
-    rows = [
-        [InlineKeyboardButton("Disable Welcome" if s.get("business_welcome_enabled", True) else "Enable Welcome", callback_data="ba_welcome_toggle")],
-        [InlineKeyboardButton("✏️ Set Welcome Text", callback_data="ba_welcome_text")],
-        [InlineKeyboardButton("🖼 Set Welcome Media", callback_data="ba_welcome_media")],
-    ]
-    if s.get("business_welcome_media_file_id"):
-        rows.append([InlineKeyboardButton("🗑 Remove Media", callback_data="ba_welcome_media_remove")])
-    rows += [
-        [InlineKeyboardButton("➕ Add URL Button", callback_data="ba_welcome_button")],
-        [InlineKeyboardButton(f"🗑 Clear URL Buttons ({_buttons_count(s.get('business_welcome_buttons'))})", callback_data="ba_welcome_buttons_clear")],
-        [InlineKeyboardButton("👁 Preview", callback_data="ba_welcome_preview")],
-        [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
-    ]
-    return _kb(rows)
-
-
-def _auto_text(s):
-    return (
-        "💬 Business Auto Reply\n\n"
-        f"Status: {'Enabled' if s.get('business_auto_reply_enabled', True) else 'Disabled'}\n"
-        f"Text: {'Added' if s.get('business_auto_reply_message') else 'Not added'}\n"
-        f"Media: {'Added' if s.get('business_auto_reply_media_file_id') else 'Not added'}\n"
-        f"URL Buttons: {_buttons_count(s.get('business_auto_reply_buttons'))}\n"
-        f"Reply Delay: {int(s.get('business_reply_delay_seconds', 0) or 0)} seconds"
+def _welcome_keyboard(item):
+    return editor_menu_keyboard(
+        "ba_welcome", item, back_callback="ba_home", allow_toggle=True
     )
 
 
-def _auto_keyboard(s):
+def _auto_text(item):
+    return editor_header(
+        "💬 Business Auto Reply",
+        item,
+        variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
+    )
+
+
+def _auto_keyboard(item):
+    return editor_menu_keyboard(
+        "ba_auto", item, back_callback="ba_home", allow_toggle=True
+    )
+
+
+def _templates_keyboard(templates):
     rows = [
-        [InlineKeyboardButton("Disable Auto Reply" if s.get("business_auto_reply_enabled", True) else "Enable Auto Reply", callback_data="ba_auto_toggle")],
-        [InlineKeyboardButton("✏️ Set Reply Text", callback_data="ba_auto_text")],
-        [InlineKeyboardButton("🖼 Set Reply Media", callback_data="ba_auto_media")],
+        [InlineKeyboardButton(
+            f"📝 {item.get('name') or item.get('shortcut') or 'Template'}",
+            callback_data=f"ba_tpl_open_{item.get('template_id')}",
+        )]
+        for item in templates
     ]
-    if s.get("business_auto_reply_media_file_id"):
-        rows.append([InlineKeyboardButton("🗑 Remove Media", callback_data="ba_auto_media_remove")])
-    rows += [
-        [InlineKeyboardButton("➕ Add URL Button", callback_data="ba_auto_button")],
-        [InlineKeyboardButton(f"🗑 Clear URL Buttons ({_buttons_count(s.get('business_auto_reply_buttons'))})", callback_data="ba_auto_buttons_clear")],
-        [InlineKeyboardButton("⏱ Set Reply Delay", callback_data="ba_delay")],
-        [InlineKeyboardButton("👁 Preview", callback_data="ba_auto_preview")],
-        [InlineKeyboardButton("⬅ Auto Reply & Templates", callback_data="ba_replies")],
-    ]
-    return _kb(rows)
-
-
-def _replies_keyboard(s):
-    return _kb([
-        [InlineKeyboardButton(f"💬 Auto Reply ({'On' if s.get('business_auto_reply_enabled', True) else 'Off'})", callback_data="ba_auto")],
-        [InlineKeyboardButton(f"📝 Reply Templates ({len(_templates(s))})", callback_data="ba_templates")],
-        [InlineKeyboardButton("Disable Templates" if s.get("business_templates_enabled", True) else "Enable Templates", callback_data="ba_templates_toggle")],
+    rows.extend([
+        [InlineKeyboardButton("➕ Add Reply Template", callback_data="ba_tpl_add")],
         [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
     ])
-
-
-def _templates_keyboard(s):
-    rows = [[InlineKeyboardButton(f"📝 {x.get('name') or x.get('shortcut') or 'Template'}", callback_data=f"ba_tpl_open_{x.get('id')}")] for x in _templates(s)]
-    rows += [[InlineKeyboardButton("➕ Add Reply Template", callback_data="ba_tpl_add")], [InlineKeyboardButton("⬅ Auto Reply & Templates", callback_data="ba_replies")]]
     return _kb(rows)
 
 
-def _template_text(t):
+def _template_text(item):
+    summary = editor_header(
+        "📝 Business Reply Template",
+        {**item, "enabled": True},
+        variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
+    )
     return (
-        "📝 Reply Template\n\n"
-        f"Name: {t.get('name') or '-'}\nShortcut: {t.get('shortcut') or '-'}\n"
-        f"Text: {'Added' if t.get('text') else 'Not added'}\n"
-        f"Media: {'Added' if t.get('media_file_id') else 'Not added'}\n"
-        f"URL Buttons: {_buttons_count(t.get('buttons'))}"
+        f"{summary}\n\n"
+        f"Template Name: {item.get('name') or '-'}\n"
+        f"Shortcut: {item.get('shortcut') or '-'}"
     )
 
 
-def _template_keyboard(t):
-    tid = str(t.get("id"))
+def _template_keyboard(item):
+    tid = str(item.get("template_id"))
     rows = [
-        [InlineKeyboardButton("✏️ Edit Name & Shortcut", callback_data=f"ba_tpl_meta_{tid}")],
-        [InlineKeyboardButton("✏️ Set Template Text", callback_data=f"ba_tpl_text_{tid}")],
-        [InlineKeyboardButton("🖼 Set Template Media", callback_data=f"ba_tpl_media_{tid}")],
+        [InlineKeyboardButton("✏️ Name & Shortcut", callback_data=f"ba_tpl_meta_{tid}")],
     ]
-    if t.get("media_file_id"):
-        rows.append([InlineKeyboardButton("🗑 Remove Media", callback_data=f"ba_tpl_media_remove_{tid}")])
-    rows += [
-        [InlineKeyboardButton("➕ Add URL Button", callback_data=f"ba_tpl_button_{tid}")],
-        [InlineKeyboardButton(f"🗑 Clear URL Buttons ({_buttons_count(t.get('buttons'))})", callback_data=f"ba_tpl_buttons_clear_{tid}")],
-        [InlineKeyboardButton("👁 Preview", callback_data=f"ba_tpl_preview_{tid}")],
-        [InlineKeyboardButton("🗑 Delete Template", callback_data=f"ba_tpl_delete_{tid}")],
-        [InlineKeyboardButton("⬅ Reply Templates", callback_data="ba_templates")],
-    ]
+    common = editor_menu_keyboard(
+        f"ba_tpl_{tid}",
+        {**item, "enabled": True},
+        back_callback="ba_templates",
+        allow_toggle=False,
+        delete_callback=f"ba_tpl_delete_{tid}",
+    )
+    rows.extend(common.inline_keyboard)
     return _kb(rows)
 
 
@@ -208,9 +167,7 @@ def _settings_keyboard(s):
 
 
 def _preview_markup(rows):
-    clean = [[InlineKeyboardButton(str(b.get("text") or "Open"), url=str(b.get("url"))) for b in row if b.get("url")] for row in (rows or [])]
-    clean = [row for row in clean if row]
-    return _kb(clean) if clean else None
+    return build_editor_keyboard(rows)
 
 
 async def _send_preview(message, text, media_type, file_id, buttons):
@@ -319,52 +276,108 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         text, markup = await _home(owner); await q.edit_message_text(text, reply_markup=markup); return True
 
     s = await get_seller_settings(owner)
-    if action == "ba_welcome": await q.edit_message_text(_welcome_text(s), reply_markup=_welcome_keyboard(s)); return True
-    if action == "ba_welcome_toggle": await set_seller_setting(owner, "business_welcome_enabled", not s.get("business_welcome_enabled", True)); s=await get_seller_settings(owner); await q.edit_message_text(_welcome_text(s), reply_markup=_welcome_keyboard(s)); return True
-    if action in {"ba_welcome_text","ba_welcome_media","ba_welcome_button","ba_auto_text","ba_auto_media","ba_auto_button","ba_delay","ba_tpl_add","ba_setting_hours","ba_setting_delay"}:
-        field = {"ba_welcome_text":"welcome_text","ba_welcome_media":"welcome_media","ba_welcome_button":"welcome_button","ba_auto_text":"auto_text","ba_auto_media":"auto_media","ba_auto_button":"auto_button","ba_delay":"delay","ba_tpl_add":"template_add","ba_setting_hours":"working_hours","ba_setting_delay":"delay"}[action]
-        context.user_data["ba_editor"] = {"field": field}
-        prompt = {"welcome_text":"Send the new welcome text.","welcome_media":"Send one photo or video.","welcome_button":"Send: Button Name | https://example.com","auto_text":"Send the auto reply text.","auto_media":"Send one photo or video.","auto_button":"Send: Button Name | https://example.com","delay":"Send reply delay in seconds (0-300).","template_add":"Send: Shortcut | Template Name","working_hours":"Send: HH:MM | HH:MM | Timezone\nExample: 09:00 | 21:00 | Asia/Kolkata"}[field]
-        await q.edit_message_text(prompt + "\n\nSend /cancel to stop."); return True
-    if action == "ba_welcome_media_remove": await set_seller_setting(owner,"business_welcome_media_type",""); await set_seller_setting(owner,"business_welcome_media_file_id",""); s=await get_seller_settings(owner); await q.edit_message_text(_welcome_text(s),reply_markup=_welcome_keyboard(s)); return True
-    if action == "ba_welcome_buttons_clear": await set_seller_setting(owner,"business_welcome_buttons",[]); s=await get_seller_settings(owner); await q.edit_message_text(_welcome_text(s),reply_markup=_welcome_keyboard(s)); return True
-    if action == "ba_welcome_preview": await _send_preview(q.message,s.get("business_welcome_message"),s.get("business_welcome_media_type"),s.get("business_welcome_media_file_id"),s.get("business_welcome_buttons")); await q.answer("Preview sent."); return True
+    welcome, auto_reply, templates = await _editor_state(owner)
 
-    if action == "ba_replies": await q.edit_message_text("💬 Auto Reply & Reply Templates",reply_markup=_replies_keyboard(s)); return True
-    if action == "ba_auto": await q.edit_message_text(_auto_text(s),reply_markup=_auto_keyboard(s)); return True
-    if action == "ba_auto_toggle": await set_seller_setting(owner,"business_auto_reply_enabled",not s.get("business_auto_reply_enabled",True)); s=await get_seller_settings(owner); await q.edit_message_text(_auto_text(s),reply_markup=_auto_keyboard(s)); return True
-    if action == "ba_auto_media_remove": await set_seller_setting(owner,"business_auto_reply_media_type",""); await set_seller_setting(owner,"business_auto_reply_media_file_id",""); s=await get_seller_settings(owner); await q.edit_message_text(_auto_text(s),reply_markup=_auto_keyboard(s)); return True
-    if action == "ba_auto_buttons_clear": await set_seller_setting(owner,"business_auto_reply_buttons",[]); s=await get_seller_settings(owner); await q.edit_message_text(_auto_text(s),reply_markup=_auto_keyboard(s)); return True
-    if action == "ba_auto_preview": await _send_preview(q.message,s.get("business_auto_reply_message"),s.get("business_auto_reply_media_type"),s.get("business_auto_reply_media_file_id"),s.get("business_auto_reply_buttons")); await q.answer("Preview sent."); return True
-    if action == "ba_templates_toggle": await set_seller_setting(owner,"business_templates_enabled",not s.get("business_templates_enabled",True)); s=await get_seller_settings(owner); await q.edit_message_text("💬 Auto Reply & Reply Templates",reply_markup=_replies_keyboard(s)); return True
-    if action == "ba_templates": await q.edit_message_text("📝 Reply Templates",reply_markup=_templates_keyboard(s)); return True
+    if action == "ba_welcome":
+        await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
+    if action == "ba_welcome_toggle":
+        welcome = await update_business_welcome(owner, enabled=not welcome.get("enabled", True))
+        await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
+    if action == "ba_welcome_text":
+        context.user_data["ba_editor"] = {"field": "welcome_text"}
+        await q.edit_message_text(editor_text_prompt("Business Welcome Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")); return True
+    if action == "ba_welcome_media":
+        context.user_data["ba_editor"] = {"field": "welcome_media"}
+        await q.edit_message_text(editor_media_prompt("Business Welcome Media")); return True
+    if action == "ba_welcome_buttons":
+        context.user_data["ba_editor"] = {"field": "welcome_buttons"}
+        await q.edit_message_text(url_buttons_header() + "\n\nSend /cancel to stop."); return True
+    if action == "ba_welcome_rmtext":
+        welcome = await update_business_welcome(owner, text="")
+        await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
+    if action == "ba_welcome_rmmedia":
+        welcome = await update_business_welcome(owner, media_type="", media_file_id="")
+        await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
+    if action == "ba_welcome_rmbuttons":
+        welcome = await update_business_welcome(owner, buttons=[])
+        await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
+    if action == "ba_welcome_preview":
+        await _send_preview(q.message, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons")); await q.answer("Preview sent."); return True
+
+    if action == "ba_auto":
+        await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
+    if action == "ba_auto_toggle":
+        auto_reply = await update_business_auto_reply(owner, enabled=not auto_reply.get("enabled", True))
+        await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
+    if action == "ba_auto_text":
+        context.user_data["ba_editor"] = {"field": "auto_text"}
+        await q.edit_message_text(editor_text_prompt("Business Auto Reply Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")); return True
+    if action == "ba_auto_media":
+        context.user_data["ba_editor"] = {"field": "auto_media"}
+        await q.edit_message_text(editor_media_prompt("Business Auto Reply Media")); return True
+    if action == "ba_auto_buttons":
+        context.user_data["ba_editor"] = {"field": "auto_buttons"}
+        await q.edit_message_text(url_buttons_header() + "\n\nSend /cancel to stop."); return True
+    if action == "ba_auto_rmtext":
+        auto_reply = await update_business_auto_reply(owner, text="")
+        await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
+    if action == "ba_auto_rmmedia":
+        auto_reply = await update_business_auto_reply(owner, media_type="", media_file_id="")
+        await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
+    if action == "ba_auto_rmbuttons":
+        auto_reply = await update_business_auto_reply(owner, buttons=[])
+        await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
+    if action == "ba_auto_preview":
+        await _send_preview(q.message, auto_reply.get("text"), auto_reply.get("media_type"), auto_reply.get("media_file_id"), auto_reply.get("buttons")); await q.answer("Preview sent."); return True
+
+    if action == "ba_templates":
+        await q.edit_message_text(
+            "📝 Business Reply Templates\n\nCreate a shortcut, then use the same common editor to add text, media, URL/username buttons, or Clone Bot feature buttons.",
+            reply_markup=_templates_keyboard(templates),
+        ); return True
+    if action == "ba_tpl_add":
+        context.user_data["ba_editor"] = {"field": "template_add"}
+        await q.edit_message_text("➕ New Reply Template\n\nSend: Shortcut | Template Name\nExample: /payment | Payment Details\n\nSend /cancel to stop."); return True
 
     if action.startswith("ba_tpl_"):
         suffix = action[len("ba_tpl_"):]
-        op = ""
-        tid = ""
-        for candidate in ("media_remove", "buttons_clear", "preview", "delete", "open", "meta", "text", "media", "button"):
+        op = ""; tid = ""
+        for candidate in ("delete", "open", "meta"):
             prefix = candidate + "_"
-            if suffix.startswith(prefix):
-                op = candidate
-                tid = suffix[len(prefix):]
-                break
-        if suffix == "add":
-            op = "add"
-        if op == "add": return True
-        t = _template(s, tid)
-        if not t: await q.answer("Template not found.",show_alert=True); return True
-        if op == "open": await q.edit_message_text(_template_text(t),reply_markup=_template_keyboard(t)); return True
-        if op in {"meta","text","media","button"}:
-            context.user_data["ba_editor"]={"field":f"template_{op}","template_id":tid}
-            await q.edit_message_text({"meta":"Send: Shortcut | Template Name","text":"Send the template text.","media":"Send one photo or video.","button":"Send: Button Name | https://example.com"}[op]); return True
-        templates = _templates(s)
-        target = next(x for x in templates if str(x.get("id")) == tid)
-        if op == "media_remove": target["media_type"]=""; target["media_file_id"]=""
-        elif op == "buttons_clear": target["buttons"]=[]
-        elif op == "delete": templates=[x for x in templates if str(x.get("id")) != tid]; await set_seller_setting(owner,"business_reply_templates",templates); s=await get_seller_settings(owner); await q.edit_message_text("✅ Reply template deleted.",reply_markup=_templates_keyboard(s)); return True
-        elif op == "preview": await _send_preview(q.message,t.get("text") or t.get("name"),t.get("media_type"),t.get("media_file_id"),t.get("buttons")); await q.answer("Preview sent."); return True
-        await set_seller_setting(owner,"business_reply_templates",templates); s=await get_seller_settings(owner); t=_template(s,tid); await q.edit_message_text(_template_text(t),reply_markup=_template_keyboard(t)); return True
+            if suffix.startswith(prefix): op = candidate; tid = suffix[len(prefix):]; break
+        if not op:
+            # Common editor callbacks are ba_tpl_<id>_<operation>.
+            for candidate in ("preview", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
+                marker = "_" + candidate
+                if suffix.endswith(marker): tid = suffix[:-len(marker)]; op = candidate; break
+        item = await get_business_reply_template(owner, tid) if tid else None
+        if not item:
+            await q.answer("Template not found.", show_alert=True); return True
+        if op == "open":
+            await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
+        if op == "meta":
+            context.user_data["ba_editor"] = {"field": "template_meta", "template_id": tid}
+            await q.edit_message_text("✏️ Edit Template\n\nSend: Shortcut | Template Name\n\nSend /cancel to stop."); return True
+        if op == "text":
+            context.user_data["ba_editor"] = {"field": "template_text", "template_id": tid}
+            await q.edit_message_text(editor_text_prompt("Reply Template Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")); return True
+        if op == "media":
+            context.user_data["ba_editor"] = {"field": "template_media", "template_id": tid}
+            await q.edit_message_text(editor_media_prompt("Reply Template Media")); return True
+        if op == "buttons":
+            context.user_data["ba_editor"] = {"field": "template_buttons", "template_id": tid}
+            await q.edit_message_text(url_buttons_header() + "\n\nSend /cancel to stop."); return True
+        if op == "rmtext": item = await update_business_reply_template(owner, tid, text="")
+        elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="")
+        elif op == "rmbuttons": item = await update_business_reply_template(owner, tid, buttons=[])
+        elif op == "delete":
+            await delete_business_reply_template(owner, tid)
+            templates = await list_business_reply_templates(owner)
+            await q.edit_message_text("✅ Reply template deleted.", reply_markup=_templates_keyboard(templates)); return True
+        elif op == "preview":
+            await _send_preview(q.message, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons")); await q.answer("Preview sent."); return True
+        if item:
+            await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
 
     if action == "ba_settings": await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
     toggle_map={"ba_setting_automation":("business_automation_enabled",False),"ba_setting_once":("business_welcome_once",True),"ba_setting_outgoing":("business_ignore_outgoing",True),"ba_setting_loop":("business_anti_loop",True),"ba_setting_flood":("business_flood_protection",True),"ba_setting_hours_toggle":("business_working_hours_enabled",False)}
@@ -438,59 +451,114 @@ async def handle_text(self, update, context):
         except Exception:
             logger.exception("Business account login failed owner=%s",owner); await update.effective_message.reply_text("❌ Telegram account could not be connected. Please try again."); return True
 
-    editor=context.user_data.get("ba_editor")
-    if not editor: return False
-    if text.lower()=="/cancel": context.user_data.pop("ba_editor",None); await update.effective_message.reply_text("Editing cancelled.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
-    field=editor.get("field"); tid=str(editor.get("template_id") or "")
-    s=await get_seller_settings(owner)
+    editor = context.user_data.get("ba_editor")
+    if not editor:
+        return False
+    if text.lower() == "/cancel":
+        context.user_data.pop("ba_editor", None)
+        await update.effective_message.reply_text(
+            "Editing cancelled.",
+            reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+        )
+        return True
+
+    field = str(editor.get("field") or "")
+    template_id = str(editor.get("template_id") or "")
     try:
-        if field=="welcome_text": await set_seller_setting(owner,"business_welcome_message",text)
-        elif field=="auto_text": await set_seller_setting(owner,"business_auto_reply_message",text)
-        elif field in {"welcome_button","auto_button","template_button"}:
-            if "|" not in text: raise ValueError("Use: Button Name | https://example.com")
-            label,url=[x.strip() for x in text.split("|",1)]
-            if not url.lower().startswith(("http://","https://")): raise ValueError("Enter a valid http/https URL")
-            if field=="welcome_button": rows=list(s.get("business_welcome_buttons") or []); rows.append([{"text":label[:64],"url":url}]); await set_seller_setting(owner,"business_welcome_buttons",rows)
-            elif field=="auto_button": rows=list(s.get("business_auto_reply_buttons") or []); rows.append([{"text":label[:64],"url":url}]); await set_seller_setting(owner,"business_auto_reply_buttons",rows)
-            else:
-                templates=_templates(s); t=next(x for x in templates if str(x.get("id"))==tid); rows=list(t.get("buttons") or []); rows.append([{"text":label[:64],"url":url}]); t["buttons"]=rows; await set_seller_setting(owner,"business_reply_templates",templates)
-        elif field=="delay":
-            value=int(text)
-            if not 0<=value<=300: raise ValueError("Reply delay must be 0-300 seconds")
-            await set_seller_setting(owner,"business_reply_delay_seconds",value)
-        elif field=="working_hours":
-            parts=[x.strip() for x in text.split("|")]
-            if len(parts)!=3: raise ValueError("Use: HH:MM | HH:MM | Timezone")
-            datetime.strptime(parts[0],"%H:%M"); datetime.strptime(parts[1],"%H:%M"); ZoneInfo(parts[2])
-            await set_seller_setting(owner,"business_working_hours_start",parts[0]); await set_seller_setting(owner,"business_working_hours_end",parts[1]); await set_seller_setting(owner,"business_working_hours_timezone",parts[2])
-        elif field=="template_add":
-            if "|" not in text: raise ValueError("Use: Shortcut | Template Name")
-            shortcut,name=[x.strip() for x in text.split("|",1)]; templates=_templates(s); templates.append({"id":uuid4().hex[:12],"shortcut":shortcut[:64],"name":name[:80],"text":"","media_type":"","media_file_id":"","buttons":[]}); await set_seller_setting(owner,"business_reply_templates",templates)
-        elif field in {"template_meta","template_text"}:
-            templates=_templates(s); t=next(x for x in templates if str(x.get("id"))==tid)
-            if field=="template_meta":
-                if "|" not in text: raise ValueError("Use: Shortcut | Template Name")
-                t["shortcut"],t["name"]=[x.strip() for x in text.split("|",1)]
-            else: t["text"]=text
-            await set_seller_setting(owner,"business_reply_templates",templates)
-        else: return False
-    except (ValueError,KeyError,StopIteration) as exc:
-        await update.effective_message.reply_text(f"❌ {exc}"); return True
-    context.user_data.pop("ba_editor",None)
-    await update.effective_message.reply_text("✅ Business Automation updated.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
+        if field == "welcome_text":
+            await update_business_welcome(owner, text=text)
+        elif field == "auto_text":
+            await update_business_auto_reply(owner, text=text)
+        elif field == "welcome_buttons":
+            await update_business_welcome(owner, buttons=parse_editor_buttons(text))
+        elif field == "auto_buttons":
+            await update_business_auto_reply(owner, buttons=parse_editor_buttons(text))
+        elif field == "template_buttons":
+            await update_business_reply_template(owner, template_id, buttons=parse_editor_buttons(text))
+        elif field == "template_add":
+            if "|" not in text:
+                raise ValueError("Use: Shortcut | Template Name")
+            shortcut, name = [part.strip() for part in text.split("|", 1)]
+            if not shortcut or not name:
+                raise ValueError("Shortcut and template name are required")
+            await create_business_reply_template(owner, shortcut, name)
+        elif field == "template_meta":
+            if "|" not in text:
+                raise ValueError("Use: Shortcut | Template Name")
+            shortcut, name = [part.strip() for part in text.split("|", 1)]
+            if not shortcut or not name:
+                raise ValueError("Shortcut and template name are required")
+            await update_business_reply_template(owner, template_id, shortcut=shortcut[:64], name=name[:80])
+        elif field == "template_text":
+            await update_business_reply_template(owner, template_id, text=text)
+        elif field == "delay":
+            value = int(text)
+            if not 0 <= value <= 300:
+                raise ValueError("Reply delay must be 0-300 seconds")
+            await set_seller_setting(owner, "business_reply_delay_seconds", value)
+        elif field == "working_hours":
+            parts = [part.strip() for part in text.split("|")]
+            if len(parts) != 3:
+                raise ValueError("Use: HH:MM | HH:MM | Timezone")
+            datetime.strptime(parts[0], "%H:%M")
+            datetime.strptime(parts[1], "%H:%M")
+            ZoneInfo(parts[2])
+            await set_seller_setting(owner, "business_working_hours_start", parts[0])
+            await set_seller_setting(owner, "business_working_hours_end", parts[1])
+            await set_seller_setting(owner, "business_working_hours_timezone", parts[2])
+        else:
+            return False
+    except (ValueError, TypeError) as exc:
+        await update.effective_message.reply_text(f"❌ {exc}")
+        return True
+
+    context.user_data.pop("ba_editor", None)
+    await update.effective_message.reply_text(
+        "✅ Business Automation editor updated.",
+        reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+    )
+    return True
 
 
 async def handle_media(self, update, context):
-    owner=self.owner(context)
-    if int(update.effective_user.id)!=int(owner): return False
-    editor=context.user_data.get("ba_editor") or {}; field=editor.get("field")
-    if field not in {"welcome_media","auto_media","template_media"}: return False
-    msg=update.effective_message; media_type="photo" if msg.photo else "video" if msg.video else ""; file_id=msg.photo[-1].file_id if msg.photo else msg.video.file_id if msg.video else ""
-    if not file_id: return False
-    if field=="welcome_media": await set_seller_setting(owner,"business_welcome_media_type",media_type); await set_seller_setting(owner,"business_welcome_media_file_id",file_id)
-    elif field=="auto_media": await set_seller_setting(owner,"business_auto_reply_media_type",media_type); await set_seller_setting(owner,"business_auto_reply_media_file_id",file_id)
+    owner = self.owner(context)
+    if int(update.effective_user.id) != int(owner):
+        return False
+    editor = context.user_data.get("ba_editor") or {}
+    field = str(editor.get("field") or "")
+    if field not in {"welcome_media", "auto_media", "template_media"}:
+        return False
+
+    msg = update.effective_message
+    media_type = ""
+    file_id = ""
+    if msg.photo:
+        media_type, file_id = "photo", msg.photo[-1].file_id
+    elif msg.video:
+        media_type, file_id = "video", msg.video.file_id
+    elif msg.animation:
+        media_type, file_id = "animation", msg.animation.file_id
+    elif msg.document:
+        media_type, file_id = "document", msg.document.file_id
+    if not file_id:
+        return False
+
+    template_id = str(editor.get("template_id") or "")
+    if field == "welcome_media":
+        await update_business_welcome(owner, media_type=media_type, media_file_id=file_id)
+    elif field == "auto_media":
+        await update_business_auto_reply(owner, media_type=media_type, media_file_id=file_id)
     else:
-        tid=str(editor.get("template_id") or ""); s=await get_seller_settings(owner); templates=_templates(s); t=next((x for x in templates if str(x.get("id"))==tid),None)
-        if not t: await msg.reply_text("❌ Reply template not found."); return True
-        t["media_type"]=media_type; t["media_file_id"]=file_id; await set_seller_setting(owner,"business_reply_templates",templates)
-    context.user_data.pop("ba_editor",None); await msg.reply_text("✅ Business Automation media updated.",reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation",callback_data="ba_home")]])); return True
+        item = await update_business_reply_template(
+            owner, template_id, media_type=media_type, media_file_id=file_id
+        )
+        if not item:
+            await msg.reply_text("❌ Reply template not found.")
+            return True
+
+    context.user_data.pop("ba_editor", None)
+    await msg.reply_text(
+        "✅ Business Automation media updated.",
+        reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+    )
+    return True
