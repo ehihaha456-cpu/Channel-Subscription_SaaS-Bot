@@ -516,6 +516,15 @@ async def business_automation_text(owner_id:int):
     ), connected, enabled
 
 
+async def send_business_automation(message, owner_id: int):
+    """Open Business Automation from a main-bot deep link or command flow."""
+    text, connected, enabled = await business_automation_text(owner_id)
+    await message.reply_text(
+        text,
+        reply_markup=business_automation_keyboard(connected, enabled),
+    )
+
+
 def limit_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Buy / Change Plan", callback_data="seller_upgrade_plan")],

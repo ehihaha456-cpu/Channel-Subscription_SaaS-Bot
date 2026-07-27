@@ -202,6 +202,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send_owner_dashboard(message)
             return
 
+        if context.args and context.args[0] == "businessautomation":
+            from handlers.seller import send_business_automation
+            await send_business_automation(message, tg_user.id)
+            return
+
         if context.args and context.args[0] == "sellerplan":
             from handlers.seller import send_seller_upgrade_plan
             await send_seller_upgrade_plan(message, tg_user.id)
