@@ -28,6 +28,7 @@ from database.seller_data import (
     set_seller_setting,
 )
 from utils.crypto import decrypt_secret, encrypt_secret
+from services.business_automation_runtime import business_automation_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -244,8 +245,9 @@ async def _finish_auth(context, owner, code=None, password=None):
         await client.sign_in(phone=auth["phone"], code=code, phone_code_hash=auth["phone_code_hash"])
     me = await client.get_me()
     encrypted = encrypt_secret(StringSession.save(client.session))
-    await save_business_account_session(owner, int(me.id), encrypted_session=encrypted, phone=auth.get("phone", ""), username=getattr(me, "username", "") or "", first_name=getattr(me, "first_name", "") or "")
+    record = await save_business_account_session(owner, int(me.id), encrypted_session=encrypted, phone=auth.get("phone", ""), username=getattr(me, "username", "") or "", first_name=getattr(me, "first_name", "") or "")
     await client.disconnect()
+    await business_automation_runtime.start_account(owner, int(me.id), record=record)
     context.user_data.pop("ba_auth", None)
 
 
@@ -297,6 +299,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         if record:
             try: await _logout(record)
             except Exception: logger.exception("Remote business logout failed owner=%s account=%s", owner, account_id)
+        await business_automation_runtime.stop_account(owner, account_id)
         removed = await disconnect_business_account(owner, account_id)
         await q.answer("Account disconnected." if removed else "Account not found.", show_alert=not removed)
         text, markup = await _home(owner); await q.edit_message_text(text, reply_markup=markup); return True
