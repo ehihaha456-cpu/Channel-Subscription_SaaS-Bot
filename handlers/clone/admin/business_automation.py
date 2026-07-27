@@ -54,13 +54,14 @@ def _home_keyboard(connected, enabled):
         [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="ba_connect")],
         [InlineKeyboardButton(f"📱 Connected Accounts ({connected})", callback_data="ba_accounts")],
         [InlineKeyboardButton("👋 Welcome Message", callback_data="ba_welcome")],
-        [InlineKeyboardButton("💬 Auto Reply & Reply Templates", callback_data="ba_replies")],
+        [
+            InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
+            InlineKeyboardButton("📝 Reply Templates", callback_data="ba_templates"),
+        ],
         [InlineKeyboardButton("⚙️ Settings", callback_data="ba_settings")],
         [InlineKeyboardButton("📊 Statistics", callback_data="ba_stats")],
+        [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
     ]
-    if connected:
-        rows.append([InlineKeyboardButton("🔌 Disconnect Account", callback_data="ba_disconnect")])
-    rows.append([InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")])
     return _kb(rows)
 
 
@@ -276,12 +277,25 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     if action == "ba_accounts":
         accounts = await get_business_accounts(owner)
         lines = ["📱 Connected Telegram Accounts", ""]
-        if not accounts: lines.append("No account is connected yet.")
+        rows = []
+        if not accounts:
+            lines.append("No account is connected yet.")
         for i, x in enumerate(accounts, 1):
-            name = x.get("first_name") or x.get("username") or x.get("account_user_id")
+            account_id = int(x["account_user_id"])
+            name = x.get("first_name") or x.get("username") or account_id
             username = f"@{x.get('username')}" if x.get("username") else "No username"
-            lines.append(f"{i}. {name}\n{username}\nStatus: {x.get('connection_status', 'connected').title()}")
-        await q.edit_message_text("\n\n".join(lines), reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
+            lines.append(
+                f"{i}. {name}\n{username}\n"
+                f"Status: {x.get('connection_status', 'connected').title()}"
+            )
+            rows.append([
+                InlineKeyboardButton(
+                    f"🔌 Disconnect {x.get('username') or x.get('first_name') or account_id}",
+                    callback_data=f"ba_disconnect_{account_id}",
+                )
+            ])
+        rows.append([InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")])
+        await q.edit_message_text("\n\n".join(lines), reply_markup=_kb(rows)); return True
     if action == "ba_connect":
         if not _mtproto_ready():
             await q.edit_message_text("⚠️ Telegram API credentials are not configured by the platform owner.", reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
