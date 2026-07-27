@@ -9,9 +9,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from utils.timezone_ui import timezone_guide, timezone_keyboard, timezone_from_key, normalize_timezone
 from config import PUBLIC_BASE_URL
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
 from telegram.error import BadRequest, Conflict, InvalidToken, TelegramError
-from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, PreCheckoutQueryHandler, filters
 
 from database.seller_subscriptions import (
     effective_plan, plan_limit_warning, current_plan_text, get_config,
@@ -65,7 +65,7 @@ from database.platform_features import (
     set_scheduled_status,
 )
 from database.seller_data import (
-    activate_subscription, fulfill_subscription_payment, active_subscriptions, add_channel, create_payment, create_plan, delete_plan,
+    activate_subscription, fulfill_subscription_payment, active_subscriptions, add_channel, create_payment, create_automatic_payment, create_plan, delete_plan,
     ensure_seller_defaults, expired_subscriptions, get_channels, get_payment,
     set_channel_auto_invite,
     get_plan, get_plans, get_seller_settings, get_subscription, get_user, mark_expired,
