@@ -182,7 +182,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if a=="sub_mgmt_paid":
         rows=[]; lines=["💎 Plan Manage\n"]
         for p in cfg.get("paid_plans",[]):
-            lines.append(f"• {p['name']} — ₹{p['price']:g} / {p['duration_days']}d")
+            lines.append(
+                f"• {p['name']} — ₹{p['price']:g} / {p['duration_days']}d\n"
+                f"  Bots: {p.get('bot_limit', 1)} | "
+                f"Subscribers: {p.get('active_subscriber_limit', 0)} | "
+                f"Channels: {p.get('channel_limit', 0)} | "
+                f"Plans: {p.get('plan_limit', 0)} | "
+                f"Admins: {p.get('admin_limit', 1)}"
+            )
             rows.append([InlineKeyboardButton(f"✏ {p['name']}",callback_data=f"sub_mgmt_paid_edit_{p['plan_id']}"),InlineKeyboardButton("🗑",callback_data=f"sub_mgmt_paid_del_{p['plan_id']}")])
         rows += [[InlineKeyboardButton("➕ Add Custom Plan",callback_data="sub_mgmt_paid_add")],[InlineKeyboardButton("⬅ Back",callback_data="sub_mgmt_home")]]
         await q.edit_message_text("\n".join(lines),reply_markup=kb(rows)); return
