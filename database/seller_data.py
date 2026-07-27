@@ -57,7 +57,12 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
         "business_welcome_media_file_id":"",
         "business_welcome_buttons":[],
         "business_auto_reply_enabled":True,
+        "business_auto_reply_message":"",
+        "business_auto_reply_media_type":"",
+        "business_auto_reply_media_file_id":"",
+        "business_auto_reply_buttons":[],
         "business_templates_enabled":True,
+        "business_reply_templates":[],
         "created_at":now,
         "updated_at":now,
     }
@@ -78,7 +83,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
 
 async def get_seller_settings(owner_id:int): return await c(SETTINGS).find_one({"owner_id":owner_id}) or {}
 async def set_seller_setting(owner_id:int,key:str,value):
-    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_templates_enabled"}
+    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
     if key not in allowed: raise ValueError("Unsupported setting")
     now=datetime.now(timezone.utc)
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
@@ -125,11 +130,65 @@ async def save_business_account(owner_id:int, account_user_id:int, *, phone:str=
     return await c(BUSINESS_ACCOUNTS).find_one({"owner_id":int(owner_id),"account_user_id":int(account_user_id)})
 
 
+async def save_business_account_session(
+    owner_id:int,
+    account_user_id:int,
+    *,
+    encrypted_session:str,
+    phone:str="",
+    username:str="",
+    first_name:str="",
+):
+    """Persist one authorized MTProto session for a seller account."""
+    now=datetime.now(timezone.utc)
+    await c(BUSINESS_ACCOUNTS).update_one(
+        {"owner_id":int(owner_id),"account_user_id":int(account_user_id)},
+        {
+            "$set":{
+                "phone":str(phone or ""),
+                "username":str(username or ""),
+                "first_name":str(first_name or ""),
+                "encrypted_session":str(encrypted_session),
+                "active":True,
+                "connection_status":"connected",
+                "last_connected_at":now,
+                "updated_at":now,
+            },
+            "$setOnInsert":{
+                "owner_id":int(owner_id),
+                "account_user_id":int(account_user_id),
+                "created_at":now,
+                "welcome_sent":0,
+                "auto_replies_sent":0,
+                "templates_used":0,
+            },
+        },
+        upsert=True,
+    )
+    return await c(BUSINESS_ACCOUNTS).find_one(
+        {"owner_id":int(owner_id),"account_user_id":int(account_user_id)}
+    )
+
+
+async def get_business_account(owner_id:int, account_user_id:int):
+    return await c(BUSINESS_ACCOUNTS).find_one({
+        "owner_id":int(owner_id),
+        "account_user_id":int(account_user_id),
+    })
+
+
 async def disconnect_business_account(owner_id:int, account_user_id:int):
     now=datetime.now(timezone.utc)
     result=await c(BUSINESS_ACCOUNTS).update_one(
         {"owner_id":int(owner_id),"account_user_id":int(account_user_id),"active":True},
-        {"$set":{"active":False,"connection_status":"disconnected","updated_at":now}},
+        {
+            "$set":{
+                "active":False,
+                "connection_status":"disconnected",
+                "updated_at":now,
+            },
+            "$unset":{"encrypted_session":""},
+        },
     )
     return result.matched_count>0
 
@@ -140,13 +199,35 @@ async def business_automation_stats(owner_id:int):
         {"$group":{
             "_id":None,
             "accounts":{"$sum":{"$cond":["$active",1,0]}},
+            "conversations":{"$sum":{"$ifNull":["$conversations",0]}},
             "welcome_sent":{"$sum":{"$ifNull":["$welcome_sent",0]}},
             "auto_replies_sent":{"$sum":{"$ifNull":["$auto_replies_sent",0]}},
             "templates_used":{"$sum":{"$ifNull":["$templates_used",0]}},
+            "plans_opened":{"$sum":{"$ifNull":["$plans_opened",0]}},
+            "renew_opened":{"$sum":{"$ifNull":["$renew_opened",0]}},
+            "profile_opened":{"$sum":{"$ifNull":["$profile_opened",0]}},
+            "referral_opened":{"$sum":{"$ifNull":["$referral_opened",0]}},
         }},
     ]
     rows=await c(BUSINESS_ACCOUNTS).aggregate(pipeline).to_list(length=1)
-    return rows[0] if rows else {"accounts":0,"welcome_sent":0,"auto_replies_sent":0,"templates_used":0}
+    return rows[0] if rows else {
+        "accounts":0,"conversations":0,"welcome_sent":0,"auto_replies_sent":0,
+        "templates_used":0,"plans_opened":0,"renew_opened":0,"profile_opened":0,"referral_opened":0,
+    }
+
+
+async def increment_business_account_stat(owner_id:int, account_user_id:int, field:str, amount:int=1):
+    allowed={
+        "conversations","welcome_sent","auto_replies_sent","templates_used",
+        "plans_opened","renew_opened","profile_opened","referral_opened",
+    }
+    if field not in allowed:
+        raise ValueError("Unsupported business statistic")
+    result=await c(BUSINESS_ACCOUNTS).update_one(
+        {"owner_id":int(owner_id),"account_user_id":int(account_user_id),"active":True},
+        {"$inc":{field:int(amount)},"$set":{"updated_at":datetime.now(timezone.utc)}},
+    )
+    return result.matched_count>0
 
 
 async def create_plan(owner_id,name,duration_text,duration_minutes,price):
