@@ -10,6 +10,13 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
 
+# Telegram MTProto credentials used only by the optional Business Automation
+# account-connection flow. Create these at my.telegram.org. They are not bot
+# tokens and are intentionally optional so the main SaaS bot can still start
+# when Business Automation is not configured.
+TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or 0)
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+
 # ==========================================
 # MongoDB
 # ==========================================

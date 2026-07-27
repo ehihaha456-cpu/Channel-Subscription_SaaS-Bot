@@ -9,3 +9,4 @@ gunicorn==23.0.0
 cryptography==44.0.2
 paytmchecksum==1.7.0
 pycryptodome==3.23.0
+Telethon==1.40.0
