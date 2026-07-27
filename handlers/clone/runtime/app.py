@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from handlers.clone.admin import business_automation
 
 
 class CloneRuntimeAppMixin:
@@ -13,6 +14,16 @@ class CloneRuntimeAppMixin:
             owner_id,
             exc_info=(type(context.error), context.error, context.error.__traceback__),
         )
+
+    async def business_automation_text_handler(self, update, context):
+        handled = await business_automation.handle_text(self, update, context)
+        if handled:
+            raise ApplicationHandlerStop
+
+    async def business_automation_media_handler(self, update, context):
+        handled = await business_automation.handle_media(self, update, context)
+        if handled:
+            raise ApplicationHandlerStop
 
     def build_app(self,token,data_owner_id,seller_account_id,bot_id=None):
         protected_bot=ProtectedExtBot(token=token,owner_id=int(data_owner_id))
@@ -37,7 +48,7 @@ class CloneRuntimeAppMixin:
         )
         app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
         app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
-        app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^a_"))
+        app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
             app.add_handler(handler,group=-7)
@@ -50,8 +61,10 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.ALL,moderate_seller_message),group=-20)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
+        app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, self.business_automation_media_handler), group=-4)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,self.welcome_media_handler),group=-1)
         app.add_handler(MessageHandler(filters.PHOTO,self.photo_handler),group=0)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.business_automation_text_handler), group=-1)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,self.text_handler))
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.route_live_support_message),group=10)
         if app.job_queue: app.job_queue.run_repeating(self.expiry_job,interval=60,first=30,name=f"seller_expiry_{data_owner_id}")
