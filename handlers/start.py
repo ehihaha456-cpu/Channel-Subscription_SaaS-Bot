@@ -198,13 +198,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     try:
-        if await _is_owner(tg_user.id):
-            await _send_owner_dashboard(message)
-            return
-
+        # Handle deep links before the owner dashboard so clone-bot buttons
+        # open the requested seller feature instead of the generic home page.
         if context.args and context.args[0] == "businessautomation":
             from handlers.seller import send_business_automation
             await send_business_automation(message, tg_user.id)
+            return
+
+        if await _is_owner(tg_user.id):
+            await _send_owner_dashboard(message)
             return
 
         if context.args and context.args[0] == "sellerplan":
