@@ -81,14 +81,11 @@ async def _home(owner: int):
     enabled = bool(settings.get("business_automation_enabled"))
     text = (
         "💼 Business Automation\n\n"
+        "Connect Telegram accounts and automatically reply to customers.\n\n"
         f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
         f"Connected Accounts: {connected}\n\n"
-        "All connected Telegram accounts use one shared configuration:\n"
-        "• Welcome message and media\n"
-        "• URL buttons\n"
-        "• Auto replies\n"
-        "• Reply templates\n"
-        "• Settings and statistics"
+        "Use the buttons below to connect accounts and manage the shared "
+        "Welcome Message, Auto Reply, Reply Templates, Settings, and Statistics."
     )
     return text, _home_keyboard(connected, enabled)
 
@@ -101,10 +98,15 @@ async def _editor_state(owner: int) -> tuple[dict, dict, list[dict]]:
 
 
 def _welcome_text(item):
-    return editor_header(
-        "👋 Business Welcome Message",
-        item,
-        variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
+    return (
+        "👋 Welcome Message\n\n"
+        "This message is sent automatically when a customer messages a connected account for the first time. "
+        "Add text, media, URL buttons, or Clone Bot feature buttons, then use Preview before enabling it.\n\n"
+        + editor_header(
+            "Current Setup",
+            item,
+            variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
+        )
     )
 
 
@@ -115,10 +117,15 @@ def _welcome_keyboard(item):
 
 
 def _auto_text(item):
-    return editor_header(
-        "💬 Business Auto Reply",
-        item,
-        variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
+    return (
+        "💬 Auto Reply\n\n"
+        "This reply is sent automatically when a customer messages after the Welcome Message has already been sent. "
+        "Add text, media, links, or feature buttons and use Preview to check the result.\n\n"
+        + editor_header(
+            "Current Setup",
+            item,
+            variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
+        )
     )
 
 
@@ -174,7 +181,7 @@ def _template_keyboard(item):
 
 def _settings_text(s):
     return (
-        "⚙️ Business Automation Settings\n\n"
+        "⚙️ Business Automation Settings\n\nControl how automation works for every connected account. These settings are shared across all accounts.\n\n"
         f"Automation: {'Enabled' if s.get('business_automation_enabled') else 'Disabled'}\n"
         f"Welcome Once: {'Enabled' if s.get('business_welcome_once', True) else 'Disabled'}\n"
         f"Ignore Own Messages: {'Enabled' if s.get('business_ignore_outgoing', True) else 'Disabled'}\n"
@@ -266,7 +273,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         text, markup = await _home(owner); await q.edit_message_text(text, reply_markup=markup); return True
     if action == "ba_accounts":
         accounts = await get_business_accounts(owner)
-        lines = ["📱 Connected Telegram Accounts", ""]
+        lines = [
+            "📱 Connected Accounts",
+            "",
+            "View all connected Telegram accounts here.",
+            "Tap Disconnect only when you want to remove an account and stop its automation.",
+            "",
+        ]
         rows = []
         if not accounts:
             lines.append("No account is connected yet.")
@@ -287,10 +300,42 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         rows.append([InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")])
         await q.edit_message_text("\n\n".join(lines), reply_markup=_kb(rows)); return True
     if action == "ba_connect":
+        text = (
+            "🔗 Connect Telegram Account\n\n"
+            "Choose which type of Telegram account you want to connect.\n\n"
+            "👤 Normal Telegram Account\n"
+            "• Free to use\n"
+            "• Connect with phone number, Telegram login code, and 2-step password when enabled\n"
+            "• Supports Welcome Message, media, Auto Reply, and Reply Templates\n"
+            "• Real inline callback buttons are not supported\n\n"
+            "💼 Telegram Business Account\n"
+            "• Telegram Business/Premium is required\n"
+            "• Supports official Business integration and real inline buttons"
+        )
+        await q.edit_message_text(text, reply_markup=_kb([
+            [InlineKeyboardButton("👤 Normal Account", callback_data="ba_connect_normal")],
+            [InlineKeyboardButton("💼 Business Account", callback_data="ba_connect_official")],
+            [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
+        ])); return True
+    if action == "ba_connect_normal":
         if not _mtproto_ready():
             await q.edit_message_text("⚠️ Telegram API credentials are not configured by the platform owner.", reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
         context.user_data["ba_auth"] = {"step": "phone"}
-        await q.edit_message_text("🔗 Connect Telegram Account\n\nSend the phone number with country code.\nExample: +919876543210\n\nSend /cancel to stop."); return True
+        await q.edit_message_text(
+            "👤 Connect Normal Telegram Account\n\n"
+            "Send the phone number with country code.\n"
+            "Example: +919876543210\n\n"
+            "Telegram will send a login code. Send /cancel to stop."
+        ); return True
+    if action == "ba_connect_official":
+        await q.edit_message_text(
+            "💼 Connect Telegram Business Account\n\n"
+            "Telegram Business/Premium must be active on the account.\n\n"
+            "Open Telegram Settings → Telegram Business → Chatbots, then connect this Clone Bot. "
+            "After Telegram confirms the connection, return here.\n\n"
+            "Normal accounts can still use Welcome Message, Auto Reply, and Reply Templates without Premium.",
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Connect Account", callback_data="ba_connect")]])
+        ); return True
     if action == "ba_disconnect":
         accounts = await get_business_accounts(owner)
         if not accounts:
@@ -380,7 +425,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
 
     if action == "ba_templates":
         await q.edit_message_text(
-            "📝 Business Reply Templates\n\nCreate a shortcut, then use the same common editor to add text, media, URL/username buttons, or Clone Bot feature buttons.",
+            "📝 Reply Templates\n\nCreate saved replies that can be sent quickly with a shortcut. Each template can include text, media, URL buttons, or Clone Bot feature buttons.\n\nExample: /plans | Available Plans",
             reply_markup=_templates_keyboard(templates),
         ); return True
     if action == "ba_tpl_add":
