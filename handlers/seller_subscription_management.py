@@ -69,18 +69,21 @@ async def _show_owner_payment_settings(q, cfg):
     rz = gateways.get("razorpay") or {}
     cf = gateways.get("cashfree") or {}
     manual_enabled = bool(gateway_cfg.get("manual_enabled", True))
+    stars_enabled = bool(gateway_cfg.get("stars_enabled", False))
     qr_added = bool(cfg.get("payment_qr_file_id"))
     text = (
         "💳 Payment Settings\n\n"
         f"{'✅' if rz.get('enabled') else '❌'} Razorpay: {'Enabled' if rz.get('enabled') else 'Disabled'} | Credentials: {'Added' if rz.get('key_id') and rz.get('key_secret') else 'Not added'}\n"
         f"{'✅' if cf.get('enabled') else '❌'} Cashfree: {'Enabled' if cf.get('enabled') else 'Disabled'} | Credentials: {'Added' if cf.get('client_id') and cf.get('client_secret') else 'Not added'}\n"
-        f"{'✅' if manual_enabled else '❌'} Manual Payment: {'Enabled' if manual_enabled else 'Disabled'}\n\n"
+        f"{'✅' if manual_enabled else '❌'} Manual Payment: {'Enabled' if manual_enabled else 'Disabled'}\n"
+        f"{'✅' if stars_enabled else '❌'} Telegram Stars: {'Enabled' if stars_enabled else 'Disabled'}\n\n"
         f"UPI ID: {cfg.get('payment_upi_id') or 'Not added'}\n"
         f"UPI Name: {cfg.get('payment_upi_name') or 'Not added'}\n"
         f"QR Code: {'Added ✅' if qr_added else 'Not added ❌'}"
     )
     markup = kb([
         [InlineKeyboardButton("🌐 Automatic Payment Gateway", callback_data="pgcfg_owner_home")],
+        [InlineKeyboardButton("⭐ Telegram Stars", callback_data="sub_mgmt_stars_toggle")],
         [InlineKeyboardButton("💵 Manual Payment", callback_data="sub_mgmt_manual_payment")],
         [InlineKeyboardButton("⬅ Back", callback_data="sub_mgmt_home")],
     ])
@@ -137,6 +140,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if a=="sub_mgmt_payment":
         await _show_owner_payment_settings(q, cfg)
         return
+    if a=="sub_mgmt_stars_toggle":
+        gateway_cfg=await get_gateway_config("owner",0,decrypt=True)
+        await set_gateway_preferences("owner",0,stars_enabled=not bool(gateway_cfg.get("stars_enabled",False)))
+        cfg=await get_config()
+        await _show_owner_payment_settings(q,cfg)
+        return
     if a=="sub_mgmt_manual_payment":
         await _show_owner_manual_payment(q, cfg)
         return
@@ -183,7 +192,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows=[]; lines=["💎 Plan Manage\n"]
         for p in cfg.get("paid_plans",[]):
             lines.append(
-                f"• {p['name']} — ₹{p['price']:g} / {p['duration_days']}d\n"
+                f"• {p['name']} — ₹{p['price']:g} / ⭐{int(p.get('stars_price',0) or 0)} / {p['duration_days']}d\n"
                 f"  Bots: {p.get('bot_limit', 1)} | "
                 f"Subscribers: {p.get('active_subscriber_limit', 0)} | "
                 f"Channels: {p.get('channel_limit', 0)} | "
@@ -196,7 +205,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if a=="sub_mgmt_paid_add" or a.startswith("sub_mgmt_paid_edit_"):
         context.user_data.clear(); context.user_data["sub_wait"]="paid_add" if a.endswith("add") else "paid_edit"
         if a.startswith("sub_mgmt_paid_edit_"): context.user_data["sub_plan_id"]=a.replace("sub_mgmt_paid_edit_","")
-        await q.edit_message_text("Send: Name | Price | Days | Bots | Subscribers | Channels | Plans | Admins",reply_markup=back("sub_mgmt_paid")); return
+        await q.edit_message_text("Send: Name | Price | Stars | Days | Bots | Subscribers | Channels | Plans | Admins",reply_markup=back("sub_mgmt_paid")); return
     if a.startswith("sub_mgmt_paid_del_"):
         await delete_paid_plan(a.replace("sub_mgmt_paid_del_","")); await q.edit_message_text("✅ Paid plan deleted.",reply_markup=back("sub_mgmt_paid")); return
     if a=="sub_mgmt_trial":
@@ -420,17 +429,19 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cfg=await get_config(); p=dict(cfg.get("free_plan",{})); p.update(bot_limit=v[0],active_subscriber_limit=v[1],channel_limit=v[2],plan_limit=v[3],admin_limit=v[4],branding_enabled=True); await update_config(free_plan=p)
         elif mode in {"paid_add","paid_edit"}:
             x=[z.strip() for z in text.split("|")];
-            if len(x)!=8: raise ValueError("Need 8 values")
-            name,price,days,bots,subs,channels,plans,admins=x; pid=context.user_data.get("sub_plan_id") or re.sub(r"[^a-z0-9]+","_",name.lower()).strip("_")
+            if len(x)!=9: raise ValueError("Need 9 values")
+            name,price,stars,days,bots,subs,channels,plans,admins=x; pid=context.user_data.get("sub_plan_id") or re.sub(r"[^a-z0-9]+","_",name.lower()).strip("_")
             name=name.strip()
             if not pid or not name: raise ValueError("Plan name must contain letters or numbers")
             if len(name) > 40: raise ValueError("Plan name must be 40 characters or less")
             parsed_price=float(price)
+            parsed_stars=int(stars)
+            if parsed_stars < 0 or parsed_stars > 2500: raise ValueError("Stars must be between 0 and 2500")
             if parsed_price < 0: raise ValueError("Price cannot be negative")
             duration=int(days)
             if duration < 1 or duration > 3650: raise ValueError("Duration must be between 1 and 3650 days")
             limits=validate_plan_limits(bots,subs,channels,plans,admins)
-            await save_paid_plan({"plan_id":pid,"name":name,"price":parsed_price,"duration_days":duration,"bot_limit":limits[0],"active_subscriber_limit":limits[1],"channel_limit":limits[2],"plan_limit":limits[3],"admin_limit":limits[4],"broadcast_enabled":True,"coupon_enabled":True,"referral_enabled":True,"analytics_enabled":True,"branding_enabled":True,"active":True})
+            await save_paid_plan({"plan_id":pid,"name":name,"price":parsed_price,"stars_price":parsed_stars,"duration_days":duration,"bot_limit":limits[0],"active_subscriber_limit":limits[1],"channel_limit":limits[2],"plan_limit":limits[3],"admin_limit":limits[4],"broadcast_enabled":True,"coupon_enabled":True,"referral_enabled":True,"analytics_enabled":True,"branding_enabled":True,"active":True})
         elif mode=="trial":
             days,pid=[x.strip() for x in text.split("|",1)]
             trial_days=int(days)
