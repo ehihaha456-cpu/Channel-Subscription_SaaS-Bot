@@ -20,13 +20,17 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-async def _collection(name: str):
-    db = await get_database()
-    return db[name]
+def _collection(name: str):
+    """Return the initialized MongoDB collection.
+
+    ``get_database`` is synchronous; awaiting it caused every Business
+    Automation editor callback to fail before rendering.
+    """
+    return get_database()[name]
 
 
 async def get_business_welcome(owner_id: int) -> dict:
-    col = await _collection(WELCOME_COLLECTION)
+    col = _collection(WELCOME_COLLECTION)
     doc = await col.find_one({"owner_id": int(owner_id)}, {"_id": 0})
     if doc:
         return doc
@@ -50,7 +54,7 @@ async def update_business_welcome(owner_id: int, **fields) -> dict:
     allowed = {"enabled", "text", "media_type", "media_file_id", "buttons"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
-    col = await _collection(WELCOME_COLLECTION)
+    col = _collection(WELCOME_COLLECTION)
     await col.update_one(
         {"owner_id": int(owner_id)},
         {"$set": payload, "$setOnInsert": {"created_at": _now()}},
@@ -60,7 +64,7 @@ async def update_business_welcome(owner_id: int, **fields) -> dict:
 
 
 async def get_business_auto_reply(owner_id: int) -> dict:
-    col = await _collection(AUTO_REPLY_COLLECTION)
+    col = _collection(AUTO_REPLY_COLLECTION)
     doc = await col.find_one({"owner_id": int(owner_id)}, {"_id": 0})
     if doc:
         return doc
@@ -83,7 +87,7 @@ async def update_business_auto_reply(owner_id: int, **fields) -> dict:
     allowed = {"enabled", "text", "media_type", "media_file_id", "buttons"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
-    col = await _collection(AUTO_REPLY_COLLECTION)
+    col = _collection(AUTO_REPLY_COLLECTION)
     await col.update_one(
         {"owner_id": int(owner_id)},
         {"$set": payload, "$setOnInsert": {"created_at": _now()}},
@@ -93,7 +97,7 @@ async def update_business_auto_reply(owner_id: int, **fields) -> dict:
 
 
 async def list_business_reply_templates(owner_id: int) -> list[dict]:
-    col = await _collection(TEMPLATE_COLLECTION)
+    col = _collection(TEMPLATE_COLLECTION)
     cursor = col.find({"owner_id": int(owner_id)}, {"_id": 0}).sort("created_at", 1)
     docs = [doc async for doc in cursor]
     if docs:
@@ -123,7 +127,7 @@ async def list_business_reply_templates(owner_id: int) -> list[dict]:
 
 
 async def get_business_reply_template(owner_id: int, template_id: str) -> dict | None:
-    col = await _collection(TEMPLATE_COLLECTION)
+    col = _collection(TEMPLATE_COLLECTION)
     return await col.find_one(
         {"owner_id": int(owner_id), "template_id": str(template_id)},
         {"_id": 0},
@@ -143,7 +147,7 @@ async def create_business_reply_template(owner_id: int, shortcut: str, name: str
         "created_at": _now(),
         "updated_at": _now(),
     }
-    col = await _collection(TEMPLATE_COLLECTION)
+    col = _collection(TEMPLATE_COLLECTION)
     await col.insert_one(doc)
     doc.pop("_id", None)
     return doc
@@ -153,7 +157,7 @@ async def update_business_reply_template(owner_id: int, template_id: str, **fiel
     allowed = {"shortcut", "name", "text", "media_type", "media_file_id", "buttons"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
-    col = await _collection(TEMPLATE_COLLECTION)
+    col = _collection(TEMPLATE_COLLECTION)
     await col.update_one(
         {"owner_id": int(owner_id), "template_id": str(template_id)},
         {"$set": payload},
@@ -162,6 +166,6 @@ async def update_business_reply_template(owner_id: int, template_id: str, **fiel
 
 
 async def delete_business_reply_template(owner_id: int, template_id: str) -> bool:
-    col = await _collection(TEMPLATE_COLLECTION)
+    col = _collection(TEMPLATE_COLLECTION)
     result = await col.delete_one({"owner_id": int(owner_id), "template_id": str(template_id)})
     return bool(result.deleted_count)
