@@ -4,6 +4,74 @@ from handlers.common.clone_context import *
 
 
 class ClonePaymentDeliveryMixin:
+    async def stars_precheckout(self, update, context):
+        query = update.pre_checkout_query
+        try:
+            kind, scope, owner_text, user_text, plan_id = str(query.invoice_payload or '').split(':', 4)
+            owner = int(owner_text)
+            user_id = int(user_text)
+            if kind != 'stars' or scope != 'clone' or owner != self.owner(context) or user_id != int(query.from_user.id):
+                raise ValueError('invalid invoice')
+            cfg = await get_gateway_config('seller', owner, decrypt=True)
+            plan = await get_plan(owner, plan_id)
+            expected = int((plan or {}).get('stars_price', 0) or 0)
+            if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
+                raise ValueError('plan changed')
+            await query.answer(ok=True)
+        except Exception:
+            await query.answer(ok=False, error_message='This Stars invoice is no longer valid. Reopen the payment page.')
+
+    async def stars_success(self, update, context):
+        payment = update.effective_message.successful_payment
+        if not payment or payment.currency != 'XTR':
+            return
+        try:
+            kind, scope, owner_text, user_text, plan_id = payment.invoice_payload.split(':', 4)
+            owner = int(owner_text)
+            user_id = int(user_text)
+            if kind != 'stars' or scope != 'clone' or owner != self.owner(context) or user_id != int(update.effective_user.id):
+                raise ValueError('invalid payment')
+            plan = await get_plan(owner, plan_id)
+            expected = int((plan or {}).get('stars_price', 0) or 0)
+            if not plan or expected <= 0 or payment.total_amount != expected:
+                raise ValueError('price mismatch')
+            reference = payment.telegram_payment_charge_id
+            previous = await get_subscription(owner, user_id)
+            now = datetime.now(timezone.utc)
+            previous_expiry = (previous or {}).get('expiry_date')
+            if previous_expiry and previous_expiry.tzinfo is None:
+                previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+            was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
+            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference)
+            result = await fulfill_subscription_payment(
+                owner,
+                user_id,
+                f'stars:{reference}',
+                plan['name'],
+                plan['duration_minutes'],
+                amount=0,
+                duration_text=plan['duration_text'],
+            )
+            details = {
+                'plan_name': plan['name'],
+                'amount': 0,
+                'stars_amount': payment.total_amount,
+                'gateway': 'Telegram Stars',
+                'transaction_id': reference,
+                'payment_date': now,
+                'expiry_date': result.get('expiry_date'),
+                'duration': plan['duration_text'],
+                'was_already_active': was_active,
+                'previous_expiry': previous_expiry,
+            }
+            await self.deliver_subscription_access(owner, user_id, details)
+            await self.notify_automatic_payment_success(owner, user_id, details)
+        except Exception:
+            logger.exception('Clone Stars fulfillment failed owner=%s user=%s', context.application.bot_data.get('seller_owner_id'), update.effective_user.id)
+            await update.effective_message.reply_text(
+                '⚠️ Your Stars payment was received, but activation needs support review. Keep this receipt and contact support.'
+            )
+
     async def notify_automatic_payment_success(self, owner_id:int, user_id:int, details:dict):
         """Notify the seller and payment-authorized staff through the same clone bot."""
         owner_id = int(owner_id)
@@ -37,7 +105,9 @@ class ClonePaymentDeliveryMixin:
         safe_username = html.escape(f"@{username}" if username else "Not Set")
         mention = f'<a href="tg://user?id={user_id}">{safe_name}</a>'
         amount = float(details.get("amount") or 0)
+        stars_amount = int(details.get("stars_amount") or 0)
         gateway = str(details.get("gateway") or "-").title()
+        amount_line = f"• Amount: ⭐{stars_amount}\n" if stars_amount else f"• Amount: ₹{amount:g}\n"
 
         text = (
             "💰 <b>Automatic Payment Successful</b>\n\n"
@@ -50,7 +120,7 @@ class ClonePaymentDeliveryMixin:
             "📦 <b>Subscription Details</b>\n"
             f"• Plan: {html.escape(str(details.get('plan_name') or 'Subscription'))}\n"
             f"• Duration: {html.escape(str(details.get('duration') or '-'))}\n"
-            f"• Amount: ₹{amount:g}\n"
+            f"{amount_line}"
             f"• Payment Gateway: {html.escape(gateway)}\n"
             f"• Payment Date: {_format_dt(details.get('payment_date'))}\n"
             f"• Expiry Date: {_format_dt(details.get('expiry_date'))}\n\n"
@@ -196,13 +266,18 @@ class ClonePaymentDeliveryMixin:
                             "🔗 Your fresh private invite link has been generated."
                         )
 
+                    success_amount_line = (
+                        f"💰 Amount: ⭐{int(success_details.get('stars_amount') or 0)}\n"
+                        if success_details.get('stars_amount')
+                        else f"💰 Amount: ₹{float(success_details.get('amount') or 0):g}\n"
+                    )
                     text = (
                         "✅ Payment verified automatically\n"
                         "━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"👤 Name: {full_name}\n"
                         f"🆔 Username: {username_text}\n"
                         f"📦 Purchased Plan: {success_details.get('plan_name') or 'Subscription'}\n"
-                        f"💰 Amount: ₹{float(success_details.get('amount') or 0):g}\n"
+                        f"{success_amount_line}"
                         f"💳 Gateway: {str(success_details.get('gateway') or '').title() or '-'}\n"
                         f"🧾 Transaction ID: {success_details.get('transaction_id') or '-'}\n"
                         f"📅 Payment Date: {_format_dt(success_details.get('payment_date'))}\n"
