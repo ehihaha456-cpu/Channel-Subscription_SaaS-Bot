@@ -5,6 +5,7 @@ from database.mongo import get_database
 
 SETTINGS="seller_settings"; PLANS="seller_plans"; CHANNELS="seller_channels"; USERS="seller_users"
 PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_referrals"
+BUSINESS_ACCOUNTS="seller_business_accounts"
 
 
 def c(name): return get_database()[name]
@@ -20,6 +21,8 @@ async def initialize_seller_data_indexes():
     await c(SUBS).create_index([("owner_id",1),("active",1),("expiry_date",1)])
     await c(REFERRALS).create_index([("owner_id",1),("referred_user_id",1)], unique=True)
     await c(REFERRALS).create_index([("owner_id",1),("referrer_user_id",1),("rewarded",1)])
+    await c(BUSINESS_ACCOUNTS).create_index([("owner_id",1),("account_user_id",1)], unique=True)
+    await c(BUSINESS_ACCOUNTS).create_index([("owner_id",1),("active",1),("created_at",1)])
 
 
 async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
@@ -45,6 +48,16 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
         "referral_unlock_target_chat_id":None,
         "referral_unlock_target_title":"",
         "referral_unlock_count_mode":"subscription",
+        "business_automation_enabled":False,
+        "business_welcome_enabled":True,
+        "business_welcome_once":True,
+        "business_reply_delay_seconds":0,
+        "business_welcome_message":f"👋 Welcome to {bot_name}!",
+        "business_welcome_media_type":"",
+        "business_welcome_media_file_id":"",
+        "business_welcome_buttons":[],
+        "business_auto_reply_enabled":True,
+        "business_templates_enabled":True,
         "created_at":now,
         "updated_at":now,
     }
@@ -65,14 +78,79 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
 
 async def get_seller_settings(owner_id:int): return await c(SETTINGS).find_one({"owner_id":owner_id}) or {}
 async def set_seller_setting(owner_id:int,key:str,value):
-    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode"}
+    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_templates_enabled"}
     if key not in allowed: raise ValueError("Unsupported setting")
     now=datetime.now(timezone.utc)
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
 
 
-async def create_plan(owner_id,name,duration_text,duration_minutes,price,stars_price=0):
-    now=datetime.now(timezone.utc); doc={"owner_id":owner_id,"plan_id":uuid4().hex[:12],"name":name.strip(),"duration_text":duration_text,"duration_minutes":int(duration_minutes),"price":float(price),"stars_price":int(stars_price or 0),"active":True,"created_at":now,"updated_at":now}
+async def get_business_accounts(owner_id:int, active_only:bool=True):
+    query={"owner_id":int(owner_id)}
+    if active_only:
+        query["active"]=True
+    return await c(BUSINESS_ACCOUNTS).find(query).sort("created_at",1).to_list(length=100)
+
+
+async def count_business_accounts(owner_id:int, active_only:bool=True):
+    query={"owner_id":int(owner_id)}
+    if active_only:
+        query["active"]=True
+    return await c(BUSINESS_ACCOUNTS).count_documents(query)
+
+
+async def save_business_account(owner_id:int, account_user_id:int, *, phone:str="", username:str="", first_name:str=""):
+    now=datetime.now(timezone.utc)
+    await c(BUSINESS_ACCOUNTS).update_one(
+        {"owner_id":int(owner_id),"account_user_id":int(account_user_id)},
+        {
+            "$set":{
+                "phone":str(phone or ""),
+                "username":str(username or ""),
+                "first_name":str(first_name or ""),
+                "active":True,
+                "connection_status":"connected",
+                "updated_at":now,
+            },
+            "$setOnInsert":{
+                "owner_id":int(owner_id),
+                "account_user_id":int(account_user_id),
+                "created_at":now,
+                "welcome_sent":0,
+                "auto_replies_sent":0,
+                "templates_used":0,
+            },
+        },
+        upsert=True,
+    )
+    return await c(BUSINESS_ACCOUNTS).find_one({"owner_id":int(owner_id),"account_user_id":int(account_user_id)})
+
+
+async def disconnect_business_account(owner_id:int, account_user_id:int):
+    now=datetime.now(timezone.utc)
+    result=await c(BUSINESS_ACCOUNTS).update_one(
+        {"owner_id":int(owner_id),"account_user_id":int(account_user_id),"active":True},
+        {"$set":{"active":False,"connection_status":"disconnected","updated_at":now}},
+    )
+    return result.matched_count>0
+
+
+async def business_automation_stats(owner_id:int):
+    pipeline=[
+        {"$match":{"owner_id":int(owner_id)}},
+        {"$group":{
+            "_id":None,
+            "accounts":{"$sum":{"$cond":["$active",1,0]}},
+            "welcome_sent":{"$sum":{"$ifNull":["$welcome_sent",0]}},
+            "auto_replies_sent":{"$sum":{"$ifNull":["$auto_replies_sent",0]}},
+            "templates_used":{"$sum":{"$ifNull":["$templates_used",0]}},
+        }},
+    ]
+    rows=await c(BUSINESS_ACCOUNTS).aggregate(pipeline).to_list(length=1)
+    return rows[0] if rows else {"accounts":0,"welcome_sent":0,"auto_replies_sent":0,"templates_used":0}
+
+
+async def create_plan(owner_id,name,duration_text,duration_minutes,price):
+    now=datetime.now(timezone.utc); doc={"owner_id":owner_id,"plan_id":uuid4().hex[:12],"name":name.strip(),"duration_text":duration_text,"duration_minutes":int(duration_minutes),"price":float(price),"active":True,"created_at":now,"updated_at":now}
     await c(PLANS).insert_one(doc); return doc
 async def get_plan(owner_id,plan_id): return await c(PLANS).find_one({"owner_id":owner_id,"plan_id":plan_id})
 async def get_plans(owner_id,active_only=False):
