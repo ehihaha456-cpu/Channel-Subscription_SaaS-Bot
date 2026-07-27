@@ -16,14 +16,14 @@ async def handle(self, update, context, q, owner, staff, a, role):
             return True
         context.user_data.clear()
         context.user_data['wait_plan_add'] = True
-        await q.edit_message_text('Send: Plan Name | Duration | Price\nExample: Premium | 30d | 199', reply_markup=self.back('a_plans'))
+        await q.edit_message_text('Send: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99', reply_markup=self.back('a_plans'))
         return True
     if a == 'a_plan_list':
         plans = await get_plans(owner)
         lines = ['📋 Plans\n']
         kb = []
         for p in plans:
-            lines.append(f"{('✅' if p.get('active') else '⏸')} {p['name']} — {p['duration_text']} — ₹{p['price']:g}")
+            lines.append(f"{('✅' if p.get('active') else '⏸')} {p['name']} — {p['duration_text']} — ₹{p['price']:g} — ⭐{int(p.get('stars_price',0) or 0)}")
             kb.append([InlineKeyboardButton(f"✏ {p['name'][:16]}", callback_data=f"a_plan_edit_{p['plan_id']}"), InlineKeyboardButton('🗑', callback_data=f"a_plan_del_{p['plan_id']}")])
             kb.append([InlineKeyboardButton('⏸ Disable' if p.get('active') else '▶ Enable', callback_data=f"a_plan_toggle_{p['plan_id']}")])
         kb.append([InlineKeyboardButton('⬅ Back', callback_data='a_plans')])
@@ -32,7 +32,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a.startswith('a_plan_edit_'):
         context.user_data.clear()
         context.user_data['wait_plan_edit'] = a.replace('a_plan_edit_', '')
-        await q.edit_message_text('Send new: Plan Name | Duration | Price', reply_markup=self.back('a_plan_list'))
+        await q.edit_message_text('Send new: Plan Name | Duration | Price | Stars', reply_markup=self.back('a_plan_list'))
         return True
     if a.startswith('a_plan_del_'):
         await delete_plan(owner, a.replace('a_plan_del_', ''))

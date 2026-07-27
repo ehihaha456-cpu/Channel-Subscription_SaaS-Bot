@@ -11,7 +11,33 @@ async def handle(self, update, context, q, owner, staff, a, role):
         rz = gateways.get('razorpay') or {}
         cf = gateways.get('cashfree') or {}
         manual_enabled = bool(gateway_cfg.get('manual_enabled', True))
-        await q.edit_message_text(f"💳 Payment Settings\n\n{('✅' if rz.get('enabled') else '❌')} Razorpay: {('Enabled' if rz.get('enabled') else 'Disabled')} | Credentials: {('Added' if rz.get('key_id') and rz.get('key_secret') else 'Not added')}\n{('✅' if cf.get('enabled') else '❌')} Cashfree: {('Enabled' if cf.get('enabled') else 'Disabled')} | Credentials: {('Added' if cf.get('client_id') and cf.get('client_secret') else 'Not added')}\n{('✅' if manual_enabled else '❌')} Manual Payment: {('Enabled' if manual_enabled else 'Disabled')}\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}", reply_markup=self.payment_menu())
+        stars_enabled = bool(gateway_cfg.get('stars_enabled', False))
+        await q.edit_message_text(f"💳 Payment Settings\n\n{('✅' if rz.get('enabled') else '❌')} Razorpay: {('Enabled' if rz.get('enabled') else 'Disabled')} | Credentials: {('Added' if rz.get('key_id') and rz.get('key_secret') else 'Not added')}\n{('✅' if cf.get('enabled') else '❌')} Cashfree: {('Enabled' if cf.get('enabled') else 'Disabled')} | Credentials: {('Added' if cf.get('client_id') and cf.get('client_secret') else 'Not added')}\n{('✅' if manual_enabled else '❌')} Manual Payment: {('Enabled' if manual_enabled else 'Disabled')}\n{('✅' if stars_enabled else '❌')} Telegram Stars: {('Enabled' if stars_enabled else 'Disabled')}\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}", reply_markup=self.payment_menu())
+        return True
+    if a == 'a_stars_toggle':
+        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+        await set_gateway_preferences(
+            'seller', owner,
+            stars_enabled=not bool(gateway_cfg.get('stars_enabled', False)),
+        )
+        settings = await get_seller_settings(owner)
+        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+        gateways = gateway_cfg.get('gateways') or {}
+        rz = gateways.get('razorpay') or {}
+        cf = gateways.get('cashfree') or {}
+        manual_enabled = bool(gateway_cfg.get('manual_enabled', True))
+        stars_enabled = bool(gateway_cfg.get('stars_enabled', False))
+        await q.edit_message_text(
+            f"💳 Payment Settings\n\n"
+            f"{('✅' if rz.get('enabled') else '❌')} Razorpay: {('Enabled' if rz.get('enabled') else 'Disabled')} | Credentials: {('Added' if rz.get('key_id') and rz.get('key_secret') else 'Not added')}\n"
+            f"{('✅' if cf.get('enabled') else '❌')} Cashfree: {('Enabled' if cf.get('enabled') else 'Disabled')} | Credentials: {('Added' if cf.get('client_id') and cf.get('client_secret') else 'Not added')}\n"
+            f"{('✅' if manual_enabled else '❌')} Manual Payment: {('Enabled' if manual_enabled else 'Disabled')}\n"
+            f"{('✅' if stars_enabled else '❌')} Telegram Stars: {('Enabled' if stars_enabled else 'Disabled')}\n\n"
+            f"UPI ID: {settings.get('upi_id') or 'Not added'}\n"
+            f"UPI Name: {settings.get('upi_name') or 'Not added'}\n"
+            f"QR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}",
+            reply_markup=self.payment_menu(),
+        )
         return True
     if a == 'a_manual_payment':
         settings = await get_seller_settings(owner)
