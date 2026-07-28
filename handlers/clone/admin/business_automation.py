@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaAnimation, InputMediaDocument
 from handlers.common.editor_engine import (
     build_editor_keyboard,
     editor_header,
@@ -210,15 +210,47 @@ def _preview_markup(rows):
     return build_editor_keyboard(rows)
 
 
-async def _send_preview(message, text, media_type, file_id, buttons):
-    markup = _preview_markup(buttons)
-    text = text or "Preview message"
-    if media_type == "photo" and file_id:
-        await message.reply_photo(file_id, caption=text, reply_markup=markup)
-    elif media_type == "video" and file_id:
-        await message.reply_video(file_id, caption=text, reply_markup=markup)
-    else:
+def _media_items(item):
+    media = list(item.get("media") or [])
+    if not media and item.get("media_file_id"):
+        media = [{"type": item.get("media_type") or "document", "file_id": item.get("media_file_id")}]
+    return [m for m in media if m.get("file_id")][:10]
+
+
+async def _send_preview(message, item):
+    markup = _preview_markup(item.get("buttons") or [])
+    text = str(item.get("text") or "Preview message")
+    media = _media_items(item)
+    if not media:
         await message.reply_text(text, reply_markup=markup)
+        return
+    # Telegram albums cannot carry an inline keyboard. Send media in order,
+    # then attach the buttons to a final text message when there is more than one.
+    if len(media) == 1:
+        m = media[0]
+        kind, file_id = str(m.get("type") or "document"), str(m.get("file_id") or "")
+        if kind == "photo":
+            await message.reply_photo(file_id, caption=text, reply_markup=markup)
+        elif kind == "video":
+            await message.reply_video(file_id, caption=text, reply_markup=markup)
+        elif kind == "animation":
+            await message.reply_animation(file_id, caption=text, reply_markup=markup)
+        else:
+            await message.reply_document(file_id, caption=text, reply_markup=markup)
+        return
+    for index, m in enumerate(media):
+        kind, file_id = str(m.get("type") or "document"), str(m.get("file_id") or "")
+        caption = text if index == 0 else None
+        if kind == "photo":
+            await message.reply_photo(file_id, caption=caption)
+        elif kind == "video":
+            await message.reply_video(file_id, caption=caption)
+        elif kind == "animation":
+            await message.reply_animation(file_id, caption=caption)
+        else:
+            await message.reply_document(file_id, caption=caption)
+    if markup:
+        await message.reply_text("Choose an option below.", reply_markup=markup)
 
 
 def _mtproto_ready():
@@ -389,13 +421,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         welcome = await update_business_welcome(owner, text="")
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_rmmedia":
-        welcome = await update_business_welcome(owner, media_type="", media_file_id="")
+        welcome = await update_business_welcome(owner, media_type="", media_file_id="", media=[])
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_rmbuttons":
         welcome = await update_business_welcome(owner, buttons=[])
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_preview":
-        await _send_preview(q.message, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons")); await q.answer("Preview sent."); return True
+        await _send_preview(q.message, welcome); await q.answer("Preview sent."); return True
 
     if action == "ba_auto":
         await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
@@ -415,13 +447,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         auto_reply = await update_business_auto_reply(owner, text="")
         await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
     if action == "ba_auto_rmmedia":
-        auto_reply = await update_business_auto_reply(owner, media_type="", media_file_id="")
+        auto_reply = await update_business_auto_reply(owner, media_type="", media_file_id="", media=[])
         await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
     if action == "ba_auto_rmbuttons":
         auto_reply = await update_business_auto_reply(owner, buttons=[])
         await q.edit_message_text(_auto_text(auto_reply), reply_markup=_auto_keyboard(auto_reply)); return True
     if action == "ba_auto_preview":
-        await _send_preview(q.message, auto_reply.get("text"), auto_reply.get("media_type"), auto_reply.get("media_file_id"), auto_reply.get("buttons")); await q.answer("Preview sent."); return True
+        await _send_preview(q.message, auto_reply); await q.answer("Preview sent."); return True
 
     if action == "ba_templates":
         await q.edit_message_text(
@@ -461,7 +493,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             context.user_data["ba_editor"] = {"field": "template_buttons", "template_id": tid}
             await q.edit_message_text(url_buttons_header() + "\n\nSend /cancel to stop."); return True
         if op == "rmtext": item = await update_business_reply_template(owner, tid, text="")
-        elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="")
+        elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="", media=[])
         elif op == "rmbuttons": item = await update_business_reply_template(owner, tid, buttons=[])
         elif op == "delete":
             await delete_business_reply_template(owner, tid)
@@ -547,6 +579,13 @@ async def handle_text(self, update, context):
     editor = context.user_data.get("ba_editor")
     if not editor:
         return False
+    if text.lower() == "/done" and str(editor.get("field") or "") in {"welcome_media", "auto_media", "template_media"}:
+        context.user_data.pop("ba_editor", None)
+        await update.effective_message.reply_text(
+            "✅ Media setup completed.",
+            reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+        )
+        return True
     if text.lower() == "/cancel":
         context.user_data.pop("ba_editor", None)
         await update.effective_message.reply_text(
@@ -638,20 +677,29 @@ async def handle_media(self, update, context):
 
     template_id = str(editor.get("template_id") or "")
     if field == "welcome_media":
-        await update_business_welcome(owner, media_type=media_type, media_file_id=file_id)
+        item = await get_business_welcome(owner)
     elif field == "auto_media":
-        await update_business_auto_reply(owner, media_type=media_type, media_file_id=file_id)
+        item = await get_business_auto_reply(owner)
     else:
-        item = await update_business_reply_template(
-            owner, template_id, media_type=media_type, media_file_id=file_id
-        )
+        item = await get_business_reply_template(owner, template_id)
         if not item:
             await msg.reply_text("❌ Reply template not found.")
             return True
 
-    context.user_data.pop("ba_editor", None)
+    media = _media_items(item)
+    if len(media) >= 10:
+        await msg.reply_text("⚠️ Maximum 10 media files are allowed. Send /done to finish or remove the current media list first.")
+        return True
+    media.append({"type": media_type, "file_id": file_id})
+    legacy = media[0]
+    if field == "welcome_media":
+        await update_business_welcome(owner, media=media, media_type=legacy["type"], media_file_id=legacy["file_id"])
+    elif field == "auto_media":
+        await update_business_auto_reply(owner, media=media, media_type=legacy["type"], media_file_id=legacy["file_id"])
+    else:
+        await update_business_reply_template(owner, template_id, media=media, media_type=legacy["type"], media_file_id=legacy["file_id"])
+
     await msg.reply_text(
-        "✅ Business Automation media updated.",
-        reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+        f"✅ Media added ({len(media)}/10). Send another media file, or send /done when finished."
     )
     return True
