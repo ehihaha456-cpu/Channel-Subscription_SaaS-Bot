@@ -46,6 +46,55 @@ def _keyword_in_message(keyword: str, message: str) -> bool:
         return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", message, flags=re.UNICODE) is not None
     return keyword in message
 
+
+
+def _variable_values(user) -> dict[str, str]:
+    zone = ZoneInfo("Asia/Kolkata")
+    now = datetime.now(zone)
+    first = str(getattr(user, "first_name", "") or "")
+    last = str(getattr(user, "last_name", "") or "")
+    name = " ".join(x for x in (first, last) if x).strip() or str(getattr(user, "username", "") or "User")
+    username_raw = str(getattr(user, "username", "") or "").lstrip("@")
+    username = f"@{username_raw}" if username_raw else ""
+    user_id = str(getattr(user, "id", "") or "")
+    mention = f"tg://user?id={user_id}" if user_id else ""
+    return {
+        "{NAME}": name,
+        "{FIRSTNAME}": first,
+        "{SURNAME}": last,
+        "{NAMESURNAME}": name,
+        "{ID}": user_id,
+        "{USERNAME}": username,
+        "{MENTION}": mention,
+        "{DATE}": now.strftime("%d %b %Y"),
+        "{TIME}": now.strftime("%I:%M %p"),
+        "{WEEKDAY}": now.strftime("%A"),
+    }
+
+
+def _render_variables(value: str, user) -> str:
+    rendered = str(value or "")
+    for token, replacement in _variable_values(user).items():
+        rendered = rendered.replace(token, replacement)
+    return rendered
+
+
+def _render_button_rows(rows, user):
+    rendered_rows = []
+    for row in rows or []:
+        rendered_row = []
+        for item in row or []:
+            copy = dict(item)
+            copy["text"] = _render_variables(str(copy.get("text") or ""), user)
+            if "value" in copy:
+                copy["value"] = _render_variables(str(copy.get("value") or ""), user)
+            if "url" in copy:
+                copy["url"] = _render_variables(str(copy.get("url") or ""), user)
+            rendered_row.append(copy)
+        if rendered_row:
+            rendered_rows.append(rendered_row)
+    return rendered_rows
+
 class BusinessAutomationRuntime:
     def __init__(self) -> None:
         self._clients: dict[tuple[int, int], TelegramClient] = {}
@@ -199,9 +248,11 @@ class BusinessAutomationRuntime:
 
     async def _send_configured_message(
         self, client: TelegramClient, peer_id: int, owner_id: int, *,
-        text: str, media_type: str, media_file_id: str, button_rows, media_items=None,
+        text: str, media_type: str, media_file_id: str, button_rows, media_items=None, user=None,
     ) -> None:
-        buttons = await self._telethon_buttons(owner_id, button_rows)
+        rendered_text = _render_variables(text, user) if user is not None else str(text or "")
+        rendered_rows = _render_button_rows(button_rows, user) if user is not None else button_rows
+        buttons = await self._telethon_buttons(owner_id, rendered_rows)
         items = list(media_items or [])
         if not items and media_file_id:
             items = [{"type": media_type or "document", "file_id": media_file_id}]
@@ -213,13 +264,13 @@ class BusinessAutomationRuntime:
                 streams.append(stream)
         if len(streams) > 1:
             await client.send_file(peer_id, streams, album=True)
-            if text or buttons:
-                await client.send_message(peer_id, text or "Choose an option below.", buttons=buttons)
+            if rendered_text or buttons:
+                await client.send_message(peer_id, rendered_text or "Choose an option below.", buttons=buttons)
             return
         if len(streams) == 1:
-            await client.send_file(peer_id, streams[0], caption=text or "", buttons=buttons, force_document=str(items[0].get("type") or "").lower() == "document")
+            await client.send_file(peer_id, streams[0], caption=rendered_text or "", buttons=buttons, force_document=str(items[0].get("type") or "").lower() == "document")
             return
-        await client.send_message(peer_id, text or "Welcome!", buttons=buttons)
+        await client.send_message(peer_id, rendered_text or "Welcome!", buttons=buttons)
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
         try:
@@ -264,6 +315,7 @@ class BusinessAutomationRuntime:
                         media_file_id=media_file_id,
                         button_rows=welcome.get("buttons") or [],
                         media_items=welcome.get("media") or [],
+                        user=sender,
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
@@ -285,6 +337,7 @@ class BusinessAutomationRuntime:
                             media_file_id=media_file_id,
                             button_rows=match.get("buttons") or [],
                             media_items=match.get("media") or [],
+                            user=sender,
                         )
                         await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
         except asyncio.CancelledError:
@@ -312,6 +365,7 @@ class BusinessAutomationRuntime:
             peer_id = int(event.chat_id or 0)
             if not peer_id:
                 return
+            recipient = await event.get_chat()
             try:
                 await event.delete()
             except Exception:
@@ -323,6 +377,7 @@ class BusinessAutomationRuntime:
                 media_file_id=str(item.get("media_file_id") or ""),
                 button_rows=item.get("buttons") or [],
                 media_items=item.get("media") or [],
+                user=recipient,
             )
             await increment_business_account_stat(owner_id, account_user_id, "templates_used")
         except asyncio.CancelledError:
