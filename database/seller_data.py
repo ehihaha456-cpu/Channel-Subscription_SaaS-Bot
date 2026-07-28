@@ -887,3 +887,12 @@ async def release_referral_reward(
 async def stats(owner_id):
     revenue=await c(PAYMENTS).aggregate([{"$match":{"owner_id":owner_id,"status":"approved"}},{"$group":{"_id":None,"total":{"$sum":"$amount"}}}]).to_list(length=1)
     return {"users":await count_users(owner_id),"plans":await c(PLANS).count_documents({"owner_id":owner_id}),"channels":await c(CHANNELS).count_documents({"owner_id":owner_id,"active":True}),"pending":await c(PAYMENTS).count_documents({"owner_id":owner_id,"status":"pending"}),"revenue":revenue[0]["total"] if revenue else 0}
+
+async def reset_business_welcome(owner_id:int, account_user_id:int, peer_user_id:int):
+    """Forget the first-contact claim so the next incoming message receives welcome again."""
+    result = await c(BUSINESS_CONTACTS).delete_one({
+        "owner_id": int(owner_id),
+        "account_user_id": int(account_user_id),
+        "peer_user_id": int(peer_user_id),
+    })
+    return bool(result.deleted_count)
