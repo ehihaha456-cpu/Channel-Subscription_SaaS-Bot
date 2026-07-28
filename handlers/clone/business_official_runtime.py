@@ -355,7 +355,13 @@ async def handle_deleted_business_messages(update: Update, context: ContextTypes
             connection = await context.bot.get_business_connection(connection_id)
             connection_doc = await save_official_business_connection(owner_id, connection)
         business_user_id = int(connection_doc.get("business_user_id") or owner_id)
-        await reset_business_welcome(owner_id, business_user_id, int(deleted.chat.id))
+        chat_id = int(deleted.chat.id)
+        await reset_business_welcome(owner_id, business_user_id, chat_id)
+        # Older records may have used owner_id as the account key before the
+        # Telegram Business user ID was stored. Clear both keys so the next
+        # customer message is always treated as a new conversation.
+        if business_user_id != int(owner_id):
+            await reset_business_welcome(owner_id, int(owner_id), chat_id)
     except Exception:
         logger.exception("Could not reset Business welcome after deleted messages owner=%s", owner_id)
 
