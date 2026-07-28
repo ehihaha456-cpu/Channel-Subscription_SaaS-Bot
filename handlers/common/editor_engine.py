@@ -137,12 +137,13 @@ def build_editor_keyboard(
 def editor_header(title: str, item: dict[str, Any], *, variables: str = "") -> str:
     """Shared editor summary used by welcome, auto-reply, and templates."""
     button_count = sum(len(row) for row in (item.get("buttons") or []))
+    media_count = len(item.get("media") or ([] if not item.get("media_file_id") else [{"file_id": item.get("media_file_id")}]))
     lines = [
         title,
         "",
         f"Status: {'🟢 Enabled' if item.get('enabled', True) else '🔴 Disabled'}",
         f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}",
-        f"🖼 Media: {'✅ Added' if item.get('media_file_id') else '❌ Not added'}",
+        f"🖼 Media: {media_count}/10" if media_count else "🖼 Media: ❌ Not added",
         f"🔗 Buttons: {button_count}",
     ]
     if variables:
@@ -182,7 +183,7 @@ def editor_menu_keyboard(
     remove_row: list[InlineKeyboardButton] = []
     if item.get("text"):
         remove_row.append(InlineKeyboardButton("🗑 Text", callback_data=f"{prefix}_rmtext"))
-    if item.get("media_file_id"):
+    if item.get("media") or item.get("media_file_id"):
         remove_row.append(InlineKeyboardButton("🗑 Media", callback_data=f"{prefix}_rmmedia"))
     if item.get("buttons"):
         remove_row.append(InlineKeyboardButton("🗑 Buttons", callback_data=f"{prefix}_rmbuttons"))
@@ -204,6 +205,6 @@ def editor_text_prompt(title: str, *, variables: str = "") -> str:
 def editor_media_prompt(title: str) -> str:
     return (
         f"🖼 {title}\n\n"
-        "Send a photo, video, GIF, or document. The new media replaces the current media.\n\n"
+        "Send photos, videos, GIFs, or documents one by one. Each file is added to the current list (maximum 10).\n\nSend /done when finished, or /cancel to stop.\n\n"
         "Send /cancel to stop."
     )
