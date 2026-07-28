@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
 from database.mongo import get_database
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 COLLECTION = "users"
 
@@ -44,28 +46,42 @@ async def create_user(user):
 
 
 async def get_or_create_user(user):
-    existing = await get_user(user.id)
+    """Create or refresh a user with one atomic MongoDB round trip.
 
-    if existing:
-        await users_collection().update_one(
+    The previous implementation performed up to three sequential queries on
+    every /start, which made the first response and following callbacks feel
+    slow on hosted MongoDB connections.
+    """
+    now = datetime.now(timezone.utc)
+    update = {
+        "$set": {
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "username": user.username,
+            "is_bot": user.is_bot,
+            "language_code": user.language_code,
+            "updated_at": now,
+        },
+        "$setOnInsert": {
+            "user_id": user.id,
+            "banned": False,
+            "ban_reason": None,
+            "banned_at": None,
+            "joined_at": now,
+            "created_at": now,
+        },
+    }
+    try:
+        return await users_collection().find_one_and_update(
             {"user_id": user.id},
-            {
-                "$set": {
-                    "first_name": user.first_name,
-                    "last_name": user.last_name,
-                    "username": user.username,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-                "$setOnInsert": {
-                    "banned": False,
-                    "ban_reason": None,
-                    "banned_at": None,
-                },
-            },
+            update,
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
         )
+    except DuplicateKeyError:
+        # A simultaneous update may win the upsert race. Fetch the record
+        # instead of making the user retry /start.
         return await get_user(user.id)
-
-    return await create_user(user)
 
 
 async def update_user(user_id: int, data: dict):

@@ -33,7 +33,17 @@ def _aware(value):
 
 
 async def initialize_seller_referral_indexes():
-    await collection().create_index("referred_seller_id", unique=True)
+    # Replace the old unique index because MongoDB treats multiple missing/null
+    # values as duplicates. Only real integer seller IDs must be unique.
+    try:
+        await collection().drop_index("referred_seller_id_1")
+    except Exception:
+        pass
+    await collection().create_index(
+        "referred_seller_id",
+        unique=True,
+        partialFilterExpression={"referred_seller_id": {"$type": "number"}},
+    )
     await collection().create_index(
         [("referrer_seller_id", 1), ("created_at", -1)]
     )
