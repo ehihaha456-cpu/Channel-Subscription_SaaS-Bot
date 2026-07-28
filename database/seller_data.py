@@ -283,31 +283,61 @@ async def claim_business_welcome(
     peer_user_id:int,
     *,
     welcome_once:bool=True,
+    force_new_conversation:bool=False,
 ):
-    """Atomically claim a first conversation/welcome for one private peer."""
+    """Atomically claim a welcome for one private peer.
+
+    ``force_new_conversation`` is used when Telegram history/deletion signals show
+    that the previous chat was cleared.  The record is reset atomically before
+    claiming, so a stale contact document can never suppress the next welcome.
+    """
     now=datetime.now(timezone.utc)
     query={
         "owner_id":int(owner_id),
         "account_user_id":int(account_user_id),
         "peer_user_id":int(peer_user_id),
     }
-    existing=await c(BUSINESS_CONTACTS).find_one(query,{"_id":1})
-    if existing:
-        await c(BUSINESS_CONTACTS).update_one(query,{"$set":{"last_message_at":now},"$inc":{"message_count":1}})
-        return not bool(welcome_once)
-    try:
-        await c(BUSINESS_CONTACTS).insert_one({
-            **query,
-            "first_message_at":now,
-            "last_message_at":now,
-            "message_count":1,
-        })
-        await increment_business_account_stat(owner_id,account_user_id,"conversations")
+
+    if force_new_conversation:
+        await c(BUSINESS_CONTACTS).delete_one(query)
+
+    if not welcome_once:
+        await c(BUSINESS_CONTACTS).update_one(
+            query,
+            {
+                "$set":{"last_message_at":now},
+                "$setOnInsert":{"first_message_at":now,"message_count":0},
+                "$inc":{"message_count":1},
+            },
+            upsert=True,
+        )
         return True
+
+    try:
+        result=await c(BUSINESS_CONTACTS).update_one(
+            query,
+            {
+                "$setOnInsert":{
+                    **query,
+                    "first_message_at":now,
+                    "last_message_at":now,
+                    "message_count":1,
+                }
+            },
+            upsert=True,
+        )
+        if result.upserted_id is not None:
+            await increment_business_account_stat(owner_id,account_user_id,"conversations")
+            return True
     except Exception:
-        # A concurrent message may have inserted the same unique contact.
-        await c(BUSINESS_CONTACTS).update_one(query,{"$set":{"last_message_at":now},"$inc":{"message_count":1}})
-        return not bool(welcome_once)
+        # Concurrent claims are expected; only the first insert may send welcome.
+        pass
+
+    await c(BUSINESS_CONTACTS).update_one(
+        query,
+        {"$set":{"last_message_at":now},"$inc":{"message_count":1}},
+    )
+    return False
 
 
 async def business_automation_stats(owner_id:int):
