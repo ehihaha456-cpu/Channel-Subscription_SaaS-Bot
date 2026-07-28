@@ -19,6 +19,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 from database.business_automation import get_business_welcome, list_business_auto_replies, list_business_reply_templates
+from database.business_delivery import record_business_contact
 from database.business_official import (
     get_official_business_connection,
     increment_official_business_stat,
@@ -26,6 +27,7 @@ from database.business_official import (
 )
 from database.seller_bots import get_bot_by_data_owner_id
 from database.seller_data import claim_business_welcome, get_seller_settings
+from handlers.common.clone_context import MAIN_BOT_USERNAME
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,18 @@ def _render_button_rows(rows, user):
         if clean:
             result.append(clean)
     return result
+
+
+def _with_powered_by(text: str) -> str:
+    username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
+    base = str(text or "").rstrip()
+    if not username:
+        return base
+    marker = f"Powered by @{username}"
+    if marker.casefold() in base.casefold():
+        return base
+    return f"{base}\n\n━━━━━━━━━━━━━━\n🤖 {marker}" if base else f"🤖 {marker}"
+
 
 def _inside_working_hours(settings: dict) -> bool:
     if not settings.get("business_working_hours_enabled"):
@@ -248,6 +262,13 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         if not sender_id or bool(getattr(sender, "is_bot", False)):
             return
 
+        if sender_id != business_user_id:
+            await record_business_contact(
+                owner_id, sender_id, mode="official",
+                account_user_id=business_user_id, connection_id=connection_id,
+                chat_id=int(message.chat_id),
+            )
+
         # A seller sends a template keyword alone; replace that message with the
         # configured reply template. These updates must never enter Live Support.
         if sender_id == business_user_id:
@@ -291,7 +312,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 
         welcome_sent = False
         if welcome.get("enabled", True) and first_contact:
-            text = str(welcome.get("text") or "").strip()
+            text = _with_powered_by(str(welcome.get("text") or "").strip())
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
