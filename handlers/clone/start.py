@@ -4,10 +4,47 @@ from handlers.common.clone_context import *
 
 
 class CloneStartMixin:
+    @staticmethod
+    def _consume_background_task(task):
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Background /start task failed")
+
+    def _start_background(self, coro):
+        task=asyncio.create_task(coro)
+        task.add_done_callback(self._consume_background_task)
+        return task
+
+    async def _post_start_tasks(self,context,owner,user,support,referrer_id=None):
+        """Run non-UI work only after the welcome has already been sent."""
+        if referrer_id and referrer_id != user.id:
+            try:
+                await register_referral(owner,referrer_id,user.id)
+            except Exception:
+                logger.exception("Referral registration failed owner=%s user=%s",owner,user.id)
+
+        if (
+            support.get("enabled")
+            and support.get("mode")=="topic"
+            and support.get("support_group_id")
+        ):
+            try:
+                await self.ensure_support_topic(context,owner,user,support)
+            except TelegramError as exc:
+                logger.warning(
+                    "Support topic creation on /start failed owner=%s user=%s: %s",
+                    owner,user.id,exc,
+                )
+            except Exception:
+                logger.exception("Support topic creation failed owner=%s user=%s",owner,user.id)
+
     async def child_start(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
 
-        # Clone-bot seller opens the selected section directly from main-bot deep links.
+        # Seller resolves without MongoDB. Other staff still need the staff lookup.
         staff = await self.staff_record(update, context)
         if staff:
             context.user_data.clear()
@@ -60,8 +97,13 @@ class CloneStartMixin:
             return
 
         try:
-            await upsert_user(owner,update.effective_user)
-            user_record=await get_user(owner,update.effective_user.id)
+            # These independent reads/writes run together instead of serially.
+            user_task=asyncio.create_task(upsert_user(owner,update.effective_user))
+            settings_task=asyncio.create_task(get_seller_settings(owner))
+            support_task=asyncio.create_task(get_live_support_settings(owner))
+            user_record,settings,support=await asyncio.gather(
+                user_task,settings_task,support_task,
+            )
 
             if user_record and user_record.get("banned"):
                 await update.effective_message.reply_text(
@@ -70,43 +112,36 @@ class CloneStartMixin:
                 )
                 return
 
-            if context.args:
-                arg=context.args[0]
-                if arg.startswith("ref_"):
-                    try:
-                        referrer_id=int(arg.replace("ref_","",1))
-                        await register_referral(owner,referrer_id,update.effective_user.id)
-                    except (TypeError,ValueError):
-                        pass
+            # Defaults are normally created when the clone bot is connected.
+            # Only perform the expensive migration path when settings are missing.
+            if not settings:
+                record=await get_bot_by_data_owner_id(owner)
+                settings=await ensure_seller_defaults(
+                    owner,
+                    (record or {}).get("bot_name","Subscription Bot"),
+                )
 
-            record=await get_bot_by_data_owner_id(owner)
-            settings=await ensure_seller_defaults(
-                owner,
-                (record or {}).get("bot_name","Subscription Bot"),
-            )
-            # In Topic Mode, /start creates exactly one permanent support
-            # topic and posts the user's complete details as its first message.
-            support=await get_live_support_settings(owner)
-            if (
-                support.get("enabled")
-                and support.get("mode")=="topic"
-                and support.get("support_group_id")
-            ):
-                try:
-                    await self.ensure_support_topic(
-                        context,owner,update.effective_user,support,
-                    )
-                except TelegramError as exc:
-                    logger.warning(
-                        "Support topic creation on /start failed owner=%s user=%s: %s",
-                        owner,update.effective_user.id,exc,
-                    )
-
+            # User-visible response is sent before referral and Live Support work.
             await self.send_welcome(
                 update.effective_message,
                 context,
                 settings,
                 update.effective_user,
+            )
+
+            referrer_id=None
+            if context.args:
+                arg=context.args[0]
+                if arg.startswith("ref_"):
+                    try:
+                        referrer_id=int(arg.replace("ref_","",1))
+                    except (TypeError,ValueError):
+                        referrer_id=None
+
+            self._start_background(
+                self._post_start_tasks(
+                    context,owner,update.effective_user,support or {},referrer_id,
+                )
             )
         except Exception as exc:
             logger.exception(
@@ -119,4 +154,3 @@ class CloneStartMixin:
                 f"Runtime: {WELCOME_RUNTIME_VERSION}\n"
                 f"Error: {str(exc)[:250]}"
             )
-
