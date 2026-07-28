@@ -48,21 +48,8 @@ class CloneLiveSupportMixin:
                     raise ApplicationHandlerStop
             return
 
-        # Users send an actual non-command content message in private chat.
-        # Ignore empty/service updates so Telegram status changes cannot create
-        # support topics by themselves.
+        # Users send any non-command message in private chat.
         if chat.type!="private" or user.id==owner:
-            return
-        has_user_content=bool(
-            message.text
-            or message.caption
-            or message.effective_attachment
-            or message.contact
-            or message.location
-            or message.venue
-            or message.poll
-        )
-        if not has_user_content:
             return
         if not support.get("enabled"):
             return
@@ -71,6 +58,10 @@ class CloneLiveSupportMixin:
             "wait_scheduled_broadcast","wait_channel","wait_plan_add","wait_plan_edit",
         }
         if any(context.user_data.get(key) for key in special_states):
+            return
+        # Business Automation editor/login inputs belong only to that feature.
+        # Never forward them to Live Support or create a support topic.
+        if context.user_data.get("ba_editor") or context.user_data.get("ba_auth") or context.user_data.get("ba_media_batch"):
             return
         if await is_support_blocked(owner,user.id):
             await message.reply_text("🚫 You cannot contact live support right now.")

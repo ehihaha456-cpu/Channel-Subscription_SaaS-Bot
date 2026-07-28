@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -17,7 +18,7 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-from database.business_automation import get_business_auto_reply, get_business_welcome
+from database.business_automation import get_business_welcome, list_business_auto_replies, list_business_reply_templates
 from database.business_official import (
     get_official_business_connection,
     increment_official_business_stat,
@@ -28,6 +29,15 @@ from database.seller_data import claim_business_welcome, get_seller_settings
 
 logger = logging.getLogger(__name__)
 
+
+def _keyword_in_message(keyword: str, message: str) -> bool:
+    keyword = " ".join(str(keyword or "").casefold().split())
+    message = " ".join(str(message or "").casefold().split())
+    if not keyword or not message:
+        return False
+    if re.fullmatch(r"[\w]+", keyword, flags=re.UNICODE):
+        return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", message, flags=re.UNICODE) is not None
+    return keyword in message
 
 def _inside_working_hours(settings: dict) -> bool:
     if not settings.get("business_working_hours_enabled"):
@@ -189,8 +199,28 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         business_user_id = int(connection_doc.get("business_user_id") or 0)
         sender = message.from_user
         sender_id = int(getattr(sender, "id", 0) or 0)
-        # Ignore messages sent by the connected business owner or by bots.
-        if not sender_id or sender_id == business_user_id or bool(getattr(sender, "is_bot", False)):
+        if not sender_id or bool(getattr(sender, "is_bot", False)):
+            return
+
+        # A seller sends a template keyword alone; replace that message with the
+        # configured reply template. These updates must never enter Live Support.
+        if sender_id == business_user_id:
+            raw = str(message.text or message.caption or "").strip()
+            if raw and not any(ch.isspace() for ch in raw):
+                templates = await list_business_reply_templates(owner_id)
+                template = next((x for x in templates if raw.casefold() == str(x.get("shortcut") or "").strip().casefold()), None)
+                if template:
+                    try:
+                        await context.bot.delete_business_messages(connection_id, [message.message_id])
+                    except Exception:
+                        logger.debug("Could not delete official business template keyword", exc_info=True)
+                    await _send_configured_message(
+                        context, chat_id=message.chat_id, business_connection_id=connection_id,
+                        owner_id=owner_id, text=str(template.get("text") or template.get("name") or ""),
+                        media_type=str(template.get("media_type") or ""), media_file_id=str(template.get("media_file_id") or ""),
+                        media_items=template.get("media") or [], button_rows=template.get("buttons") or [],
+                    )
+                    await increment_official_business_stat(owner_id, connection_id, "templates_used")
             return
 
         settings = await get_seller_settings(owner_id)
@@ -200,7 +230,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             return
 
         welcome = await get_business_welcome(owner_id)
-        auto_reply = await get_business_auto_reply(owner_id)
+        auto_replies = await list_business_auto_replies(owner_id)
         first_contact = await claim_business_welcome(
             owner_id,
             business_user_id or owner_id,
@@ -232,23 +262,21 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                 await increment_official_business_stat(owner_id, connection_id, "welcome_sent")
                 welcome_sent = True
 
-        if not welcome_sent and auto_reply.get("enabled", True):
-            text = str(auto_reply.get("text") or "").strip()
-            media_file_id = str(auto_reply.get("media_file_id") or "")
-            media_items = list(auto_reply.get("media") or [])
-            if text or media_file_id or media_items:
-                await _send_configured_message(
-                    context,
-                    chat_id=message.chat_id,
-                    business_connection_id=connection_id,
-                    owner_id=owner_id,
-                    text=text,
-                    media_type=str(auto_reply.get("media_type") or ""),
-                    media_file_id=media_file_id,
-                    media_items=media_items,
-                    button_rows=auto_reply.get("buttons") or [],
-                )
-                await increment_official_business_stat(owner_id, connection_id, "auto_replies_sent")
+        if not welcome_sent:
+            incoming_text = str(message.text or message.caption or "").strip()
+            match = next((x for x in auto_replies if x.get("enabled", True) and _keyword_in_message(str(x.get("keyword") or ""), incoming_text)), None)
+            if match:
+                text = str(match.get("text") or "").strip()
+                media_file_id = str(match.get("media_file_id") or "")
+                media_items = list(match.get("media") or [])
+                if text or media_file_id or media_items:
+                    await _send_configured_message(
+                        context, chat_id=message.chat_id, business_connection_id=connection_id,
+                        owner_id=owner_id, text=text,
+                        media_type=str(match.get("media_type") or ""), media_file_id=media_file_id,
+                        media_items=media_items, button_rows=match.get("buttons") or [],
+                    )
+                    await increment_official_business_stat(owner_id, connection_id, "auto_replies_sent")
     except asyncio.CancelledError:
         raise
     except Exception:
