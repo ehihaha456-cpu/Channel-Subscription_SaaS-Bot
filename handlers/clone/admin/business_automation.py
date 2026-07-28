@@ -66,6 +66,14 @@ def _buttons_count(rows):
     return sum(len(row) for row in (rows or []))
 
 
+def _input_keyboard(back_callback: str, *, remove_callback: str | None = None, remove_label: str = "Remove"):
+    rows = []
+    if remove_callback:
+        rows.append([InlineKeyboardButton(f"🗑 {remove_label}", callback_data=remove_callback)])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_callback)])
+    return _kb(rows)
+
+
 def _home_keyboard(connected: int, enabled: bool):
     return _kb([
         [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="ba_connect")],
@@ -416,13 +424,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_text":
         context.user_data["ba_editor"] = {"field": "welcome_text"}
-        await q.edit_message_text(editor_text_prompt("Business Welcome Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data="ba_welcome")]])); return True
+        await q.edit_message_text(editor_text_prompt("Business Welcome Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmtext" if welcome.get("text") else None, remove_label="Remove Text")); return True
     if action == "ba_welcome_media":
         context.user_data["ba_editor"] = {"field": "welcome_media"}
-        await q.edit_message_text(editor_media_prompt("Business Welcome Media"), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data="ba_welcome")]])); return True
+        await q.edit_message_text(editor_media_prompt("Business Welcome Media"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmmedia" if (welcome.get("media") or welcome.get("media_file_id")) else None, remove_label="Remove Media")); return True
     if action == "ba_welcome_buttons":
         context.user_data["ba_editor"] = {"field": "welcome_buttons"}
-        await q.edit_message_text(url_buttons_header(), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data="ba_welcome")]])); return True
+        await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
     if action == "ba_welcome_rmtext":
         welcome = await update_business_welcome(owner, text="")
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
@@ -460,16 +468,16 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(_auto_item_text(item), reply_markup=_auto_item_keyboard(item)); return True
         if op == "keyword":
             context.user_data["ba_editor"] = {"field": "auto_keyword_edit", "reply_id": rid}
-            await q.edit_message_text("✏️ Change Keyword\n\nSend the new word or phrase.", reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_ar_open_{rid}")]])); return True
+            await q.edit_message_text("✏️ Change Keyword\n\nSend the new word or phrase.", reply_markup=_input_keyboard(f"ba_ar_open_{rid}")); return True
         if op == "text":
             context.user_data["ba_editor"] = {"field": "auto_item_text", "reply_id": rid}
-            await q.edit_message_text(editor_text_prompt("Auto Reply Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_ar_open_{rid}")]])); return True
+            await q.edit_message_text(editor_text_prompt("Auto Reply Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
         if op == "media":
             context.user_data["ba_editor"] = {"field": "auto_item_media", "reply_id": rid}
-            await q.edit_message_text(editor_media_prompt("Auto Reply Media"), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_ar_open_{rid}")]])); return True
+            await q.edit_message_text(editor_media_prompt("Auto Reply Media"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "auto_item_buttons", "reply_id": rid}
-            await q.edit_message_text(url_buttons_header(), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_ar_open_{rid}")]])); return True
+            await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "toggle": item = await update_business_auto_reply_item(owner, rid, enabled=not item.get("enabled", True))
         elif op == "rmtext": item = await update_business_auto_reply_item(owner, rid, text="")
         elif op == "rmmedia": item = await update_business_auto_reply_item(owner, rid, media_type="", media_file_id="", media=[])
@@ -510,16 +518,16 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
         if op == "meta":
             context.user_data["ba_editor"] = {"field": "template_meta", "template_id": tid}
-            await q.edit_message_text("✏️ Change Template Keyword\n\nSend one unique keyword only. It cannot contain spaces.", reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_tpl_open_{tid}")]])); return True
+            await q.edit_message_text("✏️ Change Template Keyword\n\nSend one unique keyword only. It cannot contain spaces.", reply_markup=_input_keyboard(f"ba_tpl_open_{tid}")); return True
         if op == "text":
             context.user_data["ba_editor"] = {"field": "template_text", "template_id": tid}
-            await q.edit_message_text(editor_text_prompt("Reply Template Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_tpl_open_{tid}")]])); return True
+            await q.edit_message_text(editor_text_prompt("Reply Template Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
         if op == "media":
             context.user_data["ba_editor"] = {"field": "template_media", "template_id": tid}
-            await q.edit_message_text(editor_media_prompt("Reply Template Media"), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_tpl_open_{tid}")]])); return True
+            await q.edit_message_text(editor_media_prompt("Reply Template Media"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "template_buttons", "template_id": tid}
-            await q.edit_message_text(url_buttons_header(), reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data=f"ba_tpl_open_{tid}")]])); return True
+            await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "rmtext": item = await update_business_reply_template(owner, tid, text="")
         elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="", media=[])
         elif op == "rmbuttons": item = await update_business_reply_template(owner, tid, buttons=[])
@@ -676,10 +684,18 @@ async def handle_text(self, update, context):
         return True
 
     context.user_data.pop("ba_editor", None)
-    await update.effective_message.reply_text(
-        "✅ Business Automation editor updated.",
-        reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
-    )
+    if field.startswith("welcome_"):
+        item = await get_business_welcome(owner)
+        await update.effective_message.reply_text(_welcome_text(item), reply_markup=_welcome_keyboard(item))
+    elif field.startswith("auto_item_") or field == "auto_keyword_edit":
+        item = await get_business_auto_reply_item(owner, str(editor.get("reply_id") or ""))
+        await update.effective_message.reply_text(_auto_item_text(item), reply_markup=_auto_item_keyboard(item))
+    elif field.startswith("template_"):
+        item = await get_business_reply_template(owner, template_id)
+        await update.effective_message.reply_text(_template_text(item), reply_markup=_template_keyboard(item))
+    else:
+        home_text, home_markup = await _home(owner)
+        await update.effective_message.reply_text(home_text, reply_markup=home_markup)
     return True
 
 
@@ -725,10 +741,15 @@ async def handle_media(self, update, context):
             back = f"ba_tpl_open_{tid}"
         context.user_data.pop("ba_editor", None)
         context.user_data.pop("ba_media_batch", None)
-        await msg.reply_text(
-            f"✅ {len(items)} media file{'s' if len(items) != 1 else ''} saved as one album.",
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Back to Editor", callback_data=back)]]),
-        )
+        if field == "welcome_media":
+            current = await get_business_welcome(owner)
+            await msg.reply_text(_welcome_text(current), reply_markup=_welcome_keyboard(current))
+        elif field == "auto_item_media":
+            current = await get_business_auto_reply_item(owner, str(editor.get("reply_id") or ""))
+            await msg.reply_text(_auto_item_text(current), reply_markup=_auto_item_keyboard(current))
+        else:
+            current = await get_business_reply_template(owner, str(editor.get("template_id") or ""))
+            await msg.reply_text(_template_text(current), reply_markup=_template_keyboard(current))
 
     item = {"type": media_type, "file_id": file_id}
     group_id = str(msg.media_group_id or "")
