@@ -269,6 +269,14 @@ async def get_all_active_business_accounts():
     }).to_list(length=None)
 
 
+async def get_business_contact(owner_id:int, account_user_id:int, peer_user_id:int):
+    return await c(BUSINESS_CONTACTS).find_one({
+        "owner_id":int(owner_id),
+        "account_user_id":int(account_user_id),
+        "peer_user_id":int(peer_user_id),
+    })
+
+
 async def claim_business_welcome(
     owner_id:int,
     account_user_id:int,
