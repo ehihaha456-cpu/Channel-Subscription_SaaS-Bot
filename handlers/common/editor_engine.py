@@ -180,15 +180,6 @@ def editor_menu_keyboard(
         [InlineKeyboardButton("🔗 Buttons", callback_data=f"{prefix}_buttons")],
         [InlineKeyboardButton("👁 Full Preview", callback_data=f"{prefix}_preview")],
     ])
-    remove_row: list[InlineKeyboardButton] = []
-    if item.get("text"):
-        remove_row.append(InlineKeyboardButton("🗑 Text", callback_data=f"{prefix}_rmtext"))
-    if item.get("media") or item.get("media_file_id"):
-        remove_row.append(InlineKeyboardButton("🗑 Media", callback_data=f"{prefix}_rmmedia"))
-    if item.get("buttons"):
-        remove_row.append(InlineKeyboardButton("🗑 Buttons", callback_data=f"{prefix}_rmbuttons"))
-    if remove_row:
-        rows.append(remove_row)
     if delete_callback:
         rows.append([InlineKeyboardButton("🗑 Delete", callback_data=delete_callback)])
     rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_callback)])
