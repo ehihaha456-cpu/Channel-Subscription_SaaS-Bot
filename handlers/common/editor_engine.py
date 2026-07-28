@@ -205,6 +205,7 @@ def editor_text_prompt(title: str, *, variables: str = "") -> str:
 def editor_media_prompt(title: str) -> str:
     return (
         f"🖼 {title}\n\n"
-        "Send photos, videos, GIFs, or documents one by one. Each file is added to the current list (maximum 10).\n\nSend /done when finished, or /cancel to stop.\n\n"
-        "Send /cancel to stop."
+        "Send one photo/video/document, or select and send one Telegram album together. "
+        "The complete message or album will replace the current media automatically (maximum 10 files).\n\n"
+        "No /done command is required. Send /cancel to stop."
     )
