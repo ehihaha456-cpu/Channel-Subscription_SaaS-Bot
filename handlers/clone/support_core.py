@@ -6,6 +6,7 @@ from handlers.common.clone_context import *
 class CloneSupportCoreMixin:
     _support_topic_locks = {}
 
+    @staticmethod
     def _support_datetime(value):
         if not value:
             return "-"
