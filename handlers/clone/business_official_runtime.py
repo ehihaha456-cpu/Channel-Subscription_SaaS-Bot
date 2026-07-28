@@ -39,6 +39,49 @@ def _keyword_in_message(keyword: str, message: str) -> bool:
         return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", message, flags=re.UNICODE) is not None
     return keyword in message
 
+
+
+def _variable_values(user) -> dict[str, str]:
+    zone = ZoneInfo("Asia/Kolkata")
+    now = datetime.now(zone)
+    first = str(getattr(user, "first_name", "") or "")
+    last = str(getattr(user, "last_name", "") or "")
+    name = " ".join(x for x in (first, last) if x).strip() or str(getattr(user, "username", "") or "User")
+    username_raw = str(getattr(user, "username", "") or "").lstrip("@")
+    username = f"@{username_raw}" if username_raw else ""
+    user_id = str(getattr(user, "id", "") or "")
+    mention = f"tg://user?id={user_id}" if user_id else ""
+    return {
+        "{NAME}": name, "{FIRSTNAME}": first, "{SURNAME}": last,
+        "{NAMESURNAME}": name, "{ID}": user_id, "{USERNAME}": username,
+        "{MENTION}": mention, "{DATE}": now.strftime("%d %b %Y"),
+        "{TIME}": now.strftime("%I:%M %p"), "{WEEKDAY}": now.strftime("%A"),
+    }
+
+
+def _render_variables(value: str, user) -> str:
+    rendered = str(value or "")
+    for token, replacement in _variable_values(user).items():
+        rendered = rendered.replace(token, replacement)
+    return rendered
+
+
+def _render_button_rows(rows, user):
+    result = []
+    for row in rows or []:
+        clean = []
+        for item in row or []:
+            copy = dict(item)
+            copy["text"] = _render_variables(copy.get("text") or "", user)
+            if "value" in copy:
+                copy["value"] = _render_variables(copy.get("value") or "", user)
+            if "url" in copy:
+                copy["url"] = _render_variables(copy.get("url") or "", user)
+            clean.append(copy)
+        if clean:
+            result.append(clean)
+    return result
+
 def _inside_working_hours(settings: dict) -> bool:
     if not settings.get("business_working_hours_enabled"):
         return True
@@ -97,6 +140,7 @@ async def _send_configured_message(
     media_file_id: str = "",
     media_items=None,
     button_rows=None,
+    user=None,
 ) -> None:
     """Send saved media as one Telegram album, followed by text/buttons.
 
@@ -104,7 +148,9 @@ async def _send_configured_message(
     multiple media items are configured, the complete album is sent first and
     the configured text/buttons are sent as one message immediately after it.
     """
-    markup = await _inline_markup(owner_id, button_rows or [])
+    rendered_text = _render_variables(text, user) if user is not None else str(text or "")
+    rendered_rows = _render_button_rows(button_rows or [], user) if user is not None else (button_rows or [])
+    markup = await _inline_markup(owner_id, rendered_rows)
     items = list(media_items or [])
     if not items and media_file_id:
         items = [{"type": media_type or "document", "file_id": media_file_id}]
@@ -129,9 +175,9 @@ async def _send_configured_message(
                 # GIF/animation is stored as a document inside mixed albums.
                 album.append(InputMediaDocument(media=file_id))
         await context.bot.send_media_group(media=album, **common)
-        if text or markup:
+        if rendered_text or markup:
             await context.bot.send_message(
-                text=text or "Choose an option below.",
+                text=rendered_text or "Choose an option below.",
                 reply_markup=markup,
                 **common,
             )
@@ -141,7 +187,7 @@ async def _send_configured_message(
         item = items[0]
         kind = str(item.get("type") or "document").lower()
         file_id = str(item.get("file_id") or "")
-        single_common = {**common, "caption": text or None, "reply_markup": markup}
+        single_common = {**common, "caption": rendered_text or None, "reply_markup": markup}
         if kind == "photo":
             await context.bot.send_photo(photo=file_id, **single_common)
         elif kind == "video":
@@ -153,7 +199,7 @@ async def _send_configured_message(
         return
 
     await context.bot.send_message(
-        text=text or "Welcome!",
+        text=rendered_text or "Welcome!",
         reply_markup=markup,
         **common,
     )
@@ -219,6 +265,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                         owner_id=owner_id, text=str(template.get("text") or template.get("name") or ""),
                         media_type=str(template.get("media_type") or ""), media_file_id=str(template.get("media_file_id") or ""),
                         media_items=template.get("media") or [], button_rows=template.get("buttons") or [],
+                        user=message.chat,
                     )
                     await increment_official_business_stat(owner_id, connection_id, "templates_used")
             return
@@ -258,6 +305,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                     media_file_id=media_file_id,
                     media_items=media_items,
                     button_rows=welcome.get("buttons") or [],
+                    user=sender,
                 )
                 await increment_official_business_stat(owner_id, connection_id, "welcome_sent")
                 welcome_sent = True
@@ -275,6 +323,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                         owner_id=owner_id, text=text,
                         media_type=str(match.get("media_type") or ""), media_file_id=media_file_id,
                         media_items=media_items, button_rows=match.get("buttons") or [],
+                        user=sender,
                     )
                     await increment_official_business_stat(owner_id, connection_id, "auto_replies_sent")
     except asyncio.CancelledError:
