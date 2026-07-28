@@ -10,6 +10,10 @@ class CloneLiveSupportMixin:
         chat=update.effective_chat
         if not message or not user or user.is_bot or not chat:
             return
+        # Telegram Business-account updates belong to Business Automation and
+        # must never be copied into Clone Bot Live Support.
+        if getattr(update, "business_message", None) is not None or getattr(update, "business_connection", None) is not None:
+            return
         owner=self.owner(context)
         support=await get_live_support_settings(owner)
 
@@ -48,20 +52,32 @@ class CloneLiveSupportMixin:
                     raise ApplicationHandlerStop
             return
 
-        # Users send any non-command message in private chat.
+        # Users send an actual non-command content message in private chat.
+        # Ignore empty/service updates so Telegram status changes cannot create
+        # support topics by themselves.
         if chat.type!="private" or user.id==owner:
+            return
+        has_user_content=bool(
+            message.text
+            or message.caption
+            or message.effective_attachment
+            or message.contact
+            or message.location
+            or message.venue
+            or message.poll
+        )
+        if not has_user_content:
             return
         if not support.get("enabled"):
             return
         special_states={
             "waiting_child_screenshot","wait_qr","wait_welcome_media","wait_broadcast",
             "wait_scheduled_broadcast","wait_channel","wait_plan_add","wait_plan_edit",
+            # Seller inputs for connected Normal/Business account automation
+            # are editor/runtime traffic, not customer Live Support messages.
+            "ba_editor","ba_auth","ba_media_batch",
         }
         if any(context.user_data.get(key) for key in special_states):
-            return
-        # Business Automation editor/login inputs belong only to that feature.
-        # Never forward them to Live Support or create a support topic.
-        if context.user_data.get("ba_editor") or context.user_data.get("ba_auth") or context.user_data.get("ba_media_batch"):
             return
         if await is_support_blocked(owner,user.id):
             await message.reply_text("🚫 You cannot contact live support right now.")
