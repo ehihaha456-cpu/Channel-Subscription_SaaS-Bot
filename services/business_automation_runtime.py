@@ -15,7 +15,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from telegram import Bot
-from telethon import Button, TelegramClient, events
+from telethon import Button, TelegramClient, events, utils
+from telethon.tl import types
 from telethon.sessions import StringSession
 
 from config import TELEGRAM_API_HASH, TELEGRAM_API_ID
@@ -33,6 +34,7 @@ from database.seller_data import (
     get_business_accounts,
     get_seller_settings,
     increment_business_account_stat,
+    get_business_contact,
     reset_business_welcome,
 )
 from utils.crypto import decrypt_secret
@@ -114,6 +116,8 @@ class BusinessAutomationRuntime:
     def __init__(self) -> None:
         self._clients: dict[tuple[int, int], TelegramClient] = {}
         self._locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._message_peers: dict[tuple[int, int], dict[int, int]] = {}
+        self._history_checked: set[tuple[int, int, int]] = set()
 
     def _lock(self, key: tuple[int, int]) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -178,9 +182,13 @@ class BusinessAutomationRuntime:
             async def deleted_handler(event):
                 await self._handle_deleted(owner_id, account_user_id, event)
 
+            async def raw_handler(update):
+                await self._handle_raw_update(owner_id, account_user_id, update)
+
             client.add_event_handler(incoming_handler, events.NewMessage(incoming=True))
             client.add_event_handler(outgoing_handler, events.NewMessage(outgoing=True))
             client.add_event_handler(deleted_handler, events.MessageDeleted())
+            client.add_event_handler(raw_handler, events.Raw())
             self._clients[key] = client
             logger.info("Business Automation listener active owner=%s account=%s", owner_id, account_user_id)
             return True
@@ -305,43 +313,92 @@ class BusinessAutomationRuntime:
         await client.send_message(int(peer_id), str(text), link_preview=False)
         return True
 
+
+    def _remember_message_peer(self, owner_id: int, account_user_id: int, message_id: int, peer_id: int) -> None:
+        if not message_id or not peer_id:
+            return
+        key = (int(owner_id), int(account_user_id))
+        mapping = self._message_peers.setdefault(key, {})
+        mapping[int(message_id)] = int(peer_id)
+        # Keep memory bounded while retaining enough recent IDs for delete events.
+        if len(mapping) > 2000:
+            for old_id in sorted(mapping)[:500]:
+                mapping.pop(old_id, None)
+
+    async def _reset_peer_welcome(self, owner_id: int, account_user_id: int, peer_id: int) -> None:
+        if int(peer_id or 0) <= 0:
+            return
+        await reset_business_welcome(int(owner_id), int(account_user_id), int(peer_id))
+        self._history_checked.discard((int(owner_id), int(account_user_id), int(peer_id)))
+        logger.info(
+            "Business welcome reset after chat deletion owner=%s account=%s peer=%s",
+            owner_id, account_user_id, peer_id,
+        )
+
     async def _handle_deleted(self, owner_id: int, account_user_id: int, event) -> None:
-        """Reset first-contact tracking when Telegram reports a cleared private chat."""
+        """Handle Telethon's high-level delete event when peer information is available."""
         try:
             peer_id = int(getattr(event, "chat_id", 0) or 0)
-            if peer_id:
-                await reset_business_welcome(owner_id, account_user_id, peer_id)
-                logger.info(
-                    "Business welcome reset after deleted messages owner=%s account=%s peer=%s",
-                    owner_id,
-                    account_user_id,
-                    peer_id,
-                )
+            if peer_id > 0:
+                await self._reset_peer_welcome(owner_id, account_user_id, peer_id)
+                return
+            mapping = self._message_peers.get((int(owner_id), int(account_user_id)), {})
+            peers = {mapping.get(int(mid)) for mid in (getattr(event, "deleted_ids", None) or [])}
+            for mapped_peer in peers:
+                if mapped_peer:
+                    await self._reset_peer_welcome(owner_id, account_user_id, int(mapped_peer))
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception(
-                "Business deleted-message handling failed owner=%s account=%s peer=%s",
-                owner_id,
-                account_user_id,
-                getattr(event, "chat_id", None),
-            )
+            logger.exception("Business Automation deleted-message handler failed owner=%s account=%s", owner_id, account_user_id)
 
-    @staticmethod
-    async def _history_is_new(client: TelegramClient, peer_id: int, current_message_id: int) -> bool:
-        """Return True when the connected account has no message older than this one.
+    async def _handle_raw_update(self, owner_id: int, account_user_id: int, update) -> None:
+        """Catch private-chat clear-history updates that MessageDeleted may not identify."""
+        try:
+            if isinstance(update, types.UpdateDeleteHistory):
+                peer_id = int(utils.get_peer_id(update.peer) or 0)
+                if peer_id > 0:
+                    await self._reset_peer_welcome(owner_id, account_user_id, peer_id)
+                return
+            if isinstance(update, types.UpdateDeleteMessages):
+                mapping = self._message_peers.get((int(owner_id), int(account_user_id)), {})
+                peers = {mapping.get(int(mid)) for mid in (update.messages or [])}
+                for peer_id in peers:
+                    if peer_id:
+                        await self._reset_peer_welcome(owner_id, account_user_id, int(peer_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Business Automation raw deletion handler failed owner=%s account=%s", owner_id, account_user_id)
 
-        This covers Telegram's clear-history/delete-chat flow even when a separate
-        MessageDeleted event was missed while the runtime was offline.
+    async def _reset_if_history_is_empty(
+        self, owner_id: int, account_user_id: int, peer_id: int, client: TelegramClient, current_message_id: int
+    ) -> None:
+        """Recover when history was cleared while the runtime was offline.
+
+        This check runs only once per peer per runtime process and only for contacts
+        already known in MongoDB, so normal incoming messages do not pay an extra
+        Telegram API request.
         """
+        cache_key = (int(owner_id), int(account_user_id), int(peer_id))
+        if cache_key in self._history_checked:
+            return
+        self._history_checked.add(cache_key)
+        existing = await get_business_contact(owner_id, account_user_id, peer_id)
+        if not existing:
+            return
         try:
             messages = await client.get_messages(int(peer_id), limit=2)
-            ids = [int(getattr(item, "id", 0) or 0) for item in messages]
-            older = [message_id for message_id in ids if message_id and message_id != int(current_message_id or 0)]
-            return not older
+            ids = [int(getattr(message, "id", 0) or 0) for message in messages]
+            if len(ids) <= 1 and int(current_message_id or 0) in ids:
+                await self._reset_peer_welcome(owner_id, account_user_id, peer_id)
+                # Mark checked again; reset intentionally removes it for future deletion events.
+                self._history_checked.add(cache_key)
         except Exception:
-            logger.debug("Could not inspect Business chat history peer=%s", peer_id, exc_info=True)
-            return False
+            logger.exception(
+                "Business Automation history check failed owner=%s account=%s peer=%s",
+                owner_id, account_user_id, peer_id,
+            )
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
         try:
@@ -352,16 +409,15 @@ class BusinessAutomationRuntime:
             if not peer_id or peer_id == int(account_user_id) or getattr(sender, "bot", False):
                 return
 
+            self._remember_message_peer(owner_id, account_user_id, int(getattr(event, "id", 0) or 0), peer_id)
+            await self._reset_if_history_is_empty(
+                owner_id, account_user_id, peer_id, client, int(getattr(event, "id", 0) or 0)
+            )
+
             await record_business_contact(
                 owner_id, peer_id, mode="normal",
                 account_user_id=account_user_id, chat_id=peer_id,
             )
-
-            # If the seller cleared/deleted this private chat, Telegram may not
-            # deliver the deletion event while the runtime is offline. Detect an
-            # empty local history on the next incoming message and reset the claim.
-            if await self._history_is_new(client, peer_id, int(getattr(event, "id", 0) or 0)):
-                await reset_business_welcome(owner_id, account_user_id, peer_id)
 
             settings = await get_seller_settings(owner_id)
             welcome = await get_business_welcome(owner_id)
@@ -447,6 +503,7 @@ class BusinessAutomationRuntime:
             peer_id = int(event.chat_id or 0)
             if not peer_id:
                 return
+            self._remember_message_peer(owner_id, account_user_id, int(getattr(event, "id", 0) or 0), peer_id)
             recipient = await event.get_chat()
             try:
                 await event.delete()
