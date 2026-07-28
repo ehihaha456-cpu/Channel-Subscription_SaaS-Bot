@@ -199,7 +199,7 @@ def editor_text_prompt(title: str, *, variables: str = "") -> str:
     text = f"📝 {title}\n\nSend the message text. HTML formatting is supported."
     if variables:
         text += f"\n\nAvailable variables:\n{variables}"
-    return text + "\n\nSend /cancel to stop."
+    return text
 
 
 def editor_media_prompt(title: str) -> str:
@@ -207,5 +207,5 @@ def editor_media_prompt(title: str) -> str:
         f"🖼 {title}\n\n"
         "Send one photo/video/document, or select and send one Telegram album together. "
         "The complete message or album will replace the current media automatically (maximum 10 files).\n\n"
-        "No /done command is required. Send /cancel to stop."
+        "Send the complete album in one selection; it will save automatically."
     )
