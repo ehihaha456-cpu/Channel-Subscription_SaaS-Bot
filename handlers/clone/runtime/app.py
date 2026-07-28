@@ -2,8 +2,8 @@
 
 from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation
-from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message
-from telegram.ext import BusinessConnectionHandler
+from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
+from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler
 
 
 class CloneRuntimeAppMixin:
@@ -38,6 +38,7 @@ class CloneRuntimeAppMixin:
         # moderation/menu handlers.
         app.add_handler(BusinessConnectionHandler(handle_business_connection), group=-51)
         app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message), group=-50)
+        app.add_handler(BusinessMessagesDeletedHandler(handle_deleted_business_messages), group=-49)
         app.add_handler(CommandHandler("start",self.child_start))
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
