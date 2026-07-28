@@ -371,34 +371,34 @@ class BusinessAutomationRuntime:
         except Exception:
             logger.exception("Business Automation raw deletion handler failed owner=%s account=%s", owner_id, account_user_id)
 
-    async def _reset_if_history_is_empty(
-        self, owner_id: int, account_user_id: int, peer_id: int, client: TelegramClient, current_message_id: int
-    ) -> None:
-        """Recover when history was cleared while the runtime was offline.
+    async def _history_was_cleared(
+        self, owner_id: int, account_user_id: int, peer_id: int,
+        client: TelegramClient, current_message_id: int,
+    ) -> bool:
+        """Return True when the connected account now sees only the new message.
 
-        This check runs only once per peer per runtime process and only for contacts
-        already known in MongoDB, so normal incoming messages do not pay an extra
-        Telegram API request.
+        Unlike the previous one-time cache, this check is performed for every
+        incoming message of an already-known contact.  That makes chat-clear
+        detection work even when Telegram did not deliver a delete event or the
+        runtime was offline.  Only the three newest messages are requested.
         """
-        cache_key = (int(owner_id), int(account_user_id), int(peer_id))
-        if cache_key in self._history_checked:
-            return
-        self._history_checked.add(cache_key)
         existing = await get_business_contact(owner_id, account_user_id, peer_id)
         if not existing:
-            return
+            return False
         try:
-            messages = await client.get_messages(int(peer_id), limit=2)
-            ids = [int(getattr(message, "id", 0) or 0) for message in messages]
-            if len(ids) <= 1 and int(current_message_id or 0) in ids:
-                await self._reset_peer_welcome(owner_id, account_user_id, peer_id)
-                # Mark checked again; reset intentionally removes it for future deletion events.
-                self._history_checked.add(cache_key)
+            messages = await client.get_messages(int(peer_id), limit=3)
+            visible_ids = [int(getattr(message, "id", 0) or 0) for message in messages]
+            visible_ids = [message_id for message_id in visible_ids if message_id > 0]
+            if not visible_ids:
+                return True
+            previous_ids = [message_id for message_id in visible_ids if message_id != int(current_message_id or 0)]
+            return not previous_ids
         except Exception:
             logger.exception(
                 "Business Automation history check failed owner=%s account=%s peer=%s",
                 owner_id, account_user_id, peer_id,
             )
+            return False
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
         try:
@@ -409,9 +409,10 @@ class BusinessAutomationRuntime:
             if not peer_id or peer_id == int(account_user_id) or getattr(sender, "bot", False):
                 return
 
-            self._remember_message_peer(owner_id, account_user_id, int(getattr(event, "id", 0) or 0), peer_id)
-            await self._reset_if_history_is_empty(
-                owner_id, account_user_id, peer_id, client, int(getattr(event, "id", 0) or 0)
+            current_message_id = int(getattr(event, "id", 0) or 0)
+            self._remember_message_peer(owner_id, account_user_id, current_message_id, peer_id)
+            history_was_cleared = await self._history_was_cleared(
+                owner_id, account_user_id, peer_id, client, current_message_id
             )
 
             await record_business_contact(
@@ -432,6 +433,7 @@ class BusinessAutomationRuntime:
                 account_user_id,
                 peer_id,
                 welcome_once=bool(settings.get("business_welcome_once", True)),
+                force_new_conversation=history_was_cleared,
             )
 
             delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
