@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -35,6 +36,15 @@ from utils.crypto import decrypt_secret
 
 logger = logging.getLogger(__name__)
 
+
+def _keyword_in_message(keyword: str, message: str) -> bool:
+    keyword = " ".join(str(keyword or "").casefold().split())
+    message = " ".join(str(message or "").casefold().split())
+    if not keyword or not message:
+        return False
+    if re.fullmatch(r"[\w]+", keyword, flags=re.UNICODE):
+        return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", message, flags=re.UNICODE) is not None
+    return keyword in message
 
 class BusinessAutomationRuntime:
     def __init__(self) -> None:
@@ -188,28 +198,27 @@ class BusinessAutomationRuntime:
             return None
 
     async def _send_configured_message(
-        self,
-        client: TelegramClient,
-        peer_id: int,
-        owner_id: int,
-        *,
-        text: str,
-        media_type: str,
-        media_file_id: str,
-        button_rows,
+        self, client: TelegramClient, peer_id: int, owner_id: int, *,
+        text: str, media_type: str, media_file_id: str, button_rows, media_items=None,
     ) -> None:
         buttons = await self._telethon_buttons(owner_id, button_rows)
-        if media_file_id:
-            media = await self._download_clone_media(owner_id, media_file_id, media_type)
-            if media is not None:
-                await client.send_file(
-                    peer_id,
-                    media,
-                    caption=text or "",
-                    buttons=buttons,
-                    force_document=str(media_type or "").lower() == "document",
-                )
-                return
+        items = list(media_items or [])
+        if not items and media_file_id:
+            items = [{"type": media_type or "document", "file_id": media_file_id}]
+        items = [x for x in items if x.get("file_id")][:10]
+        streams = []
+        for item in items:
+            stream = await self._download_clone_media(owner_id, str(item.get("file_id") or ""), str(item.get("type") or ""))
+            if stream is not None:
+                streams.append(stream)
+        if len(streams) > 1:
+            await client.send_file(peer_id, streams, album=True)
+            if text or buttons:
+                await client.send_message(peer_id, text or "Choose an option below.", buttons=buttons)
+            return
+        if len(streams) == 1:
+            await client.send_file(peer_id, streams[0], caption=text or "", buttons=buttons, force_document=str(items[0].get("type") or "").lower() == "document")
+            return
         await client.send_message(peer_id, text or "Welcome!", buttons=buttons)
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
@@ -253,6 +262,7 @@ class BusinessAutomationRuntime:
                         media_type=str(welcome.get("media_type") or ""),
                         media_file_id=media_file_id,
                         button_rows=welcome.get("buttons") or [],
+                        media_items=welcome.get("media") or [],
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
@@ -261,7 +271,7 @@ class BusinessAutomationRuntime:
             # accidental replies when a keyword appears inside an unrelated sentence.
             if not welcome_sent:
                 incoming_text = " ".join(str(getattr(event, "raw_text", "") or "").strip().lower().split())
-                match = next((x for x in auto_replies if x.get("enabled", True) and incoming_text == str(x.get("keyword") or "").strip().lower()), None)
+                match = next((x for x in auto_replies if x.get("enabled", True) and _keyword_in_message(str(x.get("keyword") or ""), incoming_text)), None)
                 if match:
                     text = str(match.get("text") or "").strip()
                     media_file_id = str(match.get("media_file_id") or "")
@@ -272,6 +282,7 @@ class BusinessAutomationRuntime:
                             media_type=str(match.get("media_type") or ""),
                             media_file_id=media_file_id,
                             button_rows=match.get("buttons") or [],
+                            media_items=match.get("media") or [],
                         )
                         await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
         except asyncio.CancelledError:
@@ -290,10 +301,10 @@ class BusinessAutomationRuntime:
             if not event.is_private:
                 return
             raw = str(getattr(event, "raw_text", "") or "").strip()
-            if not raw.startswith("/"):
+            if not raw or any(ch.isspace() for ch in raw):
                 return
             templates = await list_business_reply_templates(owner_id)
-            item = next((x for x in templates if raw.lower() == str(x.get("shortcut") or "").strip().lower()), None)
+            item = next((x for x in templates if raw.casefold() == str(x.get("shortcut") or "").strip().casefold()), None)
             if not item:
                 return
             peer_id = int(event.chat_id or 0)
@@ -309,6 +320,7 @@ class BusinessAutomationRuntime:
                 media_type=str(item.get("media_type") or ""),
                 media_file_id=str(item.get("media_file_id") or ""),
                 button_rows=item.get("buttons") or [],
+                media_items=item.get("media") or [],
             )
             await increment_business_account_stat(owner_id, account_user_id, "templates_used")
         except asyncio.CancelledError:
