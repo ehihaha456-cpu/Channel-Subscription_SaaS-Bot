@@ -21,6 +21,7 @@ from config import TELEGRAM_API_HASH, TELEGRAM_API_ID
 from database.seller_bots import get_bot_by_data_owner_id
 from database.business_automation import (
     get_business_auto_reply,
+    list_business_auto_replies,
     get_business_welcome,
     list_business_reply_templates,
 )
@@ -97,7 +98,11 @@ class BusinessAutomationRuntime:
             async def incoming_handler(event):
                 await self._handle_incoming(owner_id, account_user_id, client, event)
 
+            async def outgoing_handler(event):
+                await self._handle_outgoing(owner_id, account_user_id, client, event)
+
             client.add_event_handler(incoming_handler, events.NewMessage(incoming=True))
+            client.add_event_handler(outgoing_handler, events.NewMessage(outgoing=True))
             self._clients[key] = client
             logger.info("Business Automation listener active owner=%s account=%s", owner_id, account_user_id)
             return True
@@ -182,13 +187,6 @@ class BusinessAutomationRuntime:
             logger.exception("Business Automation media download failed owner=%s", owner_id)
             return None
 
-    @staticmethod
-    def _media_items(item: dict) -> list[dict]:
-        media = list(item.get("media") or [])
-        if not media and item.get("media_file_id"):
-            media = [{"type": item.get("media_type") or "document", "file_id": item.get("media_file_id")}]
-        return [m for m in media if m.get("file_id")][:10]
-
     async def _send_configured_message(
         self,
         client: TelegramClient,
@@ -196,53 +194,22 @@ class BusinessAutomationRuntime:
         owner_id: int,
         *,
         text: str,
-        media_type: str = "",
-        media_file_id: str = "",
-        media_items=None,
-        button_rows=None,
+        media_type: str,
+        media_file_id: str,
+        button_rows,
     ) -> None:
-        """Send multiple saved items as one MTProto album.
-
-        Telegram albums cannot contain callback keyboards. The album is sent
-        first, then the configured text/URL buttons are sent as one message.
-        """
-        buttons = await self._telethon_buttons(owner_id, button_rows or [])
-        items = list(media_items or [])
-        if not items and media_file_id:
-            items = [{"type": media_type or "document", "file_id": media_file_id}]
-        items = [m for m in items if m.get("file_id")][:10]
-
-        downloaded = []
-        for item in items:
-            kind = str(item.get("type") or "document")
-            media = await self._download_clone_media(
-                owner_id, str(item.get("file_id") or ""), kind
-            )
+        buttons = await self._telethon_buttons(owner_id, button_rows)
+        if media_file_id:
+            media = await self._download_clone_media(owner_id, media_file_id, media_type)
             if media is not None:
-                downloaded.append(media)
-
-        if len(downloaded) > 1:
-            # Passing a list makes Telethon send one grouped album instead of
-            # separate messages. Text/buttons follow because albums cannot carry
-            # an inline keyboard.
-            await client.send_file(peer_id, downloaded, album=True)
-            if text or buttons:
-                await client.send_message(
-                    peer_id, text or "Choose an option below.", buttons=buttons
+                await client.send_file(
+                    peer_id,
+                    media,
+                    caption=text or "",
+                    buttons=buttons,
+                    force_document=str(media_type or "").lower() == "document",
                 )
-            return
-
-        if len(downloaded) == 1:
-            kind = str(items[0].get("type") or "document") if items else "document"
-            await client.send_file(
-                peer_id,
-                downloaded[0],
-                caption=text or "",
-                buttons=buttons,
-                force_document=kind.lower() == "document",
-            )
-            return
-
+                return
         await client.send_message(peer_id, text or "Welcome!", buttons=buttons)
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
@@ -256,7 +223,7 @@ class BusinessAutomationRuntime:
 
             settings = await get_seller_settings(owner_id)
             welcome = await get_business_welcome(owner_id)
-            auto_reply = await get_business_auto_reply(owner_id)
+            auto_replies = await list_business_auto_replies(owner_id)
             if not settings.get("business_automation_enabled"):
                 return
             if not self._inside_working_hours(settings):
@@ -285,28 +252,28 @@ class BusinessAutomationRuntime:
                         text=text,
                         media_type=str(welcome.get("media_type") or ""),
                         media_file_id=media_file_id,
-                        media_items=self._media_items(welcome),
                         button_rows=welcome.get("buttons") or [],
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
 
-            # Do not send two automatic messages on the user's first message.
-            if not welcome_sent and auto_reply.get("enabled", True):
-                text = str(auto_reply.get("text") or "").strip()
-                media_file_id = str(auto_reply.get("media_file_id") or "")
-                if text or media_file_id:
-                    await self._send_configured_message(
-                        client,
-                        peer_id,
-                        owner_id,
-                        text=text,
-                        media_type=str(auto_reply.get("media_type") or ""),
-                        media_file_id=media_file_id,
-                        media_items=self._media_items(auto_reply),
-                        button_rows=auto_reply.get("buttons") or [],
-                    )
-                    await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
+            # Keyword replies run after the first welcome. Exact matching avoids
+            # accidental replies when a keyword appears inside an unrelated sentence.
+            if not welcome_sent:
+                incoming_text = " ".join(str(getattr(event, "raw_text", "") or "").strip().lower().split())
+                match = next((x for x in auto_replies if x.get("enabled", True) and incoming_text == str(x.get("keyword") or "").strip().lower()), None)
+                if match:
+                    text = str(match.get("text") or "").strip()
+                    media_file_id = str(match.get("media_file_id") or "")
+                    if text or media_file_id:
+                        await self._send_configured_message(
+                            client, peer_id, owner_id,
+                            text=text,
+                            media_type=str(match.get("media_type") or ""),
+                            media_file_id=media_file_id,
+                            button_rows=match.get("buttons") or [],
+                        )
+                        await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -316,6 +283,39 @@ class BusinessAutomationRuntime:
                 account_user_id,
                 getattr(event, "sender_id", None),
             )
+
+    async def _handle_outgoing(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
+        """Replace seller shortcuts such as /payment with the saved template."""
+        try:
+            if not event.is_private:
+                return
+            raw = str(getattr(event, "raw_text", "") or "").strip()
+            if not raw.startswith("/"):
+                return
+            templates = await list_business_reply_templates(owner_id)
+            item = next((x for x in templates if raw.lower() == str(x.get("shortcut") or "").strip().lower()), None)
+            if not item:
+                return
+            peer_id = int(event.chat_id or 0)
+            if not peer_id:
+                return
+            try:
+                await event.delete()
+            except Exception:
+                logger.exception("Business template shortcut delete failed owner=%s", owner_id)
+            await self._send_configured_message(
+                client, peer_id, owner_id,
+                text=str(item.get("text") or item.get("name") or ""),
+                media_type=str(item.get("media_type") or ""),
+                media_file_id=str(item.get("media_file_id") or ""),
+                button_rows=item.get("buttons") or [],
+            )
+            await increment_business_account_stat(owner_id, account_user_id, "templates_used")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Business Automation outgoing template failed owner=%s account=%s", owner_id, account_user_id)
+
 
 
 business_automation_runtime = BusinessAutomationRuntime()
