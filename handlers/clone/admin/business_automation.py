@@ -51,6 +51,7 @@ from database.business_automation import (
     update_business_auto_reply,
     update_business_reply_template,
     update_business_welcome,
+    get_business_broadcast, update_business_broadcast, list_business_recipients,
 )
 from utils.crypto import decrypt_secret, encrypt_secret
 from services.business_automation_runtime import business_automation_runtime
@@ -83,6 +84,7 @@ def _home_keyboard(connected: int, enabled: bool):
             InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
             InlineKeyboardButton("📝 Reply Templates", callback_data="ba_templates"),
         ],
+        [InlineKeyboardButton("📣 Broadcast", callback_data="ba_broadcast")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="ba_settings")],
         [InlineKeyboardButton("📊 Statistics", callback_data="ba_stats")],
         [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
@@ -201,6 +203,22 @@ def _template_keyboard(item):
     rows.extend(common.inline_keyboard)
     return _kb(rows)
 
+
+
+
+def _broadcast_text(item):
+    return (
+        "📣 Business Account Broadcast\n\n"
+        "This broadcast is sent only to users who messaged the connected Telegram Business Account. "
+        "Clone Bot users, Main Bot users, Normal Account users and Live Support users are excluded.\n\n"
+        + editor_header("Current Setup", {**item, "enabled": True}, variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")
+    )
+
+def _broadcast_keyboard(item):
+    base = editor_menu_keyboard("ba_bc", {**item, "enabled": True}, back_callback="ba_home", allow_toggle=False)
+    rows = list(base.inline_keyboard)
+    rows.insert(-1, [InlineKeyboardButton("📤 Send Broadcast", callback_data="ba_bc_send")])
+    return _kb(rows)
 
 def _settings_text(s):
     return (
@@ -417,6 +435,42 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     else:
         templates = []
 
+    if action == "ba_broadcast":
+        item = await get_business_broadcast(owner)
+        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
+    if action == "ba_bc_text":
+        item = await get_business_broadcast(owner)
+        context.user_data["ba_editor"] = {"field": "broadcast_text"}
+        await q.edit_message_text(editor_text_prompt("Business Broadcast Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard("ba_broadcast", remove_callback="ba_bc_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
+    if action == "ba_bc_media":
+        item = await get_business_broadcast(owner)
+        context.user_data["ba_editor"] = {"field": "broadcast_media"}
+        await q.edit_message_text(editor_media_prompt("Business Broadcast Media"), reply_markup=_input_keyboard("ba_broadcast", remove_callback="ba_bc_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
+    if action == "ba_bc_buttons":
+        item = await get_business_broadcast(owner)
+        context.user_data["ba_editor"] = {"field": "broadcast_buttons"}
+        await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard("ba_broadcast", remove_callback="ba_bc_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+    if action == "ba_bc_rmtext":
+        item = await update_business_broadcast(owner, text="")
+        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
+    if action == "ba_bc_rmmedia":
+        item = await update_business_broadcast(owner, media_type="", media_file_id="", media=[])
+        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
+    if action == "ba_bc_rmbuttons":
+        item = await update_business_broadcast(owner, buttons=[])
+        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
+    if action == "ba_bc_preview":
+        item = await get_business_broadcast(owner)
+        await _send_preview(q.message, item.get("text"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
+    if action == "ba_bc_send":
+        from handlers.clone.business_official_runtime import send_official_business_broadcast
+        item = await get_business_broadcast(owner)
+        recipients = await list_business_recipients(owner)
+        if not recipients:
+            await q.answer("No Business Account users found.", show_alert=True); return True
+        await q.answer("Broadcast started.")
+        sent, failed = await send_official_business_broadcast(context, owner, item, recipients)
+        await q.message.reply_text(f"✅ Broadcast completed.\n\nSent: {sent}\nFailed: {failed}", reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
     if action == "ba_welcome":
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_toggle":
@@ -620,6 +674,10 @@ async def handle_text(self, update, context):
     try:
         if field == "welcome_text":
             await update_business_welcome(owner, text=text)
+        elif field == "broadcast_text":
+            await update_business_broadcast(owner, text=text)
+        elif field == "broadcast_buttons":
+            await update_business_broadcast(owner, buttons=parse_editor_buttons(text))
         elif field == "auto_keyword_add":
             item = await create_business_auto_reply_item(owner, text)
             context.user_data.pop("ba_editor", None)
@@ -684,7 +742,10 @@ async def handle_text(self, update, context):
         return True
 
     context.user_data.pop("ba_editor", None)
-    if field.startswith("welcome_"):
+    if field.startswith("broadcast_"):
+        item = await get_business_broadcast(owner)
+        await update.effective_message.reply_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item))
+    elif field.startswith("welcome_"):
         item = await get_business_welcome(owner)
         await update.effective_message.reply_text(_welcome_text(item), reply_markup=_welcome_keyboard(item))
     elif field.startswith("auto_item_") or field == "auto_keyword_edit":
@@ -705,7 +766,7 @@ async def handle_media(self, update, context):
         return False
     editor = context.user_data.get("ba_editor") or {}
     field = str(editor.get("field") or "")
-    if field not in {"welcome_media", "auto_item_media", "template_media"}:
+    if field not in {"welcome_media", "auto_item_media", "template_media", "broadcast_media"}:
         return False
 
     msg = update.effective_message
@@ -725,7 +786,10 @@ async def handle_media(self, update, context):
     async def save_items(items):
         items = items[:10]
         first = items[0] if items else {"type": "", "file_id": ""}
-        if field == "welcome_media":
+        if field == "broadcast_media":
+            await update_business_broadcast(owner, media=items, media_type=first["type"], media_file_id=first["file_id"])
+            back = "ba_broadcast"
+        elif field == "welcome_media":
             await update_business_welcome(owner, media=items, media_type=first["type"], media_file_id=first["file_id"])
             back = "ba_welcome"
         elif field == "auto_item_media":
@@ -741,7 +805,10 @@ async def handle_media(self, update, context):
             back = f"ba_tpl_open_{tid}"
         context.user_data.pop("ba_editor", None)
         context.user_data.pop("ba_media_batch", None)
-        if field == "welcome_media":
+        if field == "broadcast_media":
+            current = await get_business_broadcast(owner)
+            await msg.reply_text(_broadcast_text(current), reply_markup=_broadcast_keyboard(current))
+        elif field == "welcome_media":
             current = await get_business_welcome(owner)
             await msg.reply_text(_welcome_text(current), reply_markup=_welcome_keyboard(current))
         elif field == "auto_item_media":
