@@ -182,6 +182,13 @@ class BusinessAutomationRuntime:
             logger.exception("Business Automation media download failed owner=%s", owner_id)
             return None
 
+    @staticmethod
+    def _media_items(item: dict) -> list[dict]:
+        media = list(item.get("media") or [])
+        if not media and item.get("media_file_id"):
+            media = [{"type": item.get("media_type") or "document", "file_id": item.get("media_file_id")}]
+        return [m for m in media if m.get("file_id")][:10]
+
     async def _send_configured_message(
         self,
         client: TelegramClient,
@@ -189,21 +196,33 @@ class BusinessAutomationRuntime:
         owner_id: int,
         *,
         text: str,
-        media_type: str,
-        media_file_id: str,
-        button_rows,
+        media_type: str = "",
+        media_file_id: str = "",
+        media_items=None,
+        button_rows=None,
     ) -> None:
         buttons = await self._telethon_buttons(owner_id, button_rows)
-        if media_file_id:
-            media = await self._download_clone_media(owner_id, media_file_id, media_type)
-            if media is not None:
+        items = list(media_items or [])
+        if not items and media_file_id:
+            items = [{"type": media_type or "document", "file_id": media_file_id}]
+        items = [m for m in items if m.get("file_id")][:10]
+        if items:
+            sent_any = False
+            for index, item in enumerate(items):
+                kind = str(item.get("type") or "document")
+                media = await self._download_clone_media(owner_id, str(item.get("file_id") or ""), kind)
+                if media is None:
+                    continue
+                is_last = index == len(items) - 1
                 await client.send_file(
                     peer_id,
                     media,
-                    caption=text or "",
-                    buttons=buttons,
-                    force_document=str(media_type or "").lower() == "document",
+                    caption=(text or "") if is_last else "",
+                    buttons=buttons if is_last else None,
+                    force_document=kind.lower() == "document",
                 )
+                sent_any = True
+            if sent_any:
                 return
         await client.send_message(peer_id, text or "Welcome!", buttons=buttons)
 
@@ -247,6 +266,7 @@ class BusinessAutomationRuntime:
                         text=text,
                         media_type=str(welcome.get("media_type") or ""),
                         media_file_id=media_file_id,
+                        media_items=self._media_items(welcome),
                         button_rows=welcome.get("buttons") or [],
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
@@ -264,6 +284,7 @@ class BusinessAutomationRuntime:
                         text=text,
                         media_type=str(auto_reply.get("media_type") or ""),
                         media_file_id=media_file_id,
+                        media_items=self._media_items(auto_reply),
                         button_rows=auto_reply.get("buttons") or [],
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
