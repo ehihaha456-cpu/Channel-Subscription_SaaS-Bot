@@ -10,6 +10,7 @@ from config import ADMIN_IDS, BOT_TOKEN, validate_runtime_config
 from database.admins import initialize_admins
 from database.deleting_messages import initialize_deleting_message_indexes
 from database.broadcast import initialize_broadcast_indexes
+from database.business_official import initialize_official_business_indexes
 from database.live_support import initialize_live_support_indexes
 from database.mongo import close_database, connect_database, ping_database
 from database.payment_gateways import initialize_payment_gateway_indexes
@@ -153,6 +154,7 @@ async def post_init(application: Application) -> None:
         ("deleting message indexes", initialize_deleting_message_indexes),
         ("performance indexes", initialize_performance_indexes),
         ("broadcast queue indexes", initialize_broadcast_indexes),
+        ("official business indexes", initialize_official_business_indexes),
     ]
 
     for name, initializer in critical_initializers:
