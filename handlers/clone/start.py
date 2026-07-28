@@ -84,6 +84,24 @@ class CloneStartMixin:
                 owner,
                 (record or {}).get("bot_name","Subscription Bot"),
             )
+            # In Topic Mode, /start creates exactly one permanent support
+            # topic and posts the user's complete details as its first message.
+            support=await get_live_support_settings(owner)
+            if (
+                support.get("enabled")
+                and support.get("mode")=="topic"
+                and support.get("support_group_id")
+            ):
+                try:
+                    await self.ensure_support_topic(
+                        context,owner,update.effective_user,support,
+                    )
+                except TelegramError as exc:
+                    logger.warning(
+                        "Support topic creation on /start failed owner=%s user=%s: %s",
+                        owner,update.effective_user.id,exc,
+                    )
+
             await self.send_welcome(
                 update.effective_message,
                 context,

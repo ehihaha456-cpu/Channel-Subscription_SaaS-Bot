@@ -48,8 +48,21 @@ class CloneLiveSupportMixin:
                     raise ApplicationHandlerStop
             return
 
-        # Users send any non-command message in private chat.
+        # Users send an actual non-command content message in private chat.
+        # Ignore empty/service updates so Telegram status changes cannot create
+        # support topics by themselves.
         if chat.type!="private" or user.id==owner:
+            return
+        has_user_content=bool(
+            message.text
+            or message.caption
+            or message.effective_attachment
+            or message.contact
+            or message.location
+            or message.venue
+            or message.poll
+        )
+        if not has_user_content:
             return
         if not support.get("enabled"):
             return

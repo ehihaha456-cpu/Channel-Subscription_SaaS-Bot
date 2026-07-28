@@ -4,6 +4,8 @@ from handlers.common.clone_context import *
 
 
 class CloneSupportCoreMixin:
+    _support_topic_locks = {}
+
     def _support_datetime(value):
         if not value:
             return "-"
@@ -50,25 +52,45 @@ class CloneSupportCoreMixin:
         ])
 
     async def ensure_support_topic(self,context,owner,user,support):
-        topic=await get_support_topic(owner,user.id)
+        """Return one permanent support topic for a user.
+
+        Telegram can deliver several updates from the same user almost at once
+        (albums, retries, or duplicate webhook deliveries).  Without a per-user
+        lock, every update can create its own forum topic before MongoDB is
+        updated.  The lock keeps topic creation idempotent inside the clone-bot
+        runtime.
+        """
         group_id=int(support["support_group_id"])
-        if topic and int(topic.get("support_group_id",0))==group_id:
+        lock_key=(int(owner),int(user.id),group_id)
+        lock=self._support_topic_locks.setdefault(lock_key,asyncio.Lock())
+        async with lock:
+            topic=await get_support_topic(owner,user.id)
+            if (
+                topic
+                and int(topic.get("support_group_id",0))==group_id
+                and topic.get("message_thread_id")
+            ):
+                return topic
+
+            # A record from an older support group must never be reused.
+            if topic:
+                await delete_support_topic(owner,user.id)
+
+            topic_name=f"👤 {user.first_name or 'User'} | {user.id}"[:128]
+            forum_topic=await context.bot.create_forum_topic(group_id,name=topic_name)
+            topic=await save_support_topic(
+                owner,user.id,group_id,forum_topic.message_thread_id,topic_name,
+            )
+            blocked=await is_support_blocked(owner,user.id)
+            await context.bot.send_message(
+                chat_id=group_id,
+                message_thread_id=forum_topic.message_thread_id,
+                text=await self.support_user_details_text(owner,user),
+                parse_mode="HTML",
+                reply_markup=self.support_topic_keyboard(user.id,blocked),
+                disable_web_page_preview=True,
+            )
             return topic
-        topic_name=f"👤 {user.first_name or 'User'} | {user.id}"[:128]
-        forum_topic=await context.bot.create_forum_topic(group_id,name=topic_name)
-        topic=await save_support_topic(
-            owner,user.id,group_id,forum_topic.message_thread_id,topic_name,
-        )
-        blocked=await is_support_blocked(owner,user.id)
-        await context.bot.send_message(
-            chat_id=group_id,
-            message_thread_id=forum_topic.message_thread_id,
-            text=await self.support_user_details_text(owner,user),
-            parse_mode="HTML",
-            reply_markup=self.support_topic_keyboard(user.id,blocked),
-            disable_web_page_preview=True,
-        )
-        return topic
 
     async def support_template_values(self,owner,user):
         sub=await get_subscription(owner,user.id) or {}
