@@ -11,7 +11,10 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaPhoto,
+    InputMediaVideo, Update,
+)
 from telegram.ext import ContextTypes
 
 from database.business_automation import get_business_auto_reply, get_business_welcome
@@ -80,30 +83,70 @@ async def _send_configured_message(
     business_connection_id: str,
     owner_id: int,
     text: str,
-    media_type: str,
-    media_file_id: str,
-    button_rows,
+    media_type: str = "",
+    media_file_id: str = "",
+    media_items=None,
+    button_rows=None,
 ) -> None:
-    markup = await _inline_markup(owner_id, button_rows)
+    """Send saved media as one Telegram album, followed by text/buttons.
+
+    Telegram media groups do not support inline keyboards. Therefore, when
+    multiple media items are configured, the complete album is sent first and
+    the configured text/buttons are sent as one message immediately after it.
+    """
+    markup = await _inline_markup(owner_id, button_rows or [])
+    items = list(media_items or [])
+    if not items and media_file_id:
+        items = [{"type": media_type or "document", "file_id": media_file_id}]
+    items = [m for m in items if m.get("file_id")][:10]
+
     common = {
         "chat_id": int(chat_id),
         "business_connection_id": str(business_connection_id),
-        "reply_markup": markup,
     }
-    kind = str(media_type or "").lower()
-    if media_file_id:
-        if kind == "photo":
-            await context.bot.send_photo(photo=media_file_id, caption=text or None, **common)
-            return
-        if kind == "video":
-            await context.bot.send_video(video=media_file_id, caption=text or None, **common)
-            return
-        if kind == "animation":
-            await context.bot.send_animation(animation=media_file_id, caption=text or None, **common)
-            return
-        await context.bot.send_document(document=media_file_id, caption=text or None, **common)
+
+    if len(items) > 1:
+        album = []
+        for item in items:
+            kind = str(item.get("type") or "document").lower()
+            file_id = str(item.get("file_id") or "")
+            if kind == "photo":
+                album.append(InputMediaPhoto(media=file_id))
+            elif kind == "video":
+                album.append(InputMediaVideo(media=file_id))
+            else:
+                # Telegram albums support photos, videos, audio, and documents.
+                # GIF/animation is stored as a document inside mixed albums.
+                album.append(InputMediaDocument(media=file_id))
+        await context.bot.send_media_group(media=album, **common)
+        if text or markup:
+            await context.bot.send_message(
+                text=text or "Choose an option below.",
+                reply_markup=markup,
+                **common,
+            )
         return
-    await context.bot.send_message(text=text or "Welcome!", **common)
+
+    if len(items) == 1:
+        item = items[0]
+        kind = str(item.get("type") or "document").lower()
+        file_id = str(item.get("file_id") or "")
+        single_common = {**common, "caption": text or None, "reply_markup": markup}
+        if kind == "photo":
+            await context.bot.send_photo(photo=file_id, **single_common)
+        elif kind == "video":
+            await context.bot.send_video(video=file_id, **single_common)
+        elif kind == "animation":
+            await context.bot.send_animation(animation=file_id, **single_common)
+        else:
+            await context.bot.send_document(document=file_id, **single_common)
+        return
+
+    await context.bot.send_message(
+        text=text or "Welcome!",
+        reply_markup=markup,
+        **common,
+    )
 
 
 async def handle_business_connection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -173,7 +216,8 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         if welcome.get("enabled", True) and first_contact:
             text = str(welcome.get("text") or "").strip()
             media_file_id = str(welcome.get("media_file_id") or "")
-            if text or media_file_id:
+            media_items = list(welcome.get("media") or [])
+            if text or media_file_id or media_items:
                 await _send_configured_message(
                     context,
                     chat_id=message.chat_id,
@@ -182,6 +226,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                     text=text,
                     media_type=str(welcome.get("media_type") or ""),
                     media_file_id=media_file_id,
+                    media_items=media_items,
                     button_rows=welcome.get("buttons") or [],
                 )
                 await increment_official_business_stat(owner_id, connection_id, "welcome_sent")
@@ -190,7 +235,8 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         if not welcome_sent and auto_reply.get("enabled", True):
             text = str(auto_reply.get("text") or "").strip()
             media_file_id = str(auto_reply.get("media_file_id") or "")
-            if text or media_file_id:
+            media_items = list(auto_reply.get("media") or [])
+            if text or media_file_id or media_items:
                 await _send_configured_message(
                     context,
                     chat_id=message.chat_id,
@@ -199,6 +245,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                     text=text,
                     media_type=str(auto_reply.get("media_type") or ""),
                     media_file_id=media_file_id,
+                    media_items=media_items,
                     button_rows=auto_reply.get("buttons") or [],
                 )
                 await increment_official_business_stat(owner_id, connection_id, "auto_replies_sent")
