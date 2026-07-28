@@ -4,6 +4,7 @@ from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler
+from telegram.request import HTTPXRequest
 
 
 class CloneRuntimeAppMixin:
@@ -28,8 +29,24 @@ class CloneRuntimeAppMixin:
             raise ApplicationHandlerStop
 
     def build_app(self,token,data_owner_id,seller_account_id,bot_id=None):
-        protected_bot=ProtectedExtBot(token=token,owner_id=int(data_owner_id))
-        app=Application.builder().bot(protected_bot).build()
+        request = HTTPXRequest(
+            connection_pool_size=48,
+            pool_timeout=5.0,
+            connect_timeout=5.0,
+            read_timeout=20.0,
+            write_timeout=20.0,
+        )
+        protected_bot=ProtectedExtBot(
+            token=token,
+            owner_id=int(data_owner_id),
+            request=request,
+        )
+        app=(
+            Application.builder()
+            .bot(protected_bot)
+            .concurrent_updates(32)
+            .build()
+        )
         app.bot_data["seller_owner_id"]=int(data_owner_id)
         app.bot_data["seller_account_id"]=int(seller_account_id)
         app.bot_data["seller_bot_id"]=int(bot_id or 0)
