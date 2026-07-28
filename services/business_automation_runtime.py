@@ -33,6 +33,7 @@ from database.seller_data import (
     get_business_accounts,
     get_seller_settings,
     increment_business_account_stat,
+    reset_business_welcome,
 )
 from utils.crypto import decrypt_secret
 
@@ -174,8 +175,12 @@ class BusinessAutomationRuntime:
             async def outgoing_handler(event):
                 await self._handle_outgoing(owner_id, account_user_id, client, event)
 
+            async def deleted_handler(event):
+                await self._handle_deleted(owner_id, account_user_id, event)
+
             client.add_event_handler(incoming_handler, events.NewMessage(incoming=True))
             client.add_event_handler(outgoing_handler, events.NewMessage(outgoing=True))
+            client.add_event_handler(deleted_handler, events.MessageDeleted())
             self._clients[key] = client
             logger.info("Business Automation listener active owner=%s account=%s", owner_id, account_user_id)
             return True
@@ -300,6 +305,44 @@ class BusinessAutomationRuntime:
         await client.send_message(int(peer_id), str(text), link_preview=False)
         return True
 
+    async def _handle_deleted(self, owner_id: int, account_user_id: int, event) -> None:
+        """Reset first-contact tracking when Telegram reports a cleared private chat."""
+        try:
+            peer_id = int(getattr(event, "chat_id", 0) or 0)
+            if peer_id:
+                await reset_business_welcome(owner_id, account_user_id, peer_id)
+                logger.info(
+                    "Business welcome reset after deleted messages owner=%s account=%s peer=%s",
+                    owner_id,
+                    account_user_id,
+                    peer_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Business deleted-message handling failed owner=%s account=%s peer=%s",
+                owner_id,
+                account_user_id,
+                getattr(event, "chat_id", None),
+            )
+
+    @staticmethod
+    async def _history_is_new(client: TelegramClient, peer_id: int, current_message_id: int) -> bool:
+        """Return True when the connected account has no message older than this one.
+
+        This covers Telegram's clear-history/delete-chat flow even when a separate
+        MessageDeleted event was missed while the runtime was offline.
+        """
+        try:
+            messages = await client.get_messages(int(peer_id), limit=2)
+            ids = [int(getattr(item, "id", 0) or 0) for item in messages]
+            older = [message_id for message_id in ids if message_id and message_id != int(current_message_id or 0)]
+            return not older
+        except Exception:
+            logger.debug("Could not inspect Business chat history peer=%s", peer_id, exc_info=True)
+            return False
+
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
         try:
             if not event.is_private or event.out:
@@ -313,6 +356,12 @@ class BusinessAutomationRuntime:
                 owner_id, peer_id, mode="normal",
                 account_user_id=account_user_id, chat_id=peer_id,
             )
+
+            # If the seller cleared/deleted this private chat, Telegram may not
+            # deliver the deletion event while the runtime is offline. Detect an
+            # empty local history on the next incoming message and reset the claim.
+            if await self._history_is_new(client, peer_id, int(getattr(event, "id", 0) or 0)):
+                await reset_business_welcome(owner_id, account_user_id, peer_id)
 
             settings = await get_seller_settings(owner_id)
             welcome = await get_business_welcome(owner_id)
