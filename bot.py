@@ -284,6 +284,12 @@ def build_application() -> Application:
     return (
         Application.builder()
         .token(BOT_TOKEN)
+        .concurrent_updates(64)
+        .connection_pool_size(128)
+        .pool_timeout(5.0)
+        .connect_timeout(5.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
