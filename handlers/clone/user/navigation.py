@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard
 from database.business_automation import get_business_welcome
+from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 
 def _business_connection_id(message):
@@ -23,34 +24,42 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
     markup = build_editor_keyboard(item.get("buttons") or [])
     chat_id = update.effective_chat.id
     media = _business_media(item)
+    common = {
+        "chat_id": chat_id,
+        "business_connection_id": business_connection_id,
+    }
 
     if not media:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=markup,
-            business_connection_id=business_connection_id,
-        )
+        await context.bot.send_message(text=text, reply_markup=markup, **common)
         return
 
-    for index, entry in enumerate(media):
-        kind = str(entry.get("type") or "document")
-        file_id = str(entry.get("file_id") or "")
-        last = index == len(media) - 1
-        kwargs = {
-            "chat_id": chat_id,
-            "business_connection_id": business_connection_id,
-            "caption": text if last else None,
-            "reply_markup": markup if last else None,
-        }
-        if kind == "photo":
-            await context.bot.send_photo(photo=file_id, **kwargs)
-        elif kind == "video":
-            await context.bot.send_video(video=file_id, **kwargs)
-        elif kind == "animation":
-            await context.bot.send_animation(animation=file_id, **kwargs)
-        else:
-            await context.bot.send_document(document=file_id, **kwargs)
+    if len(media) > 1:
+        album = []
+        for entry in media:
+            kind = str(entry.get("type") or "document").lower()
+            file_id = str(entry.get("file_id") or "")
+            if kind == "photo":
+                album.append(InputMediaPhoto(media=file_id))
+            elif kind == "video":
+                album.append(InputMediaVideo(media=file_id))
+            else:
+                album.append(InputMediaDocument(media=file_id))
+        await context.bot.send_media_group(media=album, **common)
+        await context.bot.send_message(text=text, reply_markup=markup, **common)
+        return
+
+    entry = media[0]
+    kind = str(entry.get("type") or "document").lower()
+    file_id = str(entry.get("file_id") or "")
+    kwargs = {**common, "caption": text, "reply_markup": markup}
+    if kind == "photo":
+        await context.bot.send_photo(photo=file_id, **kwargs)
+    elif kind == "video":
+        await context.bot.send_video(video=file_id, **kwargs)
+    elif kind == "animation":
+        await context.bot.send_animation(animation=file_id, **kwargs)
+    else:
+        await context.bot.send_document(document=file_id, **kwargs)
 
 
 async def handle(self, update, context, q, owner, action):
