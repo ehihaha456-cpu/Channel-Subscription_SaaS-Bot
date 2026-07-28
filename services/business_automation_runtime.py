@@ -253,7 +253,8 @@ class BusinessAutomationRuntime:
             if welcome.get("enabled", True) and first_contact:
                 text = str(welcome.get("text") or "").strip()
                 media_file_id = str(welcome.get("media_file_id") or "")
-                if text or media_file_id:
+                media_items = list(welcome.get("media") or [])
+                if text or media_file_id or media_items:
                     await self._send_configured_message(
                         client,
                         peer_id,
@@ -275,7 +276,8 @@ class BusinessAutomationRuntime:
                 if match:
                     text = str(match.get("text") or "").strip()
                     media_file_id = str(match.get("media_file_id") or "")
-                    if text or media_file_id:
+                    media_items = list(match.get("media") or [])
+                    if text or media_file_id or media_items:
                         await self._send_configured_message(
                             client, peer_id, owner_id,
                             text=text,
