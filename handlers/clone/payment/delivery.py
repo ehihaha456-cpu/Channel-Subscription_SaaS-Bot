@@ -1,6 +1,8 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from database.business_delivery import list_business_contact_routes
+from services.business_automation_runtime import business_automation_runtime
 
 
 class ClonePaymentDeliveryMixin:
@@ -162,6 +164,49 @@ class ClonePaymentDeliveryMixin:
 
         return {"sent": sent, "failed": failed, "error": ""}
 
+    async def _deliver_access_to_business_chats(self, bot, owner_id:int, user_id:int, text:str) -> dict:
+        """Mirror access details to the subscriber's connected account chat(s)."""
+        sent = 0
+        failed = 0
+        routes = await list_business_contact_routes(int(owner_id), int(user_id))
+        seen = set()
+        for route in routes:
+            mode = str(route.get("mode") or "")
+            route_key = (mode, int(route.get("account_user_id") or 0), str(route.get("connection_id") or ""))
+            if route_key in seen:
+                continue
+            seen.add(route_key)
+            try:
+                if mode == "official":
+                    connection_id = str(route.get("connection_id") or "")
+                    chat_id = int(route.get("chat_id") or user_id)
+                    if not connection_id:
+                        continue
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        business_connection_id=connection_id,
+                        disable_web_page_preview=True,
+                    )
+                    sent += 1
+                elif mode == "normal":
+                    account_user_id = int(route.get("account_user_id") or 0)
+                    peer_id = int(route.get("chat_id") or user_id)
+                    if not account_user_id:
+                        continue
+                    ok = await business_automation_runtime.send_text_to_contact(
+                        int(owner_id), account_user_id, peer_id, text
+                    )
+                    sent += int(bool(ok))
+                    failed += int(not ok)
+            except Exception:
+                failed += 1
+                logger.exception(
+                    "Business access delivery failed owner=%s user=%s mode=%s",
+                    owner_id, user_id, mode,
+                )
+        return {"sent": sent, "failed": failed}
+
     async def deliver_subscription_access(self, owner_id:int, user_id:int, success_details:dict|None=None):
         """Send fresh invite links only for chats the user has not joined yet.
 
@@ -294,12 +339,32 @@ class ClonePaymentDeliveryMixin:
                         + "\n\n".join(links)
                     )
 
-                await bot.send_message(
-                    chat_id=int(user_id),
-                    text=text,
-                    disable_web_page_preview=True,
+                bot_dm_error = ""
+                try:
+                    await bot.send_message(
+                        chat_id=int(user_id),
+                        text=text,
+                        disable_web_page_preview=True,
+                    )
+                except TelegramError as exc:
+                    bot_dm_error = str(exc)
+                    logger.warning(
+                        "Clone bot access DM failed owner=%s user=%s: %s",
+                        owner_id, user_id, exc,
+                    )
+
+                business_delivery = await self._deliver_access_to_business_chats(
+                    bot, int(owner_id), int(user_id), text
                 )
-            except TelegramError as exc:
+                if bot_dm_error and not business_delivery.get("sent"):
+                    return {
+                        "sent": 0,
+                        "already_member": already_member,
+                        "failed": failed + len(links) + int(business_delivery.get("failed") or 0),
+                        "error": bot_dm_error,
+                    }
+            except Exception as exc:
+                logger.exception("Access message construction/delivery failed owner=%s user=%s", owner_id, user_id)
                 return {"sent":0,"already_member":already_member,"failed":failed+len(links),"error":str(exc)}
 
         error = ""
