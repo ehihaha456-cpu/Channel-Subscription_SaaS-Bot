@@ -20,6 +20,8 @@ from telethon.sessions import StringSession
 
 from config import TELEGRAM_API_HASH, TELEGRAM_API_ID
 from database.seller_bots import get_bot_by_data_owner_id
+from database.business_delivery import record_business_contact
+from handlers.common.clone_context import MAIN_BOT_USERNAME
 from database.business_automation import (
     get_business_auto_reply,
     list_business_auto_replies,
@@ -94,6 +96,18 @@ def _render_button_rows(rows, user):
         if rendered_row:
             rendered_rows.append(rendered_row)
     return rendered_rows
+
+
+def _with_powered_by(text: str) -> str:
+    username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
+    base = str(text or "").rstrip()
+    if not username:
+        return base
+    marker = f"Powered by @{username}"
+    if marker.casefold() in base.casefold():
+        return base
+    return f"{base}\n\n━━━━━━━━━━━━━━\n🤖 {marker}" if base else f"🤖 {marker}"
+
 
 class BusinessAutomationRuntime:
     def __init__(self) -> None:
@@ -272,6 +286,20 @@ class BusinessAutomationRuntime:
             return
         await client.send_message(peer_id, rendered_text or "Welcome!", buttons=buttons)
 
+    async def send_text_to_contact(
+        self, owner_id: int, account_user_id: int, peer_id: int, text: str
+    ) -> bool:
+        """Send a plain message through one connected Normal account."""
+        key = (int(owner_id), int(account_user_id))
+        client = self._clients.get(key)
+        if not client or not client.is_connected():
+            started = await self.start_account(int(owner_id), int(account_user_id))
+            client = self._clients.get(key) if started else None
+        if not client or not client.is_connected():
+            return False
+        await client.send_message(int(peer_id), str(text), link_preview=False)
+        return True
+
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
         try:
             if not event.is_private or event.out:
@@ -280,6 +308,11 @@ class BusinessAutomationRuntime:
             peer_id = int(event.sender_id or 0)
             if not peer_id or peer_id == int(account_user_id) or getattr(sender, "bot", False):
                 return
+
+            await record_business_contact(
+                owner_id, peer_id, mode="normal",
+                account_user_id=account_user_id, chat_id=peer_id,
+            )
 
             settings = await get_seller_settings(owner_id)
             welcome = await get_business_welcome(owner_id)
@@ -302,7 +335,7 @@ class BusinessAutomationRuntime:
 
             welcome_sent = False
             if welcome.get("enabled", True) and first_contact:
-                text = str(welcome.get("text") or "").strip()
+                text = _with_powered_by(str(welcome.get("text") or "").strip())
                 media_file_id = str(welcome.get("media_file_id") or "")
                 media_items = list(welcome.get("media") or [])
                 if text or media_file_id or media_items:
