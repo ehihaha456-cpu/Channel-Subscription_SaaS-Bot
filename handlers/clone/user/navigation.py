@@ -4,6 +4,46 @@ from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard
 from database.business_automation import get_business_welcome
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+
+def _render_business_variables(value: str, user) -> str:
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    first = str(getattr(user, "first_name", "") or "")
+    last = str(getattr(user, "last_name", "") or "")
+    name = " ".join(x for x in (first, last) if x).strip() or str(getattr(user, "username", "") or "User")
+    username_raw = str(getattr(user, "username", "") or "").lstrip("@")
+    user_id = str(getattr(user, "id", "") or "")
+    values = {
+        "{NAME}": name, "{FIRSTNAME}": first, "{SURNAME}": last, "{NAMESURNAME}": name,
+        "{ID}": user_id, "{USERNAME}": f"@{username_raw}" if username_raw else "",
+        "{MENTION}": f"tg://user?id={user_id}" if user_id else "",
+        "{DATE}": now.strftime("%d %b %Y"), "{TIME}": now.strftime("%I:%M %p"),
+        "{WEEKDAY}": now.strftime("%A"),
+    }
+    rendered = str(value or "")
+    for token, replacement in values.items():
+        rendered = rendered.replace(token, replacement)
+    return rendered
+
+
+def _render_business_buttons(rows, user):
+    result = []
+    for row in rows or []:
+        clean = []
+        for item in row or []:
+            copy = dict(item)
+            copy["text"] = _render_business_variables(copy.get("text") or "", user)
+            if "value" in copy:
+                copy["value"] = _render_business_variables(copy.get("value") or "", user)
+            if "url" in copy:
+                copy["url"] = _render_business_variables(copy.get("url") or "", user)
+            clean.append(copy)
+        if clean:
+            result.append(clean)
+    return result
 
 
 def _business_connection_id(message):
@@ -20,8 +60,9 @@ def _business_media(item: dict) -> list[dict]:
 async def _send_business_welcome(update, context, owner: int, business_connection_id: str):
     """Return feature navigation to the configured Business welcome, not /start."""
     item = await get_business_welcome(owner)
-    text = str(item.get("text") or "Welcome!")
-    markup = build_editor_keyboard(item.get("buttons") or [])
+    user = update.effective_user
+    text = _render_business_variables(str(item.get("text") or "Welcome!"), user)
+    markup = build_editor_keyboard(_render_business_buttons(item.get("buttons") or [], user))
     chat_id = update.effective_chat.id
     media = _business_media(item)
     common = {
