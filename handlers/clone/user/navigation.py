@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard
 from database.business_automation import get_business_welcome
+from handlers.common.clone_context import MAIN_BOT_USERNAME
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -62,6 +63,9 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
     item = await get_business_welcome(owner)
     user = update.effective_user
     text = _render_business_variables(str(item.get("text") or "Welcome!"), user)
+    username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
+    if username and f"Powered by @{username}".casefold() not in text.casefold():
+        text = f"{text.rstrip()}\n\n━━━━━━━━━━━━━━\n🤖 Powered by @{username}"
     markup = build_editor_keyboard(_render_business_buttons(item.get("buttons") or [], user))
     chat_id = update.effective_chat.id
     media = _business_media(item)
