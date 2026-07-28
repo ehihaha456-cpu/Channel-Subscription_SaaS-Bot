@@ -2,6 +2,8 @@
 
 from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation
+from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message
+from telegram.ext import BusinessConnectionHandler
 
 
 class CloneRuntimeAppMixin:
@@ -32,6 +34,10 @@ class CloneRuntimeAppMixin:
         app.bot_data["seller_account_id"]=int(seller_account_id)
         app.bot_data["seller_bot_id"]=int(bot_id or 0)
         app.add_error_handler(self.clone_error_handler)
+        # Official Telegram Business updates must run before normal clone-bot
+        # moderation/menu handlers.
+        app.add_handler(BusinessConnectionHandler(handle_business_connection), group=-51)
+        app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message), group=-50)
         app.add_handler(CommandHandler("start",self.child_start))
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
