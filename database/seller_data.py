@@ -399,9 +399,10 @@ async def remove_channel(owner_id,chat_id): return (await c(CHANNELS).update_one
 
 
 async def upsert_user(owner_id,user):
+    """Create/update and return the user in one MongoDB round trip."""
     now=datetime.now(timezone.utc)
     username=user.username or ""
-    await c(USERS).update_one(
+    return await c(USERS).find_one_and_update(
         {"owner_id":owner_id,"user_id":user.id},
         {
             "$set":{
@@ -421,6 +422,7 @@ async def upsert_user(owner_id,user):
             },
         },
         upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
 async def get_user(owner_id,user_id): return await c(USERS).find_one({"owner_id":owner_id,"user_id":user_id})
 async def count_users(owner_id): return await c(USERS).count_documents({"owner_id":owner_id})
