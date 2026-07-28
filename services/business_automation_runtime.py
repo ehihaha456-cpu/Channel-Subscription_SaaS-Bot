@@ -201,29 +201,48 @@ class BusinessAutomationRuntime:
         media_items=None,
         button_rows=None,
     ) -> None:
-        buttons = await self._telethon_buttons(owner_id, button_rows)
+        """Send multiple saved items as one MTProto album.
+
+        Telegram albums cannot contain callback keyboards. The album is sent
+        first, then the configured text/URL buttons are sent as one message.
+        """
+        buttons = await self._telethon_buttons(owner_id, button_rows or [])
         items = list(media_items or [])
         if not items and media_file_id:
             items = [{"type": media_type or "document", "file_id": media_file_id}]
         items = [m for m in items if m.get("file_id")][:10]
-        if items:
-            sent_any = False
-            for index, item in enumerate(items):
-                kind = str(item.get("type") or "document")
-                media = await self._download_clone_media(owner_id, str(item.get("file_id") or ""), kind)
-                if media is None:
-                    continue
-                is_last = index == len(items) - 1
-                await client.send_file(
-                    peer_id,
-                    media,
-                    caption=(text or "") if is_last else "",
-                    buttons=buttons if is_last else None,
-                    force_document=kind.lower() == "document",
+
+        downloaded = []
+        for item in items:
+            kind = str(item.get("type") or "document")
+            media = await self._download_clone_media(
+                owner_id, str(item.get("file_id") or ""), kind
+            )
+            if media is not None:
+                downloaded.append(media)
+
+        if len(downloaded) > 1:
+            # Passing a list makes Telethon send one grouped album instead of
+            # separate messages. Text/buttons follow because albums cannot carry
+            # an inline keyboard.
+            await client.send_file(peer_id, downloaded, album=True)
+            if text or buttons:
+                await client.send_message(
+                    peer_id, text or "Choose an option below.", buttons=buttons
                 )
-                sent_any = True
-            if sent_any:
-                return
+            return
+
+        if len(downloaded) == 1:
+            kind = str(items[0].get("type") or "document") if items else "document"
+            await client.send_file(
+                peer_id,
+                downloaded[0],
+                caption=text or "",
+                buttons=buttons,
+                force_document=kind.lower() == "document",
+            )
+            return
+
         await client.send_message(peer_id, text or "Welcome!", buttons=buttons)
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
