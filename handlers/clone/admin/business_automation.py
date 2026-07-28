@@ -1,5 +1,6 @@
 """Business Automation UI and MTProto account connection inside clone-bot Admin Panel."""
 
+import asyncio
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -224,8 +225,7 @@ async def _send_preview(message, item):
     if not media:
         await message.reply_text(text, reply_markup=markup)
         return
-    # Telegram albums cannot carry an inline keyboard. Send media in order,
-    # then attach the buttons to a final text message when there is more than one.
+
     if len(media) == 1:
         m = media[0]
         kind, file_id = str(m.get("type") or "document"), str(m.get("file_id") or "")
@@ -238,19 +238,20 @@ async def _send_preview(message, item):
         else:
             await message.reply_document(file_id, caption=text, reply_markup=markup)
         return
-    for index, m in enumerate(media):
-        kind, file_id = str(m.get("type") or "document"), str(m.get("file_id") or "")
-        caption = text if index == 0 else None
+
+    album = []
+    for m in media:
+        kind = str(m.get("type") or "document").lower()
+        file_id = str(m.get("file_id") or "")
         if kind == "photo":
-            await message.reply_photo(file_id, caption=caption)
+            album.append(InputMediaPhoto(media=file_id))
         elif kind == "video":
-            await message.reply_video(file_id, caption=caption)
-        elif kind == "animation":
-            await message.reply_animation(file_id, caption=caption)
+            album.append(InputMediaVideo(media=file_id))
         else:
-            await message.reply_document(file_id, caption=caption)
-    if markup:
-        await message.reply_text("Choose an option below.", reply_markup=markup)
+            album.append(InputMediaDocument(media=file_id))
+    await message.reply_media_group(media=album)
+    if text or markup:
+        await message.reply_text(text or "Choose an option below.", reply_markup=markup)
 
 
 def _mtproto_ready():
@@ -500,7 +501,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             templates = await list_business_reply_templates(owner)
             await q.edit_message_text("✅ Reply template deleted.", reply_markup=_templates_keyboard(templates)); return True
         elif op == "preview":
-            await _send_preview(q.message, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons")); await q.answer("Preview sent."); return True
+            await _send_preview(q.message, item); await q.answer("Preview sent."); return True
         if item:
             await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
 
@@ -579,13 +580,6 @@ async def handle_text(self, update, context):
     editor = context.user_data.get("ba_editor")
     if not editor:
         return False
-    if text.lower() == "/done" and str(editor.get("field") or "") in {"welcome_media", "auto_media", "template_media"}:
-        context.user_data.pop("ba_editor", None)
-        await update.effective_message.reply_text(
-            "✅ Media setup completed.",
-            reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
-        )
-        return True
     if text.lower() == "/cancel":
         context.user_data.pop("ba_editor", None)
         await update.effective_message.reply_text(
@@ -652,6 +646,50 @@ async def handle_text(self, update, context):
     return True
 
 
+async def _save_media_selection(owner: int, field: str, template_id: str, media: list[dict]):
+    """Replace the editor media with one Telegram message/album."""
+    media = [item for item in media if item.get("file_id")][:10]
+    if not media:
+        return
+    legacy = media[0]
+    payload = {
+        "media": media,
+        "media_type": legacy["type"],
+        "media_file_id": legacy["file_id"],
+    }
+    if field == "welcome_media":
+        await update_business_welcome(owner, **payload)
+    elif field == "auto_media":
+        await update_business_auto_reply(owner, **payload)
+    else:
+        await update_business_reply_template(owner, template_id, **payload)
+
+
+async def _finish_media_album(context, key):
+    """Wait briefly for every update in one Telegram media group, then save once."""
+    await asyncio.sleep(1.2)
+    bucket = context.application.bot_data.get("ba_media_albums", {}).pop(key, None)
+    if not bucket:
+        return
+    items = sorted(bucket["items"], key=lambda item: item["message_id"])
+    media = [{"type": item["type"], "file_id": item["file_id"]} for item in items[:10]]
+    await _save_media_selection(bucket["owner"], bucket["field"], bucket["template_id"], media)
+
+    editor = context.user_data.get("ba_editor") or {}
+    if (
+        str(editor.get("field") or "") == bucket["field"]
+        and str(editor.get("template_id") or "") == bucket["template_id"]
+    ):
+        context.user_data.pop("ba_editor", None)
+
+    extra = max(0, len(items) - 10)
+    note = f"\n⚠️ {extra} extra file(s) were ignored." if extra else ""
+    await bucket["message"].reply_text(
+        f"✅ {len(media)} media file(s) saved together.{note}",
+        reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+    )
+
+
 async def handle_media(self, update, context):
     owner = self.owner(context)
     if int(update.effective_user.id) != int(owner):
@@ -676,30 +714,55 @@ async def handle_media(self, update, context):
         return False
 
     template_id = str(editor.get("template_id") or "")
-    if field == "welcome_media":
-        item = await get_business_welcome(owner)
-    elif field == "auto_media":
-        item = await get_business_auto_reply(owner)
-    else:
-        item = await get_business_reply_template(owner, template_id)
-        if not item:
-            await msg.reply_text("❌ Reply template not found.")
-            return True
-
-    media = _media_items(item)
-    if len(media) >= 10:
-        await msg.reply_text("⚠️ Maximum 10 media files are allowed. Send /done to finish or remove the current media list first.")
+    if field == "template_media" and not await get_business_reply_template(owner, template_id):
+        await msg.reply_text("❌ Reply template not found.")
         return True
-    media.append({"type": media_type, "file_id": file_id})
-    legacy = media[0]
-    if field == "welcome_media":
-        await update_business_welcome(owner, media=media, media_type=legacy["type"], media_file_id=legacy["file_id"])
-    elif field == "auto_media":
-        await update_business_auto_reply(owner, media=media, media_type=legacy["type"], media_file_id=legacy["file_id"])
-    else:
-        await update_business_reply_template(owner, template_id, media=media, media_type=legacy["type"], media_file_id=legacy["file_id"])
 
-    await msg.reply_text(
-        f"✅ Media added ({len(media)}/10). Send another media file, or send /done when finished."
+    # A single Telegram media message replaces the old selection immediately.
+    # An album arrives as several updates sharing one media_group_id, so collect
+    # them briefly and save the whole album automatically—no /done command.
+    media_group_id = str(msg.media_group_id or "")
+    if not media_group_id:
+        await _save_media_selection(
+            owner,
+            field,
+            template_id,
+            [{"type": media_type, "file_id": file_id}],
+        )
+        context.user_data.pop("ba_editor", None)
+        await msg.reply_text(
+            "✅ Media saved.",
+            reply_markup=_kb([[InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")]]),
+        )
+        return True
+
+    albums = context.application.bot_data.setdefault("ba_media_albums", {})
+    key = (int(owner), int(msg.chat_id), media_group_id, field, template_id)
+    bucket = albums.setdefault(
+        key,
+        {
+            "owner": int(owner),
+            "field": field,
+            "template_id": template_id,
+            "items": [],
+            "message": msg,
+            "task": None,
+        },
+    )
+    bucket["items"].append(
+        {
+            "message_id": int(msg.message_id),
+            "type": media_type,
+            "file_id": file_id,
+        }
+    )
+    bucket["message"] = msg
+
+    old_task = bucket.get("task")
+    if old_task and not old_task.done():
+        old_task.cancel()
+    bucket["task"] = context.application.create_task(
+        _finish_media_album(context, key),
+        name=f"ba-media-album-{media_group_id}",
     )
     return True
