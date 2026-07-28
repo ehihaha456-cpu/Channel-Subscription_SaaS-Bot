@@ -18,16 +18,14 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-from database.business_automation import get_business_welcome, list_business_auto_replies, list_business_reply_templates
-from database.business_delivery import record_business_contact
+from database.business_automation import get_business_welcome, list_business_auto_replies, list_business_reply_templates, upsert_business_recipient
 from database.business_official import (
     get_official_business_connection,
     increment_official_business_stat,
     save_official_business_connection,
 )
 from database.seller_bots import get_bot_by_data_owner_id
-from database.seller_data import claim_business_welcome, get_seller_settings
-from handlers.common.clone_context import MAIN_BOT_USERNAME
+from database.seller_data import claim_business_welcome, get_seller_settings, reset_business_welcome
 
 logger = logging.getLogger(__name__)
 
@@ -83,18 +81,6 @@ def _render_button_rows(rows, user):
         if clean:
             result.append(clean)
     return result
-
-
-def _with_powered_by(text: str) -> str:
-    username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
-    base = str(text or "").rstrip()
-    if not username:
-        return base
-    marker = f"Powered by @{username}"
-    if marker.casefold() in base.casefold():
-        return base
-    return f"{base}\n\n━━━━━━━━━━━━━━\n🤖 {marker}" if base else f"🤖 {marker}"
-
 
 def _inside_working_hours(settings: dict) -> bool:
     if not settings.get("business_working_hours_enabled"):
@@ -262,13 +248,6 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
         if not sender_id or bool(getattr(sender, "is_bot", False)):
             return
 
-        if sender_id != business_user_id:
-            await record_business_contact(
-                owner_id, sender_id, mode="official",
-                account_user_id=business_user_id, connection_id=connection_id,
-                chat_id=int(message.chat_id),
-            )
-
         # A seller sends a template keyword alone; replace that message with the
         # configured reply template. These updates must never enter Live Support.
         if sender_id == business_user_id:
@@ -291,6 +270,8 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                     await increment_official_business_stat(owner_id, connection_id, "templates_used")
             return
 
+        await upsert_business_recipient(owner_id, connection_id, message.chat_id, sender)
+
         settings = await get_seller_settings(owner_id)
         if not settings.get("business_automation_enabled"):
             return
@@ -312,7 +293,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
 
         welcome_sent = False
         if welcome.get("enabled", True) and first_contact:
-            text = _with_powered_by(str(welcome.get("text") or "").strip())
+            text = str(welcome.get("text") or "").strip()
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
@@ -356,3 +337,55 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             connection_id,
             getattr(message, "chat_id", None),
         )
+
+
+async def handle_deleted_business_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    deleted = update.deleted_business_messages
+    if deleted is None:
+        return
+    owner_id = int(context.application.bot_data.get("seller_owner_id") or 0)
+    if not owner_id:
+        return
+    connection_id = str(deleted.business_connection_id or "")
+    if not connection_id:
+        return
+    try:
+        connection_doc = await get_official_business_connection(owner_id, connection_id)
+        if not connection_doc:
+            connection = await context.bot.get_business_connection(connection_id)
+            connection_doc = await save_official_business_connection(owner_id, connection)
+        business_user_id = int(connection_doc.get("business_user_id") or owner_id)
+        await reset_business_welcome(owner_id, business_user_id, int(deleted.chat.id))
+    except Exception:
+        logger.exception("Could not reset Business welcome after deleted messages owner=%s", owner_id)
+
+
+async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict]) -> tuple[int, int]:
+    sent = failed = 0
+    for recipient in recipients:
+        try:
+            class Recipient:
+                pass
+            user = Recipient()
+            user.id = int(recipient.get("chat_id") or 0)
+            user.first_name = str(recipient.get("first_name") or "")
+            user.last_name = str(recipient.get("last_name") or "")
+            user.username = str(recipient.get("username") or "")
+            await _send_configured_message(
+                context,
+                chat_id=int(recipient["chat_id"]),
+                business_connection_id=str(recipient["connection_id"]),
+                owner_id=int(owner_id),
+                text=str(item.get("text") or ""),
+                media_type=str(item.get("media_type") or ""),
+                media_file_id=str(item.get("media_file_id") or ""),
+                media_items=item.get("media") or [],
+                button_rows=item.get("buttons") or [],
+                user=user,
+            )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+            logger.exception("Business broadcast failed owner=%s chat=%s", owner_id, recipient.get("chat_id"))
+    return sent, failed
