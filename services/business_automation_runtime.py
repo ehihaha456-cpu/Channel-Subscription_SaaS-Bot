@@ -36,6 +36,7 @@ from database.seller_data import (
     increment_business_account_stat,
     get_business_contact,
     reset_business_welcome,
+    set_business_welcome_message_ids,
 )
 from utils.crypto import decrypt_secret
 
@@ -276,7 +277,7 @@ class BusinessAutomationRuntime:
     async def _send_configured_message(
         self, client: TelegramClient, peer_id: int, owner_id: int, *,
         text: str, media_type: str, media_file_id: str, button_rows, media_items=None, user=None,
-    ) -> None:
+    ) -> list[int]:
         rendered_text = _render_variables(text, user) if user is not None else str(text or "")
         rendered_rows = _render_button_rows(button_rows, user) if user is not None else button_rows
         buttons = await self._telethon_buttons(owner_id, rendered_rows)
@@ -289,15 +290,22 @@ class BusinessAutomationRuntime:
             stream = await self._download_clone_media(owner_id, str(item.get("file_id") or ""), str(item.get("type") or ""))
             if stream is not None:
                 streams.append(stream)
+        sent_ids: list[int] = []
         if len(streams) > 1:
-            await client.send_file(peer_id, streams, album=True)
+            sent = await client.send_file(peer_id, streams, album=True)
+            if isinstance(sent, (list, tuple)):
+                sent_ids.extend(int(getattr(item, "id", 0) or 0) for item in sent)
+            elif sent is not None:
+                sent_ids.append(int(getattr(sent, "id", 0) or 0))
             if rendered_text or buttons:
-                await client.send_message(peer_id, rendered_text or "Choose an option below.", buttons=buttons)
-            return
+                message = await client.send_message(peer_id, rendered_text or "Choose an option below.", buttons=buttons)
+                sent_ids.append(int(getattr(message, "id", 0) or 0))
+            return [message_id for message_id in sent_ids if message_id > 0]
         if len(streams) == 1:
-            await client.send_file(peer_id, streams[0], caption=rendered_text or "", buttons=buttons, force_document=str(items[0].get("type") or "").lower() == "document")
-            return
-        await client.send_message(peer_id, rendered_text or "Welcome!", buttons=buttons)
+            message = await client.send_file(peer_id, streams[0], caption=rendered_text or "", buttons=buttons, force_document=str(items[0].get("type") or "").lower() == "document")
+            return [int(getattr(message, "id", 0) or 0)] if int(getattr(message, "id", 0) or 0) > 0 else []
+        message = await client.send_message(peer_id, rendered_text or "Welcome!", buttons=buttons)
+        return [int(getattr(message, "id", 0) or 0)] if int(getattr(message, "id", 0) or 0) > 0 else []
 
     async def send_text_to_contact(
         self, owner_id: int, account_user_id: int, peer_id: int, text: str
@@ -375,24 +383,62 @@ class BusinessAutomationRuntime:
         self, owner_id: int, account_user_id: int, peer_id: int,
         client: TelegramClient, current_message_id: int,
     ) -> bool:
-        """Return True when the connected account now sees only the new message.
+        """Detect a cleared private chat before claiming the next welcome.
 
-        Unlike the previous one-time cache, this check is performed for every
-        incoming message of an already-known contact.  That makes chat-clear
-        detection work even when Telegram did not deliver a delete event or the
-        runtime was offline.  Only the three newest messages are requested.
+        Telegram does not always emit a usable delete-history event.  We therefore
+        persist the last processed message id and verify that it is still present.
+        A second recent-history check covers old database records that do not yet
+        contain ``last_message_id``.
         """
         existing = await get_business_contact(owner_id, account_user_id, peer_id)
         if not existing:
             return False
         try:
-            messages = await client.get_messages(int(peer_id), limit=3)
-            visible_ids = [int(getattr(message, "id", 0) or 0) for message in messages]
-            visible_ids = [message_id for message_id in visible_ids if message_id > 0]
-            if not visible_ids:
+            welcome_message_ids = [
+                int(value) for value in (existing.get("welcome_message_ids") or [])
+                if int(value or 0) > 0
+            ]
+            if welcome_message_ids:
+                delivered = await client.get_messages(int(peer_id), ids=welcome_message_ids[-5:])
+                if not isinstance(delivered, (list, tuple)):
+                    delivered = [delivered]
+                if not any(item is not None for item in delivered):
+                    logger.info(
+                        "Business welcome messages no longer exist; treating chat as cleared owner=%s account=%s peer=%s",
+                        owner_id, account_user_id, peer_id,
+                    )
+                    return True
+
+            previous_message_id = int(existing.get("last_message_id") or 0)
+            previous_missing = False
+            if previous_message_id > 0 and previous_message_id != int(current_message_id or 0):
+                previous = await client.get_messages(int(peer_id), ids=previous_message_id)
+                previous_missing = previous is None
+
+            # Let Telegram finish applying the incoming update before inspecting
+            # the visible history. This avoids stale results directly inside the
+            # NewMessage callback.
+            await asyncio.sleep(0.15)
+            messages = await client.get_messages(int(peer_id), limit=5)
+            visible_ids = {
+                int(getattr(message, "id", 0) or 0)
+                for message in messages
+                if int(getattr(message, "id", 0) or 0) > 0
+            }
+            older_visible = {
+                message_id for message_id in visible_ids
+                if message_id != int(current_message_id or 0)
+            }
+
+            # A cleared chat contains only the newly arrived message.  For newer
+            # records, the disappearance of the stored previous id confirms it.
+            if not older_visible:
                 return True
-            previous_ids = [message_id for message_id in visible_ids if message_id != int(current_message_id or 0)]
-            return not previous_ids
+            if previous_message_id > 0 and previous_missing and previous_message_id not in visible_ids:
+                # Avoid treating one individually deleted old message as a full
+                # clear when other prior history is still visible.
+                return len(older_visible) == 0
+            return False
         except Exception:
             logger.exception(
                 "Business Automation history check failed owner=%s account=%s peer=%s",
@@ -434,6 +480,7 @@ class BusinessAutomationRuntime:
                 peer_id,
                 welcome_once=bool(settings.get("business_welcome_once", True)),
                 force_new_conversation=history_was_cleared,
+                current_message_id=current_message_id,
             )
 
             delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
@@ -446,7 +493,7 @@ class BusinessAutomationRuntime:
                 media_file_id = str(welcome.get("media_file_id") or "")
                 media_items = list(welcome.get("media") or [])
                 if text or media_file_id or media_items:
-                    await self._send_configured_message(
+                    sent_message_ids = await self._send_configured_message(
                         client,
                         peer_id,
                         owner_id,
@@ -456,6 +503,9 @@ class BusinessAutomationRuntime:
                         button_rows=welcome.get("buttons") or [],
                         media_items=welcome.get("media") or [],
                         user=sender,
+                    )
+                    await set_business_welcome_message_ids(
+                        owner_id, account_user_id, peer_id, sent_message_ids
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
