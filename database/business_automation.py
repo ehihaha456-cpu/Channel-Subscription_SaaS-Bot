@@ -242,7 +242,7 @@ async def get_business_broadcast(owner_id: int) -> dict:
     return doc or {"owner_id": int(owner_id), "text": "", "media_type": "", "media_file_id": "", "media": [], "buttons": []}
 
 async def update_business_broadcast(owner_id: int, **fields) -> dict:
-    allowed = {"text", "media_type", "media_file_id", "media", "buttons"}
+    allowed = {"text", "media_type", "media_file_id", "media", "buttons", "last_report", "last_sent_at"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
     await _collection(BROADCAST_COLLECTION).update_one(
@@ -263,6 +263,13 @@ async def upsert_business_recipient(owner_id: int, connection_id: str, chat_id: 
             "last_seen_at": _now(),
         }, "$setOnInsert": {"created_at": _now()}},
         upsert=True,
+    )
+
+
+async def mark_business_recipient_inactive(owner_id: int, connection_id: str, chat_id: int, reason: str = "") -> None:
+    await _collection(BUSINESS_RECIPIENT_COLLECTION).update_one(
+        {"owner_id": int(owner_id), "connection_id": str(connection_id), "chat_id": int(chat_id)},
+        {"$set": {"active": False, "inactive_reason": str(reason or "")[:300], "updated_at": _now()}},
     )
 
 async def list_business_recipients(owner_id: int) -> list[dict]:
