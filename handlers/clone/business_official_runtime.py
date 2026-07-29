@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -17,8 +18,12 @@ from telegram import (
     InputMediaVideo, Update,
 )
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
-from database.business_automation import get_business_welcome, list_business_auto_replies, list_business_reply_templates, upsert_business_recipient
+from database.business_automation import (
+    get_business_welcome, list_business_auto_replies, list_business_reply_templates,
+    mark_business_recipient_inactive, upsert_business_recipient,
+)
 from database.business_official import (
     get_official_business_connection,
     increment_official_business_stat,
@@ -366,32 +371,178 @@ async def handle_deleted_business_messages(update: Update, context: ContextTypes
         logger.exception("Could not reset Business welcome after deleted messages owner=%s", owner_id)
 
 
-async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict]) -> tuple[int, int]:
-    sent = failed = 0
-    for recipient in recipients:
+async def _broadcast_api_call(call, *, attempts: int = 3):
+    last_error = None
+    for attempt in range(attempts):
         try:
-            class Recipient:
+            return await call()
+        except RetryAfter as exc:
+            last_error = exc
+            wait = getattr(exc, "retry_after", 1)
+            try:
+                wait = wait.total_seconds()
+            except AttributeError:
                 pass
-            user = Recipient()
-            user.id = int(recipient.get("chat_id") or 0)
-            user.first_name = str(recipient.get("first_name") or "")
-            user.last_name = str(recipient.get("last_name") or "")
-            user.username = str(recipient.get("username") or "")
-            await _send_configured_message(
-                context,
-                chat_id=int(recipient["chat_id"]),
-                business_connection_id=str(recipient["connection_id"]),
-                owner_id=int(owner_id),
-                text=str(item.get("text") or ""),
-                media_type=str(item.get("media_type") or ""),
-                media_file_id=str(item.get("media_file_id") or ""),
-                media_items=item.get("media") or [],
-                button_rows=item.get("buttons") or [],
-                user=user,
-            )
-            sent += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            failed += 1
-            logger.exception("Business broadcast failed owner=%s chat=%s", owner_id, recipient.get("chat_id"))
-    return sent, failed
+            await asyncio.sleep(min(max(float(wait), 0.5), 30.0))
+        except (TimedOut, NetworkError) as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+            raise
+    if last_error:
+        raise last_error
+
+
+def _broadcast_failure_reason(exc: Exception) -> str:
+    text = str(exc or "").casefold()
+    if isinstance(exc, Forbidden):
+        if "blocked" in text:
+            return "blocked_or_forbidden"
+        return "no_permission"
+    if isinstance(exc, BadRequest):
+        if "business connection" in text and ("not found" in text or "disabled" in text):
+            return "connection_disabled"
+        if "chat not found" in text:
+            return "chat_unavailable"
+        if "button" in text or "url" in text or "reply markup" in text:
+            return "invalid_buttons"
+        if "file" in text or "media" in text:
+            return "invalid_media"
+        return "bad_request"
+    if isinstance(exc, RetryAfter):
+        return "rate_limited"
+    if isinstance(exc, (TimedOut, NetworkError)):
+        return "temporary_network_error"
+    return "unknown_error"
+
+
+async def _send_broadcast_media(context, common: dict, items: list[dict]) -> bool:
+    if not items:
+        return False
+    # Telegram supports mixed photo/video albums. Documents/animations cannot be
+    # safely mixed with those, so send them separately instead of failing the
+    # whole recipient delivery.
+    visual = [m for m in items if str(m.get("type") or "").lower() in {"photo", "video"}]
+    other = [m for m in items if m not in visual]
+    sent_any = False
+    if len(visual) > 1:
+        album = []
+        for item in visual[:10]:
+            fid = str(item.get("file_id") or "")
+            if str(item.get("type") or "").lower() == "photo":
+                album.append(InputMediaPhoto(media=fid))
+            else:
+                album.append(InputMediaVideo(media=fid))
+        await _broadcast_api_call(lambda: context.bot.send_media_group(media=album, **common))
+        sent_any = True
+    elif len(visual) == 1:
+        item = visual[0]
+        fid = str(item.get("file_id") or "")
+        if str(item.get("type") or "").lower() == "photo":
+            await _broadcast_api_call(lambda: context.bot.send_photo(photo=fid, **common))
+        else:
+            await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **common))
+        sent_any = True
+    for item in other[: max(0, 10 - len(visual))]:
+        kind = str(item.get("type") or "document").lower()
+        fid = str(item.get("file_id") or "")
+        if kind == "animation":
+            await _broadcast_api_call(lambda fid=fid: context.bot.send_animation(animation=fid, **common))
+        else:
+            await _broadcast_api_call(lambda fid=fid: context.bot.send_document(document=fid, **common))
+        sent_any = True
+    return sent_any
+
+
+async def _send_one_official_business_broadcast(context, owner_id: int, item: dict, recipient: dict) -> dict:
+    class Recipient:
+        pass
+    user = Recipient()
+    user.id = int(recipient.get("chat_id") or 0)
+    user.first_name = str(recipient.get("first_name") or "")
+    user.last_name = str(recipient.get("last_name") or "")
+    user.username = str(recipient.get("username") or "")
+
+    chat_id = int(recipient.get("chat_id") or 0)
+    connection_id = str(recipient.get("connection_id") or "")
+    common = {"chat_id": chat_id, "business_connection_id": connection_id}
+    rendered_text = _render_variables(str(item.get("text") or ""), user)
+    rendered_rows = _render_button_rows(item.get("buttons") or [], user)
+    markup = await _inline_markup(owner_id, rendered_rows)
+    media_items = list(item.get("media") or [])
+    if not media_items and item.get("media_file_id"):
+        media_items = [{"type": item.get("media_type") or "document", "file_id": item.get("media_file_id")}]
+    media_items = [m for m in media_items if m.get("file_id")][:10]
+
+    media_ok = not media_items
+    text_ok = not (rendered_text or markup)
+    errors = []
+
+    if media_items:
+        try:
+            media_ok = await _send_broadcast_media(context, common, media_items)
+        except Exception as exc:
+            errors.append(("media", exc))
+            logger.warning("Business broadcast media failed owner=%s chat=%s error=%s", owner_id, chat_id, exc)
+
+    if rendered_text or markup:
+        try:
+            await _broadcast_api_call(lambda: context.bot.send_message(
+                text=rendered_text or "Choose an option below.", reply_markup=markup, **common
+            ))
+            text_ok = True
+        except Exception as exc:
+            errors.append(("message", exc))
+            # Invalid buttons should not prevent the text itself from arriving.
+            if markup is not None:
+                try:
+                    await _broadcast_api_call(lambda: context.bot.send_message(
+                        text=rendered_text or "Broadcast message", **common
+                    ))
+                    text_ok = True
+                except Exception as retry_exc:
+                    errors.append(("text_fallback", retry_exc))
+            logger.warning("Business broadcast text/buttons failed owner=%s chat=%s error=%s", owner_id, chat_id, exc)
+
+    if media_ok and text_ok:
+        return {"status": "full", "reason": ""}
+    if media_ok or text_ok:
+        reason = _broadcast_failure_reason(errors[-1][1]) if errors else "partial_delivery"
+        return {"status": "partial", "reason": reason}
+    reason = _broadcast_failure_reason(errors[-1][1]) if errors else "unknown_error"
+    if reason in {"blocked_or_forbidden", "no_permission", "connection_disabled", "chat_unavailable"}:
+        await mark_business_recipient_inactive(owner_id, connection_id, chat_id, reason)
+    return {"status": "failed", "reason": reason}
+
+
+async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict]) -> dict:
+    semaphore = asyncio.Semaphore(5)
+
+    async def worker(recipient):
+        async with semaphore:
+            result = await _send_one_official_business_broadcast(context, owner_id, item, recipient)
+            await asyncio.sleep(0.08)
+            return result
+
+    results = await asyncio.gather(*(worker(r) for r in recipients), return_exceptions=True)
+    counts = Counter()
+    reasons = Counter()
+    for result in results:
+        if isinstance(result, Exception):
+            counts["failed"] += 1
+            reasons[_broadcast_failure_reason(result)] += 1
+            continue
+        status = str(result.get("status") or "failed")
+        counts[status] += 1
+        reason = str(result.get("reason") or "")
+        if reason:
+            reasons[reason] += 1
+    return {
+        "total": len(recipients),
+        "full": counts["full"],
+        "partial": counts["partial"],
+        "failed": counts["failed"],
+        "reasons": dict(reasons),
+    }
+
