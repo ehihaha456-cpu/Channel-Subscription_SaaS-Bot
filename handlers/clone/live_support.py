@@ -4,6 +4,26 @@ from handlers.common.clone_context import *
 
 
 class CloneLiveSupportMixin:
+    async def _copy_to_support_topic_reliably(self, context, topic, from_chat_id, message_id):
+        """Copy a customer message with a short retry for transient Telegram errors."""
+        last_error = None
+        for attempt in range(3):
+            try:
+                return await context.bot.copy_message(
+                    chat_id=int(topic["support_group_id"]),
+                    message_thread_id=int(topic["message_thread_id"]),
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                )
+            except (TimedOut, NetworkError, RetryAfter) as exc:
+                last_error = exc
+                delay = float(getattr(exc, "retry_after", 0) or (0.35 * (attempt + 1)))
+                await asyncio.sleep(min(max(delay, 0.2), 3.0))
+            except TelegramError:
+                raise
+        if last_error:
+            raise last_error
+
     async def route_live_support_message(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         message=update.effective_message
         user=update.effective_user
@@ -95,22 +115,16 @@ class CloneLiveSupportMixin:
                     raise ApplicationHandlerStop
                 try:
                     topic=await self.ensure_support_topic(context,owner,user,support)
-                    await context.bot.copy_message(
-                        chat_id=int(topic["support_group_id"]),
-                        message_thread_id=int(topic["message_thread_id"]),
-                        from_chat_id=chat.id,
-                        message_id=message.message_id,
+                    await self._copy_to_support_topic_reliably(
+                        context, topic, chat.id, message.message_id,
                     )
                 except BadRequest as exc:
                     # Topic may have been manually deleted. Recreate it once.
                     logger.warning("Support topic stale owner=%s user=%s: %s",owner,user.id,exc)
                     await delete_support_topic(owner,user.id)
                     topic=await self.ensure_support_topic(context,owner,user,support)
-                    await context.bot.copy_message(
-                        chat_id=int(topic["support_group_id"]),
-                        message_thread_id=int(topic["message_thread_id"]),
-                        from_chat_id=chat.id,
-                        message_id=message.message_id,
+                    await self._copy_to_support_topic_reliably(
+                        context, topic, chat.id, message.message_id,
                     )
             else:
                 header=await context.bot.send_message(
@@ -141,7 +155,10 @@ class CloneLiveSupportMixin:
         except TelegramError as exc:
             logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
             await message.reply_text(f"❌ Support message could not be sent: {str(exc)[:180]}")
-        raise ApplicationHandlerStop
+        # Do not stop the update here. Live Support is a mirror of customer
+        # traffic; normal bot handlers must still be allowed to process the
+        # same message after it has been copied.
+        return
 
     async def support_callback(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         q=update.callback_query
