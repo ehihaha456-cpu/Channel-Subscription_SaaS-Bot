@@ -90,7 +90,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.PHOTO,self.photo_handler),group=0)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.business_automation_text_handler), group=-1)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,self.text_handler))
-        app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.route_live_support_message),group=10)
+        app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.route_live_support_message),group=-8)
         if app.job_queue: app.job_queue.run_repeating(self.expiry_job,interval=60,first=30,name=f"seller_expiry_{data_owner_id}")
         return app
 
