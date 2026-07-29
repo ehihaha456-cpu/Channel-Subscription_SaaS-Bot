@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -469,8 +469,33 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         if not recipients:
             await q.answer("No Business Account users found.", show_alert=True); return True
         await q.answer("Broadcast started.")
-        sent, failed = await send_official_business_broadcast(context, owner, item, recipients)
-        await q.message.reply_text(f"✅ Broadcast completed.\n\nSent: {sent}\nFailed: {failed}", reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
+        report = await send_official_business_broadcast(context, owner, item, recipients)
+        await update_business_broadcast(owner, last_report=report, last_sent_at=datetime.now(timezone.utc))
+        reason_labels = {
+            "blocked_or_forbidden": "Blocked/forbidden",
+            "no_permission": "No reply permission",
+            "connection_disabled": "Business connection disabled",
+            "chat_unavailable": "Chat unavailable",
+            "invalid_buttons": "Invalid button or URL",
+            "invalid_media": "Invalid media",
+            "bad_request": "Telegram rejected request",
+            "rate_limited": "Rate limited",
+            "temporary_network_error": "Temporary network error",
+            "unknown_error": "Unknown error",
+        }
+        lines = [
+            "✅ Broadcast completed.", "",
+            f"Recipients: {report.get('total', 0)}",
+            f"✅ Fully delivered: {report.get('full', 0)}",
+            f"⚠️ Partially delivered: {report.get('partial', 0)}",
+            f"❌ Failed: {report.get('failed', 0)}",
+        ]
+        reasons = report.get("reasons") or {}
+        if reasons:
+            lines.extend(["", "Failure details:"])
+            for key, count in sorted(reasons.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(f"• {reason_labels.get(key, key.replace('_', ' ').title())}: {count}")
+        await q.message.reply_text("\n".join(lines), reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
     if action == "ba_welcome":
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_toggle":
