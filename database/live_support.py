@@ -1,4 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import uuid
+
+from pymongo.errors import DuplicateKeyError
 
 from database.mongo import get_database
 
@@ -74,6 +77,164 @@ async def update_live_support_settings(owner_id: int, **values):
         upsert=True,
     )
     return await get_live_support_settings(owner_id)
+
+
+
+
+async def claim_support_topic_creation(
+    owner_id: int,
+    user_id: int,
+    support_group_id: int,
+    lease_seconds: int = 30,
+):
+    """Acquire a cross-process lease for creating one user's support topic.
+
+    In-memory asyncio locks only protect one Python process. Render may run
+    multiple clone runtimes/processes, so creation must also be serialized in
+    MongoDB. Returns ``(token, document)``; token is None when another worker
+    owns the lease or a ready topic already exists.
+    """
+    now = datetime.now(timezone.utc)
+    token = uuid.uuid4().hex
+    owner_id = int(owner_id)
+    user_id = int(user_id)
+    support_group_id = int(support_group_id)
+
+    current = await c(TOPICS).find_one({"owner_id": owner_id, "user_id": user_id})
+    if current:
+        ready = (
+            int(current.get("support_group_id") or 0) == support_group_id
+            and current.get("message_thread_id")
+            and current.get("status") != "failed"
+        )
+        if ready:
+            return None, current
+        lease_until = current.get("claim_expires_at")
+        if (
+            current.get("status") == "creating"
+            and lease_until
+            and lease_until > now
+        ):
+            return None, current
+
+    query = {"owner_id": owner_id, "user_id": user_id}
+    if current:
+        query["_id"] = current["_id"]
+    update = {
+        "$set": {
+            "support_group_id": support_group_id,
+            "status": "creating",
+            "claim_token": token,
+            "claim_expires_at": now + timedelta(seconds=max(10, int(lease_seconds))),
+            "updated_at": now,
+        },
+        "$unset": {
+            "message_thread_id": "",
+            "topic_name": "",
+            "header_message_id": "",
+            "header_sent": "",
+        },
+        "$setOnInsert": {
+            "owner_id": owner_id,
+            "user_id": user_id,
+            "created_at": now,
+        },
+    }
+    try:
+        await c(TOPICS).update_one(query, update, upsert=not bool(current))
+    except DuplicateKeyError:
+        return None, await get_support_topic(owner_id, user_id)
+    claimed = await c(TOPICS).find_one(
+        {"owner_id": owner_id, "user_id": user_id, "claim_token": token}
+    )
+    return (token if claimed else None), (claimed or await get_support_topic(owner_id, user_id))
+
+
+async def complete_support_topic_creation(
+    owner_id: int,
+    user_id: int,
+    claim_token: str,
+    support_group_id: int,
+    message_thread_id: int,
+    topic_name: str,
+    header_message_id: int,
+):
+    now = datetime.now(timezone.utc)
+    await c(TOPICS).update_one(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "claim_token": str(claim_token),
+        },
+        {
+            "$set": {
+                "support_group_id": int(support_group_id),
+                "message_thread_id": int(message_thread_id),
+                "topic_name": str(topic_name),
+                "header_message_id": int(header_message_id),
+                "header_sent": True,
+                "status": "ready",
+                "updated_at": now,
+            },
+            "$unset": {"claim_token": "", "claim_expires_at": ""},
+        },
+    )
+    return await get_support_topic(owner_id, user_id)
+
+
+async def fail_support_topic_creation(owner_id: int, user_id: int, claim_token: str):
+    await c(TOPICS).update_one(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "claim_token": str(claim_token),
+        },
+        {
+            "$set": {"status": "failed", "updated_at": datetime.now(timezone.utc)},
+            "$unset": {"claim_token": "", "claim_expires_at": ""},
+        },
+    )
+
+
+async def claim_support_topic_header(owner_id: int, user_id: int) -> bool:
+    """Claim sending the user-details header exactly once across processes."""
+    now = datetime.now(timezone.utc)
+    token = uuid.uuid4().hex
+    result = await c(TOPICS).update_one(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "header_sent": {"$ne": True},
+            "$or": [
+                {"header_claim_expires_at": {"$exists": False}},
+                {"header_claim_expires_at": {"$lt": now}},
+            ],
+        },
+        {
+            "$set": {
+                "header_claim_token": token,
+                "header_claim_expires_at": now + timedelta(seconds=30),
+                "updated_at": now,
+            }
+        },
+    )
+    return bool(result.modified_count)
+
+
+async def mark_support_topic_header(
+    owner_id: int, user_id: int, header_message_id: int
+):
+    await c(TOPICS).update_one(
+        {"owner_id": int(owner_id), "user_id": int(user_id)},
+        {
+            "$set": {
+                "header_sent": True,
+                "header_message_id": int(header_message_id),
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$unset": {"header_claim_token": "", "header_claim_expires_at": ""},
+        },
+    )
 
 
 async def save_support_topic(
