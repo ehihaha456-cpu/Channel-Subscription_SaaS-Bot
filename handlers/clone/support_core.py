@@ -52,14 +52,55 @@ class CloneSupportCoreMixin:
             [InlineKeyboardButton("🆔 Show User ID",callback_data=f"support_id_{int(user_id)}")],
         ])
 
-    async def ensure_support_topic(self,context,owner,user,support):
-        """Return one permanent support topic for a user.
+    async def _send_support_user_header(self, context, owner, user, topic):
+        """Send the first topic message once, with a plain-text fallback."""
+        if topic.get("header_sent"):
+            return topic
+        if not await claim_support_topic_header(owner, user.id):
+            return await get_support_topic(owner, user.id) or topic
 
-        Telegram can deliver several updates from the same user almost at once
-        (albums, retries, or duplicate webhook deliveries).  Without a per-user
-        lock, every update can create its own forum topic before MongoDB is
-        updated.  The lock keeps topic creation idempotent inside the clone-bot
-        runtime.
+        group_id = int(topic["support_group_id"])
+        thread_id = int(topic["message_thread_id"])
+        blocked = await is_support_blocked(owner, user.id)
+        details = await self.support_user_details_text(owner, user)
+        try:
+            sent = await context.bot.send_message(
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=details,
+                parse_mode="HTML",
+                reply_markup=self.support_topic_keyboard(user.id, blocked),
+                disable_web_page_preview=True,
+            )
+        except BadRequest:
+            # Bad user data must never leave a newly-created topic empty.
+            logger.exception(
+                "Support details HTML failed; sending plain text owner=%s user=%s",
+                owner, user.id,
+            )
+            plain = (
+                f"🆕 New Support User\n\n"
+                f"👤 Name: {user.full_name or user.id}\n"
+                f"📝 Username: @{user.username if user.username else 'Not set'}\n"
+                f"🆔 User ID: {user.id}\n"
+                f"🔗 Mention: tg://user?id={user.id}"
+            )
+            sent = await context.bot.send_message(
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=plain,
+                reply_markup=self.support_topic_keyboard(user.id, blocked),
+                disable_web_page_preview=True,
+            )
+        await mark_support_topic_header(owner, user.id, sent.message_id)
+        return await get_support_topic(owner, user.id) or topic
+
+    async def ensure_support_topic(self,context,owner,user,support):
+        """Return exactly one permanent topic for a user.
+
+        Uses both an in-process lock and a MongoDB creation lease, so duplicate
+        topics cannot be created by concurrent updates or multiple Render
+        workers. The user-details message is also guaranteed once per topic.
         """
         group_id=int(support["support_group_id"])
         lock_key=(int(owner),int(user.id),group_id)
@@ -70,28 +111,93 @@ class CloneSupportCoreMixin:
                 topic
                 and int(topic.get("support_group_id",0))==group_id
                 and topic.get("message_thread_id")
+                and topic.get("status") != "failed"
             ):
-                return topic
+                return await self._send_support_user_header(
+                    context, owner, user, topic,
+                )
 
-            # A record from an older support group must never be reused.
-            if topic:
-                await delete_support_topic(owner,user.id)
+            claim_token, topic = await claim_support_topic_creation(
+                owner, user.id, group_id,
+            )
+            if not claim_token:
+                # Another process is creating it. Wait briefly for completion
+                # instead of creating a second Telegram forum topic.
+                for _ in range(30):
+                    await asyncio.sleep(0.2)
+                    topic=await get_support_topic(owner,user.id)
+                    if (
+                        topic
+                        and int(topic.get("support_group_id",0))==group_id
+                        and topic.get("message_thread_id")
+                        and topic.get("status") != "failed"
+                    ):
+                        return await self._send_support_user_header(
+                            context, owner, user, topic,
+                        )
+                raise RuntimeError("Support topic creation is still in progress")
 
-            topic_name=f"👤 {user.first_name or 'User'} | {user.id}"[:128]
-            forum_topic=await context.bot.create_forum_topic(group_id,name=topic_name)
-            topic=await save_support_topic(
-                owner,user.id,group_id,forum_topic.message_thread_id,topic_name,
-            )
-            blocked=await is_support_blocked(owner,user.id)
-            await context.bot.send_message(
-                chat_id=group_id,
-                message_thread_id=forum_topic.message_thread_id,
-                text=await self.support_user_details_text(owner,user),
-                parse_mode="HTML",
-                reply_markup=self.support_topic_keyboard(user.id,blocked),
-                disable_web_page_preview=True,
-            )
-            return topic
+            forum_topic=None
+            try:
+                topic_name=f"👤 {user.first_name or 'User'} | {user.id}"[:128]
+                forum_topic=await context.bot.create_forum_topic(
+                    group_id,name=topic_name,
+                )
+                provisional={
+                    "support_group_id":group_id,
+                    "message_thread_id":forum_topic.message_thread_id,
+                    "topic_name":topic_name,
+                }
+                # Send details before publishing the topic as ready.
+                blocked=await is_support_blocked(owner,user.id)
+                details=await self.support_user_details_text(owner,user)
+                try:
+                    sent=await context.bot.send_message(
+                        chat_id=group_id,
+                        message_thread_id=forum_topic.message_thread_id,
+                        text=details,
+                        parse_mode="HTML",
+                        reply_markup=self.support_topic_keyboard(user.id,blocked),
+                        disable_web_page_preview=True,
+                    )
+                except BadRequest:
+                    logger.exception(
+                        "Support details HTML failed; sending fallback owner=%s user=%s",
+                        owner,user.id,
+                    )
+                    sent=await context.bot.send_message(
+                        chat_id=group_id,
+                        message_thread_id=forum_topic.message_thread_id,
+                        text=(
+                            f"🆕 New Support User\n\n"
+                            f"👤 Name: {user.full_name or user.id}\n"
+                            f"📝 Username: @{user.username if user.username else 'Not set'}\n"
+                            f"🆔 User ID: {user.id}\n"
+                            f"🔗 Mention: tg://user?id={user.id}"
+                        ),
+                        reply_markup=self.support_topic_keyboard(user.id,blocked),
+                    )
+                topic=await complete_support_topic_creation(
+                    owner,user.id,claim_token,group_id,
+                    forum_topic.message_thread_id,topic_name,sent.message_id,
+                )
+                return topic or provisional
+            except Exception:
+                await fail_support_topic_creation(owner,user.id,claim_token)
+                # Remove an empty orphan topic when creation failed after the
+                # Telegram API already created it.
+                if forum_topic is not None:
+                    try:
+                        await context.bot.delete_forum_topic(
+                            chat_id=group_id,
+                            message_thread_id=forum_topic.message_thread_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Could not remove orphan support topic owner=%s user=%s",
+                            owner,user.id,
+                        )
+                raise
 
     async def support_template_values(self,owner,user):
         sub=await get_subscription(owner,user.id) or {}
