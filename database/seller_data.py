@@ -284,6 +284,7 @@ async def claim_business_welcome(
     *,
     welcome_once:bool=True,
     force_new_conversation:bool=False,
+    current_message_id:int=0,
 ):
     """Atomically claim a welcome for one private peer.
 
@@ -305,7 +306,7 @@ async def claim_business_welcome(
         await c(BUSINESS_CONTACTS).update_one(
             query,
             {
-                "$set":{"last_message_at":now},
+                "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
                 "$setOnInsert":{"first_message_at":now,"message_count":0},
                 "$inc":{"message_count":1},
             },
@@ -321,6 +322,7 @@ async def claim_business_welcome(
                     **query,
                     "first_message_at":now,
                     "last_message_at":now,
+                    "last_message_id":int(current_message_id or 0),
                     "message_count":1,
                 }
             },
@@ -335,9 +337,29 @@ async def claim_business_welcome(
 
     await c(BUSINESS_CONTACTS).update_one(
         query,
-        {"$set":{"last_message_at":now},"$inc":{"message_count":1}},
+        {"$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},"$inc":{"message_count":1}},
     )
     return False
+
+
+async def set_business_welcome_message_ids(
+    owner_id:int, account_user_id:int, peer_user_id:int, message_ids:list[int]
+):
+    """Store sent welcome message ids so chat clearing can be detected reliably."""
+    ids=[int(x) for x in (message_ids or []) if int(x or 0)>0]
+    result=await c(BUSINESS_CONTACTS).update_one(
+        {
+            "owner_id":int(owner_id),
+            "account_user_id":int(account_user_id),
+            "peer_user_id":int(peer_user_id),
+        },
+        {"$set":{
+            "welcome_message_ids":ids[-20:],
+            "welcome_tracking_version":2,
+            "welcome_sent_at":datetime.now(timezone.utc),
+        }},
+    )
+    return result.matched_count>0
 
 
 async def business_automation_stats(owner_id:int):
