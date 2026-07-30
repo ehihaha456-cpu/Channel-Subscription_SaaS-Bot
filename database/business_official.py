@@ -45,11 +45,6 @@ async def save_official_business_connection(owner_id: int, connection) -> dict:
                 "conversations": 0,
                 "welcome_sent": 0,
                 "auto_replies_sent": 0,
-                "templates_used": 0,
-                "plans_opened": 0,
-                "renew_opened": 0,
-                "profile_opened": 0,
-                "referral_opened": 0,
             },
         },
         upsert=True,
@@ -73,7 +68,7 @@ async def increment_official_business_stat(
     field: str,
     amount: int = 1,
 ) -> bool:
-    allowed = {"conversations", "welcome_sent", "auto_replies_sent", "templates_used", "plans_opened", "renew_opened", "profile_opened", "referral_opened"}
+    allowed = {"conversations", "welcome_sent", "auto_replies_sent"}
     if field not in allowed:
         raise ValueError("Unsupported official business statistic")
     result = await _col().update_one(
@@ -81,3 +76,11 @@ async def increment_official_business_stat(
         {"$inc": {field: int(amount)}, "$set": {"updated_at": _now()}},
     )
     return bool(result.matched_count)
+
+
+async def count_active_official_business_connections(owner_id: int) -> int:
+    """Return the number of currently enabled official Telegram Business connections."""
+    return int(await _col().count_documents({
+        "owner_id": int(owner_id),
+        "enabled": True,
+    }))
