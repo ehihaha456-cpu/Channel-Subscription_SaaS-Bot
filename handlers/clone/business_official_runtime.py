@@ -417,42 +417,126 @@ def _broadcast_failure_reason(exc: Exception) -> str:
     return "unknown_error"
 
 
-async def _send_broadcast_media(context, common: dict, items: list[dict]) -> bool:
-    if not items:
-        return False
-    # Telegram supports mixed photo/video albums. Documents/animations cannot be
-    # safely mixed with those, so send them separately instead of failing the
-    # whole recipient delivery.
-    visual = [m for m in items if str(m.get("type") or "").lower() in {"photo", "video"}]
-    other = [m for m in items if m not in visual]
-    sent_any = False
-    if len(visual) > 1:
-        album = []
-        for item in visual[:10]:
-            fid = str(item.get("file_id") or "")
-            if str(item.get("type") or "").lower() == "photo":
-                album.append(InputMediaPhoto(media=fid))
-            else:
-                album.append(InputMediaVideo(media=fid))
-        await _broadcast_api_call(lambda: context.bot.send_media_group(media=album, **common))
-        sent_any = True
-    elif len(visual) == 1:
-        item = visual[0]
-        fid = str(item.get("file_id") or "")
-        if str(item.get("type") or "").lower() == "photo":
-            await _broadcast_api_call(lambda: context.bot.send_photo(photo=fid, **common))
-        else:
-            await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **common))
-        sent_any = True
-    for item in other[: max(0, 10 - len(visual))]:
+async def _send_broadcast_media(
+    context,
+    common: dict,
+    items: list[dict],
+    *,
+    text: str = "",
+    markup=None,
+) -> dict:
+    """Send broadcast media with the fewest possible Telegram API calls.
+
+    A single media item carries its caption and buttons in the same request,
+    which prevents the old "media only" partial-delivery problem. Albums carry
+    the text as the first caption; buttons are sent separately because Telegram
+    does not support reply markup on ``send_media_group``.
+    """
+    clean = [m for m in (items or []) if str(m.get("file_id") or "")][:10]
+    if not clean:
+        return {"media": True, "text": not bool(text), "buttons": markup is None, "errors": []}
+
+    errors = []
+    visual = [m for m in clean if str(m.get("type") or "").lower() in {"photo", "video"}]
+    other = [m for m in clean if m not in visual]
+    media_ok = True
+    text_ok = not bool(text)
+    buttons_ok = markup is None
+
+    # Best case: one media item. Caption and buttons travel in the same call.
+    if len(clean) == 1:
+        item = clean[0]
         kind = str(item.get("type") or "document").lower()
         fid = str(item.get("file_id") or "")
-        if kind == "animation":
-            await _broadcast_api_call(lambda fid=fid: context.bot.send_animation(animation=fid, **common))
-        else:
-            await _broadcast_api_call(lambda fid=fid: context.bot.send_document(document=fid, **common))
-        sent_any = True
-    return sent_any
+        kwargs = dict(common)
+        if text:
+            kwargs["caption"] = text
+        if markup is not None:
+            kwargs["reply_markup"] = markup
+        try:
+            if kind == "photo":
+                await _broadcast_api_call(lambda: context.bot.send_photo(photo=fid, **kwargs))
+            elif kind == "video":
+                await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **kwargs))
+            elif kind == "animation":
+                await _broadcast_api_call(lambda: context.bot.send_animation(animation=fid, **kwargs))
+            else:
+                await _broadcast_api_call(lambda: context.bot.send_document(document=fid, **kwargs))
+            return {"media": True, "text": True, "buttons": True, "errors": []}
+        except Exception as exc:
+            errors.append(("combined_media", exc))
+            return {"media": False, "text": not bool(text), "buttons": markup is None, "errors": errors}
+
+    caption_used = False
+    if visual:
+        try:
+            if len(visual) > 1:
+                album = []
+                for index, entry in enumerate(visual[:10]):
+                    fid = str(entry.get("file_id") or "")
+                    caption = text if index == 0 and text else None
+                    if str(entry.get("type") or "").lower() == "photo":
+                        album.append(InputMediaPhoto(media=fid, caption=caption))
+                    else:
+                        album.append(InputMediaVideo(media=fid, caption=caption))
+                await _broadcast_api_call(lambda: context.bot.send_media_group(media=album, **common))
+                caption_used = bool(text)
+            else:
+                entry = visual[0]
+                fid = str(entry.get("file_id") or "")
+                kwargs = dict(common)
+                if text:
+                    kwargs["caption"] = text
+                    caption_used = True
+                if str(entry.get("type") or "").lower() == "photo":
+                    await _broadcast_api_call(lambda: context.bot.send_photo(photo=fid, **kwargs))
+                else:
+                    await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **kwargs))
+        except Exception as exc:
+            media_ok = False
+            errors.append(("visual_media", exc))
+
+    remaining_slots = max(0, 10 - len(visual))
+    for index, entry in enumerate(other[:remaining_slots]):
+        kind = str(entry.get("type") or "document").lower()
+        fid = str(entry.get("file_id") or "")
+        kwargs = dict(common)
+        if text and not caption_used and index == 0:
+            kwargs["caption"] = text
+            caption_used = True
+        try:
+            if kind == "animation":
+                await _broadcast_api_call(lambda fid=fid, kwargs=kwargs: context.bot.send_animation(animation=fid, **kwargs))
+            else:
+                await _broadcast_api_call(lambda fid=fid, kwargs=kwargs: context.bot.send_document(document=fid, **kwargs))
+        except Exception as exc:
+            media_ok = False
+            errors.append(("other_media", exc))
+
+    text_ok = (not bool(text)) or caption_used
+
+    # Telegram albums cannot carry inline buttons. Send a compact button-only
+    # message after successful media. If the caption could not be attached,
+    # include the text here as a fallback.
+    if markup is not None or (text and not caption_used):
+        fallback_text = text if not caption_used else "Choose an option below."
+        try:
+            await _broadcast_api_call(lambda: context.bot.send_message(
+                text=fallback_text or "Broadcast message", reply_markup=markup, **common
+            ))
+            text_ok = True
+            buttons_ok = True
+        except Exception as exc:
+            errors.append(("buttons_or_text", exc))
+            # Invalid markup must not block plain text delivery.
+            if markup is not None and text and not caption_used:
+                try:
+                    await _broadcast_api_call(lambda: context.bot.send_message(text=text, **common))
+                    text_ok = True
+                except Exception as fallback_exc:
+                    errors.append(("text_fallback", fallback_exc))
+
+    return {"media": media_ok, "text": text_ok, "buttons": buttons_ok, "errors": errors}
 
 
 async def _send_one_official_business_broadcast(context, owner_id: int, item: dict, recipient: dict) -> dict:
@@ -466,6 +550,9 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
 
     chat_id = int(recipient.get("chat_id") or 0)
     connection_id = str(recipient.get("connection_id") or "")
+    if not chat_id or not connection_id:
+        return {"status": "failed", "reason": "invalid_recipient", "components": {}}
+
     common = {"chat_id": chat_id, "business_connection_id": connection_id}
     rendered_text = _render_variables(str(item.get("text") or ""), user)
     rendered_rows = _render_button_rows(item.get("buttons") or [], user)
@@ -475,45 +562,57 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
         media_items = [{"type": item.get("media_type") or "document", "file_id": item.get("media_file_id")}]
     media_items = [m for m in media_items if m.get("file_id")][:10]
 
-    media_ok = not media_items
-    text_ok = not (rendered_text or markup)
     errors = []
+    components = {
+        "media": not bool(media_items),
+        "text": not bool(rendered_text),
+        "buttons": markup is None,
+    }
 
     if media_items:
-        try:
-            media_ok = await _send_broadcast_media(context, common, media_items)
-        except Exception as exc:
-            errors.append(("media", exc))
-            logger.warning("Business broadcast media failed owner=%s chat=%s error=%s", owner_id, chat_id, exc)
-
-    if rendered_text or markup:
+        result = await _send_broadcast_media(
+            context, common, media_items, text=rendered_text, markup=markup
+        )
+        components.update({k: bool(result.get(k)) for k in ("media", "text", "buttons")})
+        errors.extend(result.get("errors") or [])
+    elif rendered_text or markup:
         try:
             await _broadcast_api_call(lambda: context.bot.send_message(
                 text=rendered_text or "Choose an option below.", reply_markup=markup, **common
             ))
-            text_ok = True
+            components["text"] = True
+            components["buttons"] = True
         except Exception as exc:
             errors.append(("message", exc))
-            # Invalid buttons should not prevent the text itself from arriving.
-            if markup is not None:
+            if markup is not None and rendered_text:
                 try:
-                    await _broadcast_api_call(lambda: context.bot.send_message(
-                        text=rendered_text or "Broadcast message", **common
-                    ))
-                    text_ok = True
+                    await _broadcast_api_call(lambda: context.bot.send_message(text=rendered_text, **common))
+                    components["text"] = True
                 except Exception as retry_exc:
                     errors.append(("text_fallback", retry_exc))
-            logger.warning("Business broadcast text/buttons failed owner=%s chat=%s error=%s", owner_id, chat_id, exc)
 
-    if media_ok and text_ok:
-        return {"status": "full", "reason": ""}
-    if media_ok or text_ok:
-        reason = _broadcast_failure_reason(errors[-1][1]) if errors else "partial_delivery"
-        return {"status": "partial", "reason": reason}
-    reason = _broadcast_failure_reason(errors[-1][1]) if errors else "unknown_error"
-    if reason in {"blocked_or_forbidden", "no_permission", "connection_disabled", "chat_unavailable"}:
+    required = [
+        components["media"] if media_items else True,
+        components["text"] if rendered_text else True,
+        components["buttons"] if markup is not None else True,
+    ]
+    delivered = sum(1 for value in required if value)
+    total_required = len(required)
+
+    if all(required):
+        return {"status": "full", "reason": "", "components": components}
+
+    reason = _broadcast_failure_reason(errors[-1][1]) if errors else "partial_delivery"
+    status = "partial" if delivered > 0 else "failed"
+    if status == "failed" and reason in {
+        "blocked_or_forbidden", "no_permission", "connection_disabled", "chat_unavailable"
+    }:
         await mark_business_recipient_inactive(owner_id, connection_id, chat_id, reason)
-    return {"status": "failed", "reason": reason}
+    logger.warning(
+        "Business broadcast %s owner=%s chat=%s components=%s reason=%s",
+        status, owner_id, chat_id, components, reason,
+    )
+    return {"status": status, "reason": reason, "components": components}
 
 
 async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict]) -> dict:
@@ -528,6 +627,7 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
     results = await asyncio.gather(*(worker(r) for r in recipients), return_exceptions=True)
     counts = Counter()
     reasons = Counter()
+    component_failures = Counter()
     for result in results:
         if isinstance(result, Exception):
             counts["failed"] += 1
@@ -538,11 +638,15 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
         reason = str(result.get("reason") or "")
         if reason:
             reasons[reason] += 1
+        for component, delivered in (result.get("components") or {}).items():
+            if not delivered:
+                component_failures[str(component)] += 1
     return {
         "total": len(recipients),
         "full": counts["full"],
         "partial": counts["partial"],
         "failed": counts["failed"],
         "reasons": dict(reasons),
+        "component_failures": dict(component_failures),
     }
 
