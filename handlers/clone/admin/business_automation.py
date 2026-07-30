@@ -214,7 +214,7 @@ def _broadcast_text(item):
     return (
         "📣 Business Account Broadcast\n\n"
         "This broadcast is sent only to users who messaged the connected Telegram Business Account. "
-        "Clone Bot users, Main Bot users, Normal Account users and Live Support users are excluded.\n\n"
+        "Clone Bot users, Main Bot users and Live Support users are excluded.\n\n"
         + editor_header("Current Setup", {**item, "enabled": True}, variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")
     )
 
@@ -628,9 +628,45 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     if action in toggle_map:
         key,default=toggle_map[action]; await set_seller_setting(owner,key,not s.get(key,default)); s=await get_seller_settings(owner); await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
     if action == "ba_stats":
-        st=await business_automation_stats(owner)
-        text=("📊 Business Automation Statistics\n\n"f"Connected Accounts: {int(st.get('accounts',0))}\n"f"Conversations: {int(st.get('conversations',0))}\n"f"Welcome Messages Sent: {int(st.get('welcome_sent',0))}\n"f"Auto Replies Sent: {int(st.get('auto_replies_sent',0))}\n"f"Reply Templates Used: {int(st.get('templates_used',0))}\n\n"f"Plans Opened: {int(st.get('plans_opened',0))}\n"f"Renew Opened: {int(st.get('renew_opened',0))}\n"f"Profile Opened: {int(st.get('profile_opened',0))}\n"f"Referral Opened: {int(st.get('referral_opened',0))}")
-        await q.edit_message_text(text,reply_markup=_kb([[InlineKeyboardButton("🔄 Refresh",callback_data="ba_stats")],[InlineKeyboardButton("⬅ Business Automation",callback_data="ba_home")]])); return True
+        st = await business_automation_stats(owner)
+        text = (
+            "📊 Business Automation Statistics\n\n"
+            "💼 Business Accounts\n"
+            f"• Connected: {int(st.get('accounts', 0))}\n"
+            f"• Total Connection Records: {int(st.get('accounts_total', 0))}\n\n"
+            "👥 Business Customers\n"
+            f"• Active Customers: {int(st.get('connected_users', 0))}\n"
+            f"• Active Today: {int(st.get('active_today', 0))}\n"
+            f"• Total Customers: {int(st.get('customers_total', 0))}\n"
+            f"• Conversations: {int(st.get('conversations', 0))}\n\n"
+            "⚡ Automation Activity\n"
+            f"• Welcome Messages Sent: {int(st.get('welcome_sent', 0))}\n"
+            f"• Auto Replies Sent: {int(st.get('auto_replies_sent', 0))}\n"
+            f"• Reply Templates Used: {int(st.get('templates_used', 0))}\n\n"
+            "🔘 Feature Opens\n"
+            f"• Plans: {int(st.get('plans_opened', 0))}\n"
+            f"• Renew: {int(st.get('renew_opened', 0))}\n"
+            f"• Profile: {int(st.get('profile_opened', 0))}\n"
+            f"• Referral: {int(st.get('referral_opened', 0))}\n\n"
+            "📣 Broadcast Totals\n"
+            f"• Broadcasts Sent: {int(st.get('broadcasts_sent', 0))}\n"
+            f"• Total Recipients: {int(st.get('broadcast_recipients', 0))}\n"
+            f"• Fully Delivered: {int(st.get('broadcast_fully_delivered', 0))}\n"
+            f"• Partially Delivered: {int(st.get('broadcast_partially_delivered', 0))}\n"
+            f"• Failed: {int(st.get('broadcast_failed', 0))}\n\n"
+            "📨 Last Broadcast\n"
+            f"• Fully Delivered: {int(st.get('last_broadcast_full', 0))}\n"
+            f"• Partially Delivered: {int(st.get('last_broadcast_partial', 0))}\n"
+            f"• Failed: {int(st.get('last_broadcast_failed', 0))}"
+        )
+        await q.edit_message_text(
+            text,
+            reply_markup=_kb([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="ba_stats")],
+                [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
+            ]),
+        )
+        return True
     return True
 
 
