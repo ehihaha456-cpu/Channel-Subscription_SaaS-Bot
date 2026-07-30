@@ -3,6 +3,21 @@
 from handlers.common.clone_context import *
 
 
+# One FIFO lock per seller/user pair. Telegram can dispatch several updates
+# concurrently; without this lock rapid customer messages can overtake each
+# other while the first support topic is being created.
+_LIVE_SUPPORT_FIFO_LOCKS = {}
+
+
+def _live_support_fifo_lock(owner_id: int, user_id: int):
+    key = (int(owner_id), int(user_id))
+    lock = _LIVE_SUPPORT_FIFO_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LIVE_SUPPORT_FIFO_LOCKS[key] = lock
+    return lock
+
+
 class CloneLiveSupportMixin:
     @staticmethod
     def _is_stale_support_topic_error(exc):
@@ -24,7 +39,7 @@ class CloneLiveSupportMixin:
         message id, so text, links and media are never silently skipped.
         """
         last_error = None
-        for attempt in range(10):
+        for attempt in range(24):
             try:
                 return await context.bot.copy_message(
                     chat_id=int(topic["support_group_id"]),
@@ -194,85 +209,91 @@ class CloneLiveSupportMixin:
         if message.text and not message.text.startswith("/"):
             auto_reply=await match_support_auto_reply(owner,message.text)
         mode=support.get("mode","topic")
-        receipt = await claim_support_delivery(
-            owner, "user_to_support", chat.id, message.message_id,
-        )
-        # A completed receipt means Telegram redelivered the same update. A
-        # processing receipt means another worker is already forwarding it.
-        if receipt is None:
-            return
-        try:
-            destination_chat_id = None
-            destination_message_id = None
-            destination_thread_id = None
-            if mode=="topic":
-                if not support.get("support_group_id"):
-                    await fail_support_delivery(receipt["_id"], "Support group is not connected")
-                    await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
-                    raise ApplicationHandlerStop
-                topic=await self._ensure_support_topic_reliably(context,owner,user,support)
-                try:
-                    copied = await self._copy_to_support_topic_reliably(
-                        context, topic, chat.id, message.message_id,
-                    )
-                except BadRequest as exc:
-                    if not self._is_stale_support_topic_error(exc):
-                        raise
-                    # The mapped topic was deleted/closed manually. Remove only
-                    # that mapping, recreate one topic, then retry this same
-                    # claimed delivery without duplicating the customer message.
-                    logger.warning("Support topic stale owner=%s user=%s: %s",owner,user.id,exc)
-                    await reset_support_topic_mapping(owner,user.id,str(exc))
-                    topic=await self._ensure_support_topic_reliably(context,owner,user,support)
-                    copied = await self._copy_to_support_topic_reliably(
-                        context, topic, chat.id, message.message_id,
-                    )
-                destination_chat_id = int(topic["support_group_id"])
-                destination_thread_id = int(topic["message_thread_id"])
-                destination_message_id = copied.message_id
-            else:
-                await context.bot.send_message(
-                    owner,
-                    f"💬 Live Support\nUser: {user.full_name}\nID: {user.id}\nReply to the copied message below.",
-                )
-                copied=await context.bot.copy_message(
-                    chat_id=owner,
-                    from_chat_id=chat.id,
-                    message_id=message.message_id,
-                )
-                await save_private_message_link(owner,owner,copied.message_id,user.id)
-                destination_chat_id = int(owner)
-                destination_message_id = copied.message_id
-
-            await complete_support_delivery(
-                receipt["_id"],
-                destination_chat_id=destination_chat_id,
-                destination_thread_id=destination_thread_id,
-                destination_message_id=destination_message_id,
+        # Serialize every message from this user. asyncio locks are FIFO, so a
+        # burst such as 1,2,3... reaches the Telegram forum in the same order.
+        async with _live_support_fifo_lock(owner, user.id):
+            receipt = await claim_support_delivery(
+                owner, "user_to_support", chat.id, message.message_id,
+                stale_seconds=45,
             )
-            if auto_reply:
-                try:
-                    await self.send_support_template(context,owner,user.id,auto_reply,user)
-                except TelegramError as exc:
-                    logger.warning("Support auto reply failed owner=%s user=%s: %s",owner,user.id,exc)
-            confirmation=await message.reply_text("✅ Message sent to live support.")
-            async def _delete_support_confirmation():
-                await asyncio.sleep(3)
-                try:
-                    await confirmation.delete()
-                except TelegramError:
-                    pass
-            asyncio.create_task(_delete_support_confirmation())
-        except ApplicationHandlerStop:
-            raise
-        except TelegramError as exc:
-            await fail_support_delivery(receipt["_id"], str(exc))
-            logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
-            await message.reply_text("❌ Support delivery is temporarily pending. Your message has been saved and will be retried; you do not need to resend it.")
-        except Exception as exc:
-            await fail_support_delivery(receipt["_id"], str(exc))
-            logger.exception("Unexpected live support routing failure owner=%s user=%s",owner,user.id)
-            await message.reply_text("❌ Support delivery is temporarily pending. Your message has been saved and will be retried; you do not need to resend it.")
+            # Completed means duplicate Telegram update; processing means a
+            # different worker currently owns the same exact source message.
+            if receipt is None:
+                return
+            try:
+                destination_chat_id = None
+                destination_message_id = None
+                destination_thread_id = None
+                if mode=="topic":
+                    if not support.get("support_group_id"):
+                        await fail_support_delivery(receipt["_id"], "Support group is not connected")
+                        await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
+                        raise ApplicationHandlerStop
+                    topic=await self._ensure_support_topic_reliably(context,owner,user,support)
+                    try:
+                        copied = await self._copy_to_support_topic_reliably(
+                            context, topic, chat.id, message.message_id,
+                        )
+                    except BadRequest as exc:
+                        if not self._is_stale_support_topic_error(exc):
+                            raise
+                        # The mapped topic was deleted/closed manually. Remove only
+                        # that mapping, recreate one topic, then retry this same
+                        # claimed delivery without duplicating the customer message.
+                        logger.warning("Support topic stale owner=%s user=%s: %s",owner,user.id,exc)
+                        await reset_support_topic_mapping(owner,user.id,str(exc))
+                        topic=await self._ensure_support_topic_reliably(context,owner,user,support)
+                        copied = await self._copy_to_support_topic_reliably(
+                            context, topic, chat.id, message.message_id,
+                        )
+                    destination_chat_id = int(topic["support_group_id"])
+                    destination_thread_id = int(topic["message_thread_id"])
+                    destination_message_id = copied.message_id
+                else:
+                    await context.bot.send_message(
+                        owner,
+                        f"💬 Live Support\nUser: {user.full_name}\nID: {user.id}\nReply to the copied message below.",
+                    )
+                    copied=await context.bot.copy_message(
+                        chat_id=owner,
+                        from_chat_id=chat.id,
+                        message_id=message.message_id,
+                    )
+                    await save_private_message_link(owner,owner,copied.message_id,user.id)
+                    destination_chat_id = int(owner)
+                    destination_message_id = copied.message_id
+
+                await complete_support_delivery(
+                    receipt["_id"],
+                    destination_chat_id=destination_chat_id,
+                    destination_thread_id=destination_thread_id,
+                    destination_message_id=destination_message_id,
+                )
+                if auto_reply:
+                    try:
+                        await self.send_support_template(context,owner,user.id,auto_reply,user)
+                    except TelegramError as exc:
+                        logger.warning("Support auto reply failed owner=%s user=%s: %s",owner,user.id,exc)
+                confirmation=await message.reply_text("✅ Message sent to live support.")
+                async def _delete_support_confirmation():
+                    await asyncio.sleep(3)
+                    try:
+                        await confirmation.delete()
+                    except TelegramError:
+                        pass
+                asyncio.create_task(_delete_support_confirmation())
+            except ApplicationHandlerStop:
+                raise
+            except TelegramError as exc:
+                await fail_support_delivery(receipt["_id"], str(exc))
+                logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
+                # Retry/failure stays silent for the customer. A later update or
+                # stale-receipt recovery can claim the same message again.
+            except Exception as exc:
+                await fail_support_delivery(receipt["_id"], str(exc))
+                logger.exception("Unexpected live support routing failure owner=%s user=%s",owner,user.id)
+                # Retry/failure stays silent for the customer. A later update or
+                # stale-receipt recovery can claim the same message again.
         # Do not stop the update here. Live Support is a mirror of customer
         # traffic; normal bot handlers must still be allowed to process the
         # same message after it has been copied.
