@@ -245,10 +245,26 @@ async def update_business_broadcast(owner_id: int, **fields) -> dict:
     allowed = {"text", "media_type", "media_file_id", "media", "buttons", "last_report", "last_sent_at"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
+    update = {"$set": payload, "$setOnInsert": {"created_at": _now()}}
+
+    # Keep cumulative broadcast statistics. Older records without these fields
+    # remain compatible and start counting from the first broadcast after this patch.
+    report = payload.get("last_report")
+    if isinstance(report, dict):
+        full = int(report.get("full", report.get("fully_delivered", report.get("sent", 0))) or 0)
+        partial = int(report.get("partial", report.get("partially_delivered", 0)) or 0)
+        failed = int(report.get("failed", 0) or 0)
+        total = int(report.get("total", full + partial + failed) or 0)
+        update["$inc"] = {
+            "broadcasts_sent": 1,
+            "broadcast_recipients": total,
+            "broadcast_fully_delivered": full,
+            "broadcast_partially_delivered": partial,
+            "broadcast_failed": failed,
+        }
+
     await _collection(BROADCAST_COLLECTION).update_one(
-        {"owner_id": int(owner_id)},
-        {"$set": payload, "$setOnInsert": {"created_at": _now()}},
-        upsert=True,
+        {"owner_id": int(owner_id)}, update, upsert=True
     )
     return await get_business_broadcast(owner_id)
 

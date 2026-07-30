@@ -363,72 +363,105 @@ async def set_business_welcome_message_ids(
 
 
 async def business_automation_stats(owner_id:int):
-    """Return combined Normal Account + Official Business statistics.
+    """Return Official Telegram Business Automation statistics only.
 
-    Older versions only aggregated ``seller_business_accounts`` (MTProto normal
-    accounts), so Official Business connections and their counters were missing.
-    This function intentionally reads both modes and also reports real contact
-    collection counts instead of relying only on possibly stale counters.
+    Normal MTProto account data is intentionally excluded from this page.
+    Customer totals are calculated from the official Business recipient
+    collection, while automation actions are read from official connection
+    counters and cumulative broadcast totals.
     """
-    owner_id=int(owner_id)
+    owner_id = int(owner_id)
+    official_connections = "seller_official_business_connections"
+    official_recipients = "business_automation_business_recipients"
+    broadcast_collection = "business_automation_broadcast"
 
-    async def _sum(collection_name:str, match:dict, fields:list[str]):
-        group={"_id":None}
-        for field in fields:
-            group[field]={"$sum":{"$ifNull":[f"${field}",0]}}
-        rows=await c(collection_name).aggregate([
-            {"$match":match},
-            {"$group":group},
-        ]).to_list(length=1)
-        return rows[0] if rows else {}
-
-    fields=[
-        "conversations","welcome_sent","auto_replies_sent","templates_used",
-        "plans_opened","renew_opened","profile_opened","referral_opened",
-    ]
-    normal=await _sum(BUSINESS_ACCOUNTS,{"owner_id":owner_id},fields)
-    official=await _sum(
-        "seller_official_business_connections",{"owner_id":owner_id},fields
+    active_accounts = await c(official_connections).count_documents(
+        {"owner_id": owner_id, "enabled": True}
+    )
+    total_accounts = await c(official_connections).count_documents(
+        {"owner_id": owner_id}
+    )
+    total_customers = await c(official_recipients).count_documents(
+        {"owner_id": owner_id}
+    )
+    active_customers = await c(official_recipients).count_documents(
+        {"owner_id": owner_id, "active": True}
     )
 
-    normal_accounts_total=await c(BUSINESS_ACCOUNTS).count_documents({"owner_id":owner_id})
-    normal_accounts_active=await c(BUSINESS_ACCOUNTS).count_documents({"owner_id":owner_id,"active":True})
-    official_accounts_total=await c("seller_official_business_connections").count_documents({"owner_id":owner_id})
-    official_accounts_active=await c("seller_official_business_connections").count_documents({"owner_id":owner_id,"enabled":True})
-
-    normal_contacts=await c(BUSINESS_CONTACTS).count_documents({"owner_id":owner_id})
-    official_contacts_total=await c("business_automation_business_recipients").count_documents({"owner_id":owner_id})
-    official_contacts_active=await c("business_automation_business_recipients").count_documents({"owner_id":owner_id,"active":True})
-
-    result={
-        "accounts":normal_accounts_active+official_accounts_active,
-        "accounts_total":normal_accounts_total+official_accounts_total,
-        "normal_accounts":normal_accounts_active,
-        "normal_accounts_total":normal_accounts_total,
-        "official_accounts":official_accounts_active,
-        "official_accounts_total":official_accounts_total,
-        "connected_users":normal_contacts+official_contacts_active,
-        "normal_users":normal_contacts,
-        "official_users":official_contacts_active,
-        "official_users_total":official_contacts_total,
-        "conversations":normal_contacts+official_contacts_total,
-    }
-    for field in fields:
-        if field == "conversations":
-            continue
-        result[field]=int(normal.get(field,0) or 0)+int(official.get(field,0) or 0)
-
-    broadcast=await c("business_automation_broadcast").find_one(
-        {"owner_id":owner_id},{"_id":0,"last_report":1,"last_sent_at":1}
-    ) or {}
-    report=broadcast.get("last_report") or {}
-    result.update({
-        "broadcast_fully_delivered":int(report.get("fully_delivered",report.get("sent",0)) or 0),
-        "broadcast_partially_delivered":int(report.get("partially_delivered",report.get("partial",0)) or 0),
-        "broadcast_failed":int(report.get("failed",0) or 0),
-        "last_broadcast_at":broadcast.get("last_sent_at"),
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist)
+    today_start_utc = now_ist.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+    active_today = await c(official_recipients).count_documents({
+        "owner_id": owner_id,
+        "active": True,
+        "last_seen_at": {"$gte": today_start_utc},
     })
-    return result
+
+    fields = [
+        "conversations", "welcome_sent", "auto_replies_sent", "templates_used",
+        "plans_opened", "renew_opened", "profile_opened", "referral_opened",
+    ]
+    group = {"_id": None}
+    for field in fields:
+        group[field] = {"$sum": {"$ifNull": [f"${field}", 0]}}
+    rows = await c(official_connections).aggregate([
+        {"$match": {"owner_id": owner_id}},
+        {"$group": group},
+    ]).to_list(length=1)
+    activity = rows[0] if rows else {}
+
+    broadcast = await c(broadcast_collection).find_one(
+        {"owner_id": owner_id},
+        {
+            "_id": 0,
+            "broadcasts_sent": 1,
+            "broadcast_recipients": 1,
+            "broadcast_fully_delivered": 1,
+            "broadcast_partially_delivered": 1,
+            "broadcast_failed": 1,
+            "last_report": 1,
+            "last_sent_at": 1,
+        },
+    ) or {}
+    last_report = broadcast.get("last_report") or {}
+
+    return {
+        "accounts": active_accounts,
+        "accounts_total": total_accounts,
+        "connected_users": active_customers,
+        "customers_total": total_customers,
+        "active_today": active_today,
+        "conversations": max(
+            total_customers,
+            int(activity.get("conversations", 0) or 0),
+        ),
+        "welcome_sent": int(activity.get("welcome_sent", 0) or 0),
+        "auto_replies_sent": int(activity.get("auto_replies_sent", 0) or 0),
+        "templates_used": int(activity.get("templates_used", 0) or 0),
+        "plans_opened": int(activity.get("plans_opened", 0) or 0),
+        "renew_opened": int(activity.get("renew_opened", 0) or 0),
+        "profile_opened": int(activity.get("profile_opened", 0) or 0),
+        "referral_opened": int(activity.get("referral_opened", 0) or 0),
+        "broadcasts_sent": int(broadcast.get("broadcasts_sent", 0) or 0),
+        "broadcast_recipients": int(broadcast.get("broadcast_recipients", 0) or 0),
+        "broadcast_fully_delivered": int(
+            broadcast.get("broadcast_fully_delivered", 0) or 0
+        ),
+        "broadcast_partially_delivered": int(
+            broadcast.get("broadcast_partially_delivered", 0) or 0
+        ),
+        "broadcast_failed": int(broadcast.get("broadcast_failed", 0) or 0),
+        "last_broadcast_full": int(
+            last_report.get("full", last_report.get("fully_delivered", last_report.get("sent", 0))) or 0
+        ),
+        "last_broadcast_partial": int(
+            last_report.get("partial", last_report.get("partially_delivered", 0)) or 0
+        ),
+        "last_broadcast_failed": int(last_report.get("failed", 0) or 0),
+        "last_broadcast_at": broadcast.get("last_sent_at"),
+    }
 
 
 async def increment_business_account_stat(owner_id:int, account_user_id:int, field:str, amount:int=1):
