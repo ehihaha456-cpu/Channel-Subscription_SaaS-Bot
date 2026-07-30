@@ -41,6 +41,7 @@ async def initialize_broadcast_indexes() -> None:
     await _col(RECIPIENTS).create_index(
         [("broadcast_id", ASCENDING), ("status", ASCENDING), ("next_retry_at", ASCENDING)]
     )
+    await _col("seller_broadcast_drafts").create_index("owner_id", unique=True)
 
 
 async def get_active_run_for_owner(owner_id: int) -> dict | None:
@@ -391,3 +392,35 @@ async def recoverable_runs(limit: int = 20) -> list[dict]:
         .limit(limit)
     )
     return [doc async for doc in cursor]
+
+DRAFTS = "seller_broadcast_drafts"
+
+
+async def get_seller_broadcast_draft(owner_id: int) -> dict:
+    doc = await _col(DRAFTS).find_one({"owner_id": int(owner_id)})
+    if doc:
+        return doc
+    return {
+        "owner_id": int(owner_id),
+        "text": "",
+        "media": [],
+        "media_type": "",
+        "media_file_id": "",
+        "buttons": [],
+        "updated_at": _now(),
+    }
+
+
+async def update_seller_broadcast_draft(owner_id: int, **fields) -> dict:
+    allowed = {
+        "text", "media", "media_type", "media_file_id", "buttons",
+        "last_report", "last_sent_at",
+    }
+    values = {key: value for key, value in fields.items() if key in allowed}
+    values["updated_at"] = _now()
+    await _col(DRAFTS).update_one(
+        {"owner_id": int(owner_id)},
+        {"$set": values, "$setOnInsert": {"owner_id": int(owner_id), "created_at": _now()}},
+        upsert=True,
+    )
+    return await get_seller_broadcast_draft(owner_id)
