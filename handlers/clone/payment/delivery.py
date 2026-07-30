@@ -2,7 +2,6 @@
 
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes
-from services.business_automation_runtime import business_automation_runtime
 
 
 class ClonePaymentDeliveryMixin:
@@ -164,8 +163,21 @@ class ClonePaymentDeliveryMixin:
 
         return {"sent": sent, "failed": failed, "error": ""}
 
-    async def _deliver_access_to_business_chats(self, bot, owner_id:int, user_id:int, text:str) -> dict:
-        """Mirror access details to the subscriber's connected account chat(s)."""
+    async def _deliver_access_to_business_chats(
+        self,
+        bot,
+        owner_id:int,
+        user_id:int,
+        text:str,
+        *,
+        send_bot_start_request:bool=False,
+    ) -> dict:
+        """Mirror access details to the subscriber's Official Business chat(s).
+
+        After a successful payment receipt is delivered, a compact follow-up
+        asks the subscriber to start the subscription bot. The invite receipt
+        remains identical in the clone-bot DM and the Business Account chat.
+        """
         sent = 0
         failed = 0
         routes = await list_business_contact_routes(int(owner_id), int(user_id))
@@ -189,16 +201,37 @@ class ClonePaymentDeliveryMixin:
                         disable_web_page_preview=True,
                     )
                     sent += 1
-                elif mode == "normal":
-                    account_user_id = int(route.get("account_user_id") or 0)
-                    peer_id = int(route.get("chat_id") or user_id)
-                    if not account_user_id:
-                        continue
-                    ok = await business_automation_runtime.send_text_to_contact(
-                        int(owner_id), account_user_id, peer_id, text
-                    )
-                    sent += int(bool(ok))
-                    failed += int(not ok)
+
+                    if send_bot_start_request:
+                        try:
+                            bot_user = await bot.get_me()
+                            bot_username = str(getattr(bot_user, "username", "") or "").strip()
+                            if bot_username:
+                                start_url = f"https://t.me/{bot_username}?start=business_payment"
+                                start_text = (
+                                    "🤖 For subscription management and future updates, "
+                                    "please start the subscription bot."
+                                )
+                                await bot.send_message(
+                                    chat_id=chat_id,
+                                    text=start_text,
+                                    business_connection_id=connection_id,
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton(
+                                            "Start Subscription Bot",
+                                            url=start_url,
+                                        )
+                                    ]]),
+                                    disable_web_page_preview=True,
+                                )
+                        except Exception:
+                            # The payment receipt and invite link have already
+                            # been delivered; a failed optional prompt must not
+                            # mark the payment delivery itself as failed.
+                            logger.exception(
+                                "Business bot-start request failed owner=%s user=%s",
+                                owner_id, user_id,
+                            )
             except Exception:
                 failed += 1
                 logger.exception(
@@ -354,7 +387,11 @@ class ClonePaymentDeliveryMixin:
                     )
 
                 business_delivery = await self._deliver_access_to_business_chats(
-                    bot, int(owner_id), int(user_id), text
+                    bot,
+                    int(owner_id),
+                    int(user_id),
+                    text,
+                    send_bot_start_request=bool(success_details),
                 )
                 if bot_dm_error and not business_delivery.get("sent"):
                     return {
