@@ -1037,3 +1037,17 @@ async def reset_business_welcome(owner_id:int, account_user_id:int, peer_user_id
         "peer_user_id": int(peer_user_id),
     })
     return bool(result.deleted_count)
+
+
+async def reset_business_welcome_for_peer(owner_id:int, peer_user_id:int):
+    """Reset all first-contact keys for one Official Business customer.
+
+    Older releases used either the seller owner id or the Telegram Business
+    account id as ``account_user_id``. Deleting all matching variants prevents a
+    stale legacy row from suppressing the next welcome after chat history clear.
+    """
+    result = await c(BUSINESS_CONTACTS).delete_many({
+        "owner_id": int(owner_id),
+        "peer_user_id": int(peer_user_id),
+    })
+    return int(result.deleted_count or 0)
