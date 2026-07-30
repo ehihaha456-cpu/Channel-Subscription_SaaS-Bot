@@ -36,6 +36,20 @@ class CloneLiveSupportMixin:
         if last_error:
             raise last_error
 
+    async def _ensure_support_topic_reliably(self, context, owner, user, support):
+        """Wait for/create the permanent topic before forwarding the first message."""
+        last_error=None
+        for attempt in range(3):
+            try:
+                return await self.ensure_support_topic(context, owner, user, support)
+            except (TimedOut, NetworkError, RetryAfter, RuntimeError) as exc:
+                last_error=exc
+                delay=float(getattr(exc,"retry_after",0) or (0.75*(attempt+1)))
+                await asyncio.sleep(min(max(delay,0.5),4.0))
+        if last_error:
+            raise last_error
+        raise RuntimeError("Support topic could not be prepared")
+
     async def route_live_support_message(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         message=update.effective_message
         user=update.effective_user
@@ -159,7 +173,7 @@ class CloneLiveSupportMixin:
                     await fail_support_delivery(receipt["_id"], "Support group is not connected")
                     await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
                     raise ApplicationHandlerStop
-                topic=await self.ensure_support_topic(context,owner,user,support)
+                topic=await self._ensure_support_topic_reliably(context,owner,user,support)
                 try:
                     copied = await self._copy_to_support_topic_reliably(
                         context, topic, chat.id, message.message_id,
@@ -171,8 +185,8 @@ class CloneLiveSupportMixin:
                     # that mapping, recreate one topic, then retry this same
                     # claimed delivery without duplicating the customer message.
                     logger.warning("Support topic stale owner=%s user=%s: %s",owner,user.id,exc)
-                    await delete_support_topic(owner,user.id)
-                    topic=await self.ensure_support_topic(context,owner,user,support)
+                    await reset_support_topic_mapping(owner,user.id,str(exc))
+                    topic=await self._ensure_support_topic_reliably(context,owner,user,support)
                     copied = await self._copy_to_support_topic_reliably(
                         context, topic, chat.id, message.message_id,
                     )
@@ -217,7 +231,7 @@ class CloneLiveSupportMixin:
         except TelegramError as exc:
             await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
-            await message.reply_text(f"❌ Support message could not be sent: {str(exc)[:180]}")
+            await message.reply_text("❌ Support message could not be sent after automatic retries. Please try again.")
         except Exception as exc:
             await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Unexpected live support routing failure owner=%s user=%s",owner,user.id)

@@ -20,24 +20,38 @@ class CloneSupportCoreMixin:
         expiry=sub.get("expiry_date")
         if expiry and expiry.tzinfo is None:
             expiry=expiry.replace(tzinfo=timezone.utc)
-        active=bool(sub.get("active") and expiry and expiry>datetime.now(timezone.utc))
+        now=datetime.now(timezone.utc)
+        active=bool(sub.get("active") and expiry and expiry>now)
+        remaining="-"
+        if active and expiry:
+            seconds=max(0,int((expiry-now).total_seconds()))
+            days,rem=divmod(seconds,86400)
+            hours,rem=divmod(rem,3600)
+            minutes=rem//60
+            parts=[]
+            if days: parts.append(f"{days}d")
+            if hours: parts.append(f"{hours}h")
+            if minutes or not parts: parts.append(f"{minutes}m")
+            remaining=" ".join(parts)
         full_name=html.escape(user.full_name or str(user.id))
-        username=("@"+html.escape(user.username)) if user.username else "Not set"
+        username=("@"+html.escape(user.username)) if user.username else "Not Set"
         mention=f'<a href="tg://user?id={user.id}">{full_name}</a>'
+        joined=record.get("joined_at") or record.get("created_at")
+        plan=sub.get("plan") or sub.get("plan_name") or "No Plan"
         return (
-            "🆕 <b>New Support User</b>\n\n"
-            f"👤 Name: {full_name}\n"
-            f"📝 Username: {username}\n"
-            f"🆔 User ID: <code>{user.id}</code>\n"
-            f"🔗 Mention: {mention}\n"
-            f"🌐 Language: {html.escape(user.language_code or 'Unknown')}\n"
-            f"📅 Joined: {self._support_datetime(record.get('joined_at'))}\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "💎 <b>Subscription</b>\n"
-            f"Plan: {html.escape(str(sub.get('plan') or 'No Plan'))}\n"
-            f"Status: {'✅ Active' if active else '❌ Inactive'}\n"
-            f"Expiry: {self._support_datetime(expiry)}\n\n"
-            "User ke Telegram profile par jane ke liye mention ya button use karo."
+            "👤 <b>Live Support User Details</b>\n\n"
+            f"• Name: {full_name}\n"
+            f"• Username: {username}\n"
+            f"• Mention: {mention}\n"
+            f"• User ID: <code>{user.id}</code>\n"
+            f"• Language: {html.escape(user.language_code or record.get('language_code') or 'Unknown')}\n"
+            f"• Joined: {self._support_datetime(joined)}\n\n"
+            "📦 <b>Subscription Details</b>\n\n"
+            f"• Status: {'✅ Active' if active else '❌ Inactive'}\n"
+            f"• Plan: {html.escape(str(plan))}\n"
+            f"• Expiry: {self._support_datetime(expiry)}\n"
+            f"• Remaining: {remaining}\n\n"
+            "All future messages from this user will stay in this permanent topic."
         )
 
     @staticmethod
@@ -52,6 +66,19 @@ class CloneSupportCoreMixin:
             [InlineKeyboardButton("🆔 Show User ID",callback_data=f"support_id_{int(user_id)}")],
         ])
 
+    async def _send_support_header_reliably(self, context, **kwargs):
+        last_error=None
+        for attempt in range(4):
+            try:
+                return await context.bot.send_message(**kwargs)
+            except (TimedOut, NetworkError, RetryAfter) as exc:
+                last_error=exc
+                delay=float(getattr(exc,"retry_after",0) or (0.5*(attempt+1)))
+                await asyncio.sleep(min(max(delay,0.3),4.0))
+        if last_error:
+            raise last_error
+        raise RuntimeError("Could not send support user details")
+
     async def _send_support_user_header(self, context, owner, user, topic):
         """Send the first topic message once, with a plain-text fallback."""
         if topic.get("header_sent"):
@@ -64,7 +91,8 @@ class CloneSupportCoreMixin:
         blocked = await is_support_blocked(owner, user.id)
         details = await self.support_user_details_text(owner, user)
         try:
-            sent = await context.bot.send_message(
+            sent = await self._send_support_header_reliably(
+                context,
                 chat_id=group_id,
                 message_thread_id=thread_id,
                 text=details,
@@ -85,7 +113,8 @@ class CloneSupportCoreMixin:
                 f"🆔 User ID: {user.id}\n"
                 f"🔗 Mention: tg://user?id={user.id}"
             )
-            sent = await context.bot.send_message(
+            sent = await self._send_support_header_reliably(
+                context,
                 chat_id=group_id,
                 message_thread_id=thread_id,
                 text=plain,
@@ -123,8 +152,8 @@ class CloneSupportCoreMixin:
             if not claim_token:
                 # Another process is creating it. Wait briefly for completion
                 # instead of creating a second Telegram forum topic.
-                for _ in range(30):
-                    await asyncio.sleep(0.2)
+                for _ in range(60):
+                    await asyncio.sleep(0.25)
                     topic=await get_support_topic(owner,user.id)
                     if (
                         topic
@@ -152,7 +181,8 @@ class CloneSupportCoreMixin:
                 blocked=await is_support_blocked(owner,user.id)
                 details=await self.support_user_details_text(owner,user)
                 try:
-                    sent=await context.bot.send_message(
+                    sent=await self._send_support_header_reliably(
+                    context,
                         chat_id=group_id,
                         message_thread_id=forum_topic.message_thread_id,
                         text=details,
@@ -165,7 +195,8 @@ class CloneSupportCoreMixin:
                         "Support details HTML failed; sending fallback owner=%s user=%s",
                         owner,user.id,
                     )
-                    sent=await context.bot.send_message(
+                    sent=await self._send_support_header_reliably(
+                    context,
                         chat_id=group_id,
                         message_thread_id=forum_topic.message_thread_id,
                         text=(
