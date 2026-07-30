@@ -1,7 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
-from database.business_delivery import list_business_contact_routes
+from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 
 
 class ClonePaymentDeliveryMixin:
@@ -172,73 +172,94 @@ class ClonePaymentDeliveryMixin:
         *,
         send_bot_start_request:bool=False,
     ) -> dict:
-        """Mirror access details to the subscriber's Official Business chat(s).
-
-        After a successful payment receipt is delivered, a compact follow-up
-        asks the subscriber to start the subscription bot. The invite receipt
-        remains identical in the clone-bot DM and the Business Account chat.
-        """
+        """Mirror the complete payment receipt to Official Business chats."""
         sent = 0
         failed = 0
+        start_sent = 0
+        start_failed = 0
+        reasons = []
         routes = await list_business_contact_routes(int(owner_id), int(user_id))
         seen = set()
+
+        if not routes:
+            return {
+                "sent": 0, "failed": 0, "start_sent": 0, "start_failed": 0,
+                "routes_found": 0, "reason": "recipient_missing",
+            }
+
+        bot_username = ""
+        if send_bot_start_request:
+            try:
+                bot_user = await bot.get_me()
+                bot_username = str(getattr(bot_user, "username", "") or "").strip()
+            except Exception as exc:
+                reasons.append(f"bot_username_lookup:{exc}")
+
         for route in routes:
             mode = str(route.get("mode") or "")
-            route_key = (mode, int(route.get("account_user_id") or 0), str(route.get("connection_id") or ""))
+            connection_id = str(route.get("connection_id") or "")
+            chat_id = int(route.get("chat_id") or user_id)
+            route_key = (mode, connection_id, chat_id)
             if route_key in seen:
                 continue
             seen.add(route_key)
+
+            if mode != "official" or not connection_id:
+                continue
+
             try:
-                if mode == "official":
-                    connection_id = str(route.get("connection_id") or "")
-                    chat_id = int(route.get("chat_id") or user_id)
-                    if not connection_id:
-                        continue
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    business_connection_id=connection_id,
+                    disable_web_page_preview=True,
+                )
+                sent += 1
+            except Exception as exc:
+                failed += 1
+                reasons.append(f"receipt:{type(exc).__name__}:{exc}")
+                logger.exception(
+                    "Business payment receipt failed owner=%s user=%s connection=%s chat=%s",
+                    owner_id, user_id, connection_id, chat_id,
+                )
+                # Do not send the start prompt when the main receipt itself failed.
+                continue
+
+            if send_bot_start_request and bot_username:
+                try:
+                    start_url = f"https://t.me/{bot_username}?start=business_payment"
                     await bot.send_message(
                         chat_id=chat_id,
-                        text=text,
+                        text=(
+                            "🤖 For subscription management and future updates, "
+                            "please start the subscription bot."
+                        ),
                         business_connection_id=connection_id,
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("Start Subscription Bot", url=start_url)
+                        ]]),
                         disable_web_page_preview=True,
                     )
-                    sent += 1
+                    start_sent += 1
+                except Exception as exc:
+                    start_failed += 1
+                    reasons.append(f"start_button:{type(exc).__name__}:{exc}")
+                    logger.exception(
+                        "Business bot-start request failed owner=%s user=%s connection=%s chat=%s",
+                        owner_id, user_id, connection_id, chat_id,
+                    )
 
-                    if send_bot_start_request:
-                        try:
-                            bot_user = await bot.get_me()
-                            bot_username = str(getattr(bot_user, "username", "") or "").strip()
-                            if bot_username:
-                                start_url = f"https://t.me/{bot_username}?start=business_payment"
-                                start_text = (
-                                    "🤖 For subscription management and future updates, "
-                                    "please start the subscription bot."
-                                )
-                                await bot.send_message(
-                                    chat_id=chat_id,
-                                    text=start_text,
-                                    business_connection_id=connection_id,
-                                    reply_markup=InlineKeyboardMarkup([[
-                                        InlineKeyboardButton(
-                                            "Start Subscription Bot",
-                                            url=start_url,
-                                        )
-                                    ]]),
-                                    disable_web_page_preview=True,
-                                )
-                        except Exception:
-                            # The payment receipt and invite link have already
-                            # been delivered; a failed optional prompt must not
-                            # mark the payment delivery itself as failed.
-                            logger.exception(
-                                "Business bot-start request failed owner=%s user=%s",
-                                owner_id, user_id,
-                            )
-            except Exception:
-                failed += 1
-                logger.exception(
-                    "Business access delivery failed owner=%s user=%s mode=%s",
-                    owner_id, user_id, mode,
-                )
-        return {"sent": sent, "failed": failed}
+        reason = "; ".join(reasons)[:500]
+        if not sent and not failed:
+            reason = reason or "no_active_official_route"
+        return {
+            "sent": sent,
+            "failed": failed,
+            "start_sent": start_sent,
+            "start_failed": start_failed,
+            "routes_found": len(routes),
+            "reason": reason,
+        }
 
     async def deliver_subscription_access(self, owner_id:int, user_id:int, success_details:dict|None=None):
         """Send fresh invite links only for chats the user has not joined yet.
@@ -393,6 +414,29 @@ class ClonePaymentDeliveryMixin:
                     text,
                     send_bot_start_request=bool(success_details),
                 )
+                try:
+                    await log_business_payment_delivery(
+                        int(owner_id),
+                        int(user_id),
+                        bot_status="failed" if bot_dm_error else "sent",
+                        business_status=(
+                            "sent" if business_delivery.get("sent")
+                            else "failed" if business_delivery.get("failed")
+                            else "recipient_missing"
+                        ),
+                        start_button_status=(
+                            "sent" if business_delivery.get("start_sent")
+                            else "failed" if business_delivery.get("start_failed")
+                            else "not_sent"
+                        ),
+                        business_reason=str(business_delivery.get("reason") or ""),
+                        routes_found=int(business_delivery.get("routes_found") or 0),
+                        transaction_id=str((success_details or {}).get("transaction_id") or ""),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Payment delivery logging failed owner=%s user=%s", owner_id, user_id
+                    )
                 if bot_dm_error and not business_delivery.get("sent"):
                     return {
                         "sent": 0,
