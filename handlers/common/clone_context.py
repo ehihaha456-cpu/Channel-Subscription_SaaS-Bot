@@ -10,7 +10,7 @@ from utils.timezone_ui import timezone_guide, timezone_keyboard, timezone_from_k
 from config import PUBLIC_BASE_URL
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
-from telegram.error import BadRequest, Conflict, InvalidToken, TelegramError
+from telegram.error import BadRequest, Conflict, InvalidToken, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, PreCheckoutQueryHandler, filters
 
 from database.seller_subscriptions import (
@@ -46,6 +46,7 @@ from database.live_support import (
     list_support_templates, get_support_template, save_support_template,
     delete_support_template, list_support_auto_replies, get_support_auto_reply,
     save_support_auto_reply, delete_support_auto_reply, match_support_auto_reply,
+    claim_support_delivery, complete_support_delivery, fail_support_delivery,
 )
 from database.platform_features import (
     audit,
