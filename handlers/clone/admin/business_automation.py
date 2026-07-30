@@ -625,7 +625,31 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         key,default=toggle_map[action]; await set_seller_setting(owner,key,not s.get(key,default)); s=await get_seller_settings(owner); await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
     if action == "ba_stats":
         st=await business_automation_stats(owner)
-        text=("📊 Business Automation Statistics\n\n"f"Connected Accounts: {int(st.get('accounts',0))}\n"f"Conversations: {int(st.get('conversations',0))}\n"f"Welcome Messages Sent: {int(st.get('welcome_sent',0))}\n"f"Auto Replies Sent: {int(st.get('auto_replies_sent',0))}\n"f"Reply Templates Used: {int(st.get('templates_used',0))}\n\n"f"Plans Opened: {int(st.get('plans_opened',0))}\n"f"Renew Opened: {int(st.get('renew_opened',0))}\n"f"Profile Opened: {int(st.get('profile_opened',0))}\n"f"Referral Opened: {int(st.get('referral_opened',0))}")
+        text=(
+            "📊 Business Automation Statistics\n\n"
+            "🔗 Connected Accounts\n"
+            f"• Total Active: {int(st.get('accounts',0))}\n"
+            f"• Normal Accounts: {int(st.get('normal_accounts',0))}\n"
+            f"• Business Accounts: {int(st.get('official_accounts',0))}\n\n"
+            "👥 Connected Customers\n"
+            f"• Total Active: {int(st.get('connected_users',0))}\n"
+            f"• Normal Account Customers: {int(st.get('normal_users',0))}\n"
+            f"• Business Account Customers: {int(st.get('official_users',0))}\n"
+            f"• Total Conversation Records: {int(st.get('conversations',0))}\n\n"
+            "⚡ Automation Activity\n"
+            f"• Welcome Messages Sent: {int(st.get('welcome_sent',0))}\n"
+            f"• Auto Replies Sent: {int(st.get('auto_replies_sent',0))}\n"
+            f"• Reply Templates Used: {int(st.get('templates_used',0))}\n\n"
+            "🔘 Feature Opens\n"
+            f"• Plans: {int(st.get('plans_opened',0))}\n"
+            f"• Renew: {int(st.get('renew_opened',0))}\n"
+            f"• Profile: {int(st.get('profile_opened',0))}\n"
+            f"• Referral: {int(st.get('referral_opened',0))}\n\n"
+            "📣 Last Broadcast\n"
+            f"• Fully Delivered: {int(st.get('broadcast_fully_delivered',0))}\n"
+            f"• Partially Delivered: {int(st.get('broadcast_partially_delivered',0))}\n"
+            f"• Failed: {int(st.get('broadcast_failed',0))}"
+        )
         await q.edit_message_text(text,reply_markup=_kb([[InlineKeyboardButton("🔄 Refresh",callback_data="ba_stats")],[InlineKeyboardButton("⬅ Business Automation",callback_data="ba_home")]])); return True
     return True
 
