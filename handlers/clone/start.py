@@ -26,34 +26,6 @@ class CloneStartMixin:
             except Exception:
                 logger.exception("Referral registration failed owner=%s user=%s",owner,user.id)
 
-    async def _prepare_support_topic_on_start(self, context, owner, user, support):
-        """Create/reuse the user's permanent support topic during /start.
-
-        This is intentionally awaited instead of being fire-and-forget. When
-        /start finishes, the topic and its user-details header are already
-        ready, so the customer's first support message can be copied directly
-        without being consumed by topic initialization.
-        """
-        if not (
-            support.get("enabled")
-            and support.get("mode") == "topic"
-            and support.get("support_group_id")
-        ):
-            return None
-        try:
-            return await self.ensure_support_topic(context, owner, user, support)
-        except TelegramError as exc:
-            logger.warning(
-                "Support topic preparation on /start failed owner=%s user=%s: %s",
-                owner, user.id, exc,
-            )
-        except Exception:
-            logger.exception(
-                "Support topic preparation on /start failed owner=%s user=%s",
-                owner, user.id,
-            )
-        return None
-
     async def child_start(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
 
@@ -150,14 +122,6 @@ class CloneStartMixin:
                         referrer_id=int(arg.replace("ref_","",1))
                     except (TypeError,ValueError):
                         referrer_id=None
-
-            # Prepare/reuse the permanent Live Support topic before /start
-            # finishes. Existing users without a mapping receive one here;
-            # existing permanent mappings are reused and never deleted because
-            # of inactivity, blocking, unblocking, or subscription expiry.
-            await self._prepare_support_topic_on_start(
-                context, owner, update.effective_user, support or {},
-            )
 
             self._start_background(
                 self._post_start_tasks(

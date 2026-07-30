@@ -181,17 +181,28 @@ class CloneLiveSupportMixin:
         if message.text and not message.text.startswith("/"):
             auto_reply=await match_support_auto_reply(owner,message.text)
         mode=support.get("mode","topic")
+        if mode == "topic" and not support.get("support_group_id"):
+            await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
+            raise ApplicationHandlerStop
 
-        # Direct FIFO delivery: the same original Telegram message ID is retried
-        # until Telegram accepts it. No receipt queue, debounce or background
-        # forwarding is involved.
+        # Topic creation and forwarding happen inside one FIFO section. A MongoDB
+        # receipt additionally prevents two Render workers from forwarding the
+        # same Telegram update twice, while failed attempts remain retryable.
+        receipt = None
         try:
             async with _live_support_fifo_lock(owner, user.id):
+                receipt = await claim_support_delivery(
+                    owner,
+                    "user_to_support",
+                    chat.id,
+                    message.message_id,
+                    stale_seconds=180,
+                )
+                if receipt is None:
+                    # This exact update is already completed or is currently
+                    # being handled by another worker.
+                    raise ApplicationHandlerStop
                 if mode=="topic":
-                    if not support.get("support_group_id"):
-                        await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
-                        raise ApplicationHandlerStop
-
                     topic=await self._ensure_support_topic_reliably(context,owner,user,support)
                     try:
                         await self._copy_to_support_topic_reliably(
@@ -218,6 +229,17 @@ class CloneLiveSupportMixin:
                     )
                     await save_private_message_link(owner,owner,copied.message_id,user.id)
 
+                await complete_support_delivery(
+                    receipt["_id"],
+                    target_chat_id=(
+                        int(topic["support_group_id"]) if mode == "topic" else int(owner)
+                    ),
+                    target_message_thread_id=(
+                        int(topic["message_thread_id"]) if mode == "topic" else None
+                    ),
+                )
+                receipt = None
+
                 if auto_reply:
                     try:
                         await self.send_support_template(context,owner,user.id,auto_reply,user)
@@ -235,9 +257,13 @@ class CloneLiveSupportMixin:
         except ApplicationHandlerStop:
             raise
         except TelegramError as exc:
+            if receipt is not None:
+                await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
             await message.reply_text("❌ Message could not be sent to live support. Please try again.")
-        except Exception:
+        except Exception as exc:
+            if receipt is not None:
+                await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Unexpected live support routing failure owner=%s user=%s",owner,user.id)
             await message.reply_text("❌ Message could not be sent to live support. Please try again.")
 
