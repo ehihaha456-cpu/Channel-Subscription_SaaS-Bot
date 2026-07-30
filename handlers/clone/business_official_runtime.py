@@ -30,7 +30,13 @@ from database.business_official import (
     save_official_business_connection,
 )
 from database.seller_bots import get_bot_by_data_owner_id
-from database.seller_data import claim_business_welcome, get_seller_settings, reset_business_welcome
+from database.seller_data import (
+    claim_business_welcome,
+    get_seller_settings,
+    reset_business_welcome,
+    reset_business_welcome_for_peer,
+    set_business_welcome_message_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +152,7 @@ async def _send_configured_message(
     media_items=None,
     button_rows=None,
     user=None,
-) -> None:
+) -> list[int]:
     """Send saved media as one Telegram album, followed by text/buttons.
 
     Telegram media groups do not support inline keyboards. Therefore, when
@@ -179,14 +185,17 @@ async def _send_configured_message(
                 # Telegram albums support photos, videos, audio, and documents.
                 # GIF/animation is stored as a document inside mixed albums.
                 album.append(InputMediaDocument(media=file_id))
-        await context.bot.send_media_group(media=album, **common)
+        sent = await context.bot.send_media_group(media=album, **common)
+        message_ids = [int(m.message_id) for m in sent if getattr(m, "message_id", None)]
         if rendered_text or markup:
-            await context.bot.send_message(
+            text_message = await context.bot.send_message(
                 text=rendered_text or "Choose an option below.",
                 reply_markup=markup,
                 **common,
             )
-        return
+            if getattr(text_message, "message_id", None):
+                message_ids.append(int(text_message.message_id))
+        return message_ids
 
     if len(items) == 1:
         item = items[0]
@@ -194,20 +203,21 @@ async def _send_configured_message(
         file_id = str(item.get("file_id") or "")
         single_common = {**common, "caption": rendered_text or None, "reply_markup": markup}
         if kind == "photo":
-            await context.bot.send_photo(photo=file_id, **single_common)
+            sent = await context.bot.send_photo(photo=file_id, **single_common)
         elif kind == "video":
-            await context.bot.send_video(video=file_id, **single_common)
+            sent = await context.bot.send_video(video=file_id, **single_common)
         elif kind == "animation":
-            await context.bot.send_animation(animation=file_id, **single_common)
+            sent = await context.bot.send_animation(animation=file_id, **single_common)
         else:
-            await context.bot.send_document(document=file_id, **single_common)
-        return
+            sent = await context.bot.send_document(document=file_id, **single_common)
+        return [int(sent.message_id)] if getattr(sent, "message_id", None) else []
 
-    await context.bot.send_message(
+    sent = await context.bot.send_message(
         text=rendered_text or "Welcome!",
         reply_markup=markup,
         **common,
     )
+    return [int(sent.message_id)] if getattr(sent, "message_id", None) else []
 
 
 async def handle_business_connection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -302,7 +312,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
-                await _send_configured_message(
+                welcome_message_ids = await _send_configured_message(
                     context,
                     chat_id=message.chat_id,
                     business_connection_id=connection_id,
@@ -313,6 +323,12 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
                     media_items=media_items,
                     button_rows=welcome.get("buttons") or [],
                     user=sender,
+                )
+                await set_business_welcome_message_ids(
+                    owner_id,
+                    business_user_id or owner_id,
+                    sender_id,
+                    welcome_message_ids,
                 )
                 await increment_official_business_stat(owner_id, connection_id, "welcome_sent")
                 welcome_sent = True
@@ -361,12 +377,18 @@ async def handle_deleted_business_messages(update: Update, context: ContextTypes
             connection_doc = await save_official_business_connection(owner_id, connection)
         business_user_id = int(connection_doc.get("business_user_id") or owner_id)
         chat_id = int(deleted.chat.id)
-        await reset_business_welcome(owner_id, business_user_id, chat_id)
-        # Older records may have used owner_id as the account key before the
-        # Telegram Business user ID was stored. Clear both keys so the next
-        # customer message is always treated as a new conversation.
-        if business_user_id != int(owner_id):
-            await reset_business_welcome(owner_id, int(owner_id), chat_id)
+        # Telegram may report a full history clear as one deleted-business update.
+        # Remove every legacy/current first-contact key for this peer, not just the
+        # currently resolved Business account id. This guarantees that the next
+        # incoming customer message can atomically claim and receive the welcome.
+        await reset_business_welcome_for_peer(owner_id, chat_id)
+        logger.info(
+            "Business welcome reset after deleted history owner=%s account=%s chat=%s ids=%s",
+            owner_id,
+            business_user_id,
+            chat_id,
+            list(deleted.message_ids or []),
+        )
     except Exception:
         logger.exception("Could not reset Business welcome after deleted messages owner=%s", owner_id)
 
