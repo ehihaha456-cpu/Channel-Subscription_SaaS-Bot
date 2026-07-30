@@ -20,9 +20,19 @@ def c(name: str):
 async def initialize_live_support_indexes():
     await c(SETTINGS).create_index("owner_id", unique=True)
     await c(TOPICS).create_index([("owner_id", 1), ("user_id", 1)], unique=True)
+    # Only ready topic mappings have a thread id. A normal unique compound
+    # index also indexes documents where message_thread_id is missing, which
+    # can block two different users from creating topics concurrently.
+    old_name = "owner_id_1_support_group_id_1_message_thread_id_1"
+    try:
+        await c(TOPICS).drop_index(old_name)
+    except Exception:
+        pass
     await c(TOPICS).create_index(
         [("owner_id", 1), ("support_group_id", 1), ("message_thread_id", 1)],
         unique=True,
+        name="uniq_ready_support_thread",
+        partialFilterExpression={"message_thread_id": {"$type": "number"}},
     )
     await c(MESSAGE_LINKS).create_index(
         [("owner_id", 1), ("admin_chat_id", 1), ("admin_message_id", 1)],
