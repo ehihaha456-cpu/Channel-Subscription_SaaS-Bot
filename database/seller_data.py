@@ -478,9 +478,42 @@ async def increment_business_account_stat(owner_id:int, account_user_id:int, fie
     return result.matched_count>0
 
 
-async def create_plan(owner_id,name,duration_text,duration_minutes,price):
-    now=datetime.now(timezone.utc); doc={"owner_id":owner_id,"plan_id":uuid4().hex[:12],"name":name.strip(),"duration_text":duration_text,"duration_minutes":int(duration_minutes),"price":float(price),"active":True,"created_at":now,"updated_at":now}
-    await c(PLANS).insert_one(doc); return doc
+async def create_plan(owner_id, name, duration_text, duration_minutes, price, stars_price=0):
+    """Create a seller plan with optional Telegram Stars pricing.
+
+    ``stars_price`` is optional so older callers remain compatible.
+    """
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("Plan name is required")
+
+    minutes = int(duration_minutes)
+    if minutes <= 0:
+        raise ValueError("Plan duration must be greater than 0")
+
+    fiat_price = float(price)
+    if fiat_price < 0:
+        raise ValueError("Plan price cannot be negative")
+
+    stars = int(stars_price or 0)
+    if stars < 0:
+        raise ValueError("Stars price cannot be negative")
+
+    now = datetime.now(timezone.utc)
+    doc = {
+        "owner_id": int(owner_id),
+        "plan_id": uuid4().hex[:12],
+        "name": clean_name,
+        "duration_text": str(duration_text),
+        "duration_minutes": minutes,
+        "price": fiat_price,
+        "stars_price": stars,
+        "active": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await c(PLANS).insert_one(doc)
+    return doc
 async def get_plan(owner_id,plan_id): return await c(PLANS).find_one({"owner_id":owner_id,"plan_id":plan_id})
 async def get_plans(owner_id,active_only=False):
     q={"owner_id":owner_id};
