@@ -295,10 +295,38 @@ async def get_topic_by_thread(
     )
 
 
-async def delete_support_topic(owner_id: int, user_id: int):
-    await c(TOPICS).delete_one(
-        {"owner_id": int(owner_id), "user_id": int(user_id)}
+async def reset_support_topic_mapping(owner_id: int, user_id: int, reason: str = "stale_topic"):
+    """Keep the permanent user record but clear an unusable Telegram thread.
+
+    Blocking/unblocking the bot or leaving and returning never removes the
+    mapping. This reset is only used when Telegram confirms that the forum
+    topic itself no longer exists or belongs to another support group.
+    """
+    now = datetime.now(timezone.utc)
+    await c(TOPICS).update_one(
+        {"owner_id": int(owner_id), "user_id": int(user_id)},
+        {
+            "$set": {
+                "status": "stale",
+                "stale_reason": str(reason or "stale_topic")[:300],
+                "updated_at": now,
+            },
+            "$unset": {
+                "message_thread_id": "",
+                "header_message_id": "",
+                "header_sent": "",
+                "header_claim_token": "",
+                "header_claim_expires_at": "",
+                "claim_token": "",
+                "claim_expires_at": "",
+            },
+        },
     )
+
+
+async def delete_support_topic(owner_id: int, user_id: int):
+    """Backward-compatible alias that preserves the permanent user record."""
+    await reset_support_topic_mapping(owner_id, user_id, "legacy_reset")
 
 
 async def save_private_message_link(
