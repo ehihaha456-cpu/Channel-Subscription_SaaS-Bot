@@ -485,6 +485,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             "bad_request": "Telegram rejected request",
             "rate_limited": "Rate limited",
             "temporary_network_error": "Temporary network error",
+            "invalid_recipient": "Invalid recipient data",
             "unknown_error": "Unknown error",
         }
         lines = [
@@ -499,6 +500,12 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             lines.extend(["", "Failure details:"])
             for key, count in sorted(reasons.items(), key=lambda x: (-x[1], x[0])):
                 lines.append(f"• {reason_labels.get(key, key.replace('_', ' ').title())}: {count}")
+        component_failures = report.get("component_failures") or {}
+        if component_failures:
+            labels = {"media": "Media missing", "text": "Text missing", "buttons": "Buttons missing"}
+            lines.extend(["", "Partial delivery details:"])
+            for key, count in sorted(component_failures.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(f"• {labels.get(key, key.title())}: {count}")
         await q.message.reply_text("\n".join(lines), reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
     if action == "ba_welcome":
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
