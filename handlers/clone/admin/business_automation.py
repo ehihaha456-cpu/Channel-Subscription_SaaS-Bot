@@ -36,6 +36,7 @@ from database.seller_data import (
     save_business_account_session,
     set_seller_setting,
 )
+from database.business_official import count_active_official_business_connections
 from database.business_automation import (
     create_business_reply_template,
     delete_business_reply_template,
@@ -75,10 +76,8 @@ def _input_keyboard(back_callback: str, *, remove_callback: str | None = None, r
     return _kb(rows)
 
 
-def _home_keyboard(connected: int, enabled: bool):
+def _home_keyboard(enabled: bool):
     return _kb([
-        [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="ba_connect")],
-        [InlineKeyboardButton(f"📱 Connected Accounts ({connected})", callback_data="ba_accounts")],
         [InlineKeyboardButton("👋 Welcome Message", callback_data="ba_welcome")],
         [
             InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
@@ -93,17 +92,22 @@ def _home_keyboard(connected: int, enabled: bool):
 
 async def _home(owner: int):
     settings = await get_seller_settings(owner)
-    connected = await count_business_accounts(owner)
     enabled = bool(settings.get("business_automation_enabled"))
+    connected = await count_active_official_business_connections(owner)
+    connection_status = "🟢 Connected" if connected else "🔴 Not Connected"
     text = (
         "💼 Business Automation\n\n"
-        "Connect Telegram accounts and automatically reply to customers.\n\n"
-        f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
-        f"Connected Accounts: {connected}\n\n"
-        "Use the buttons below to connect accounts and manage the shared "
-        "Welcome Message, Auto Reply, Reply Templates, Settings, and Statistics."
+        "Connect your Telegram Business Account and automate customer conversations.\n\n"
+        "📌 Setup Guide\n"
+        "1. Telegram Premium or Telegram Business must be active on your account.\n"
+        "2. Open Telegram Settings → Telegram Business → Chatbots.\n"
+        "3. Select and connect this Clone Bot.\n"
+        "4. Return here after Telegram confirms the connection.\n\n"
+        f"Automation: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
+        f"Business Account: {connection_status}\n\n"
+        "Use the options below to manage Welcome Message, Auto Reply, Reply Templates, Broadcast, Settings, and Statistics."
     )
-    return text, _home_keyboard(connected, enabled)
+    return text, _home_keyboard(enabled)
 
 
 async def _editor_state(owner: int) -> tuple[dict, dict, list[dict]]:
@@ -625,31 +629,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         key,default=toggle_map[action]; await set_seller_setting(owner,key,not s.get(key,default)); s=await get_seller_settings(owner); await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
     if action == "ba_stats":
         st=await business_automation_stats(owner)
-        text=(
-            "📊 Business Automation Statistics\n\n"
-            "🔗 Connected Accounts\n"
-            f"• Total Active: {int(st.get('accounts',0))}\n"
-            f"• Normal Accounts: {int(st.get('normal_accounts',0))}\n"
-            f"• Business Accounts: {int(st.get('official_accounts',0))}\n\n"
-            "👥 Connected Customers\n"
-            f"• Total Active: {int(st.get('connected_users',0))}\n"
-            f"• Normal Account Customers: {int(st.get('normal_users',0))}\n"
-            f"• Business Account Customers: {int(st.get('official_users',0))}\n"
-            f"• Total Conversation Records: {int(st.get('conversations',0))}\n\n"
-            "⚡ Automation Activity\n"
-            f"• Welcome Messages Sent: {int(st.get('welcome_sent',0))}\n"
-            f"• Auto Replies Sent: {int(st.get('auto_replies_sent',0))}\n"
-            f"• Reply Templates Used: {int(st.get('templates_used',0))}\n\n"
-            "🔘 Feature Opens\n"
-            f"• Plans: {int(st.get('plans_opened',0))}\n"
-            f"• Renew: {int(st.get('renew_opened',0))}\n"
-            f"• Profile: {int(st.get('profile_opened',0))}\n"
-            f"• Referral: {int(st.get('referral_opened',0))}\n\n"
-            "📣 Last Broadcast\n"
-            f"• Fully Delivered: {int(st.get('broadcast_fully_delivered',0))}\n"
-            f"• Partially Delivered: {int(st.get('broadcast_partially_delivered',0))}\n"
-            f"• Failed: {int(st.get('broadcast_failed',0))}"
-        )
+        text=("📊 Business Automation Statistics\n\n"f"Connected Accounts: {int(st.get('accounts',0))}\n"f"Conversations: {int(st.get('conversations',0))}\n"f"Welcome Messages Sent: {int(st.get('welcome_sent',0))}\n"f"Auto Replies Sent: {int(st.get('auto_replies_sent',0))}\n"f"Reply Templates Used: {int(st.get('templates_used',0))}\n\n"f"Plans Opened: {int(st.get('plans_opened',0))}\n"f"Renew Opened: {int(st.get('renew_opened',0))}\n"f"Profile Opened: {int(st.get('profile_opened',0))}\n"f"Referral Opened: {int(st.get('referral_opened',0))}")
         await q.edit_message_text(text,reply_markup=_kb([[InlineKeyboardButton("🔄 Refresh",callback_data="ba_stats")],[InlineKeyboardButton("⬅ Business Automation",callback_data="ba_home")]])); return True
     return True
 
