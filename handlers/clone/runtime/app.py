@@ -44,7 +44,7 @@ class CloneRuntimeAppMixin:
         app=(
             Application.builder()
             .bot(protected_bot)
-            .concurrent_updates(32)
+            .concurrent_updates(1)
             .build()
         )
         app.bot_data["seller_owner_id"]=int(data_owner_id)
