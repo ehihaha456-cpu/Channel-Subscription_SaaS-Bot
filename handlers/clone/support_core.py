@@ -67,14 +67,28 @@ class CloneSupportCoreMixin:
         ])
 
     async def _send_support_header_reliably(self, context, **kwargs):
+        """Send the topic header only after Telegram has made the new thread usable."""
         last_error=None
-        for attempt in range(4):
+        for attempt in range(8):
             try:
                 return await context.bot.send_message(**kwargs)
             except (TimedOut, NetworkError, RetryAfter) as exc:
                 last_error=exc
-                delay=float(getattr(exc,"retry_after",0) or (0.5*(attempt+1)))
-                await asyncio.sleep(min(max(delay,0.3),4.0))
+                delay=float(getattr(exc,"retry_after",0) or (0.6*(attempt+1)))
+                await asyncio.sleep(min(max(delay,0.4),6.0))
+            except BadRequest as exc:
+                text=str(exc or "").lower()
+                # Telegram can return the forum topic before the thread accepts
+                # messages. Treat that as temporary instead of abandoning the
+                # first customer message.
+                if any(marker in text for marker in (
+                    "message thread not found", "topic_closed", "topic closed",
+                    "message thread is closed", "forum topic",
+                )):
+                    last_error=exc
+                    await asyncio.sleep(min(0.75 + (attempt * 0.5), 5.0))
+                    continue
+                raise
         if last_error:
             raise last_error
         raise RuntimeError("Could not send support user details")
@@ -172,6 +186,9 @@ class CloneSupportCoreMixin:
                 forum_topic=await context.bot.create_forum_topic(
                     group_id,name=topic_name,
                 )
+                # create_forum_topic may return slightly before Telegram starts
+                # accepting messages in that thread.
+                await asyncio.sleep(0.8)
                 provisional={
                     "support_group_id":group_id,
                     "message_thread_id":forum_topic.message_thread_id,

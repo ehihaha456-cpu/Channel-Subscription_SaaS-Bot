@@ -17,73 +17,71 @@ class CloneLiveSupportMixin:
         return any(marker in text for marker in markers)
 
     async def _copy_to_support_topic_reliably(self, context, topic, from_chat_id, message_id):
-        """Deliver the original customer content to the permanent support topic.
+        """Deliver every customer message with retries and a forward fallback.
 
-        ``copy_message`` preserves text entities/clickable links, captions and all
-        Telegram media types supported by the Bot API (photo, video, document,
-        audio, voice, animation, sticker, contact, location, venue, poll, etc.).
-        If Telegram refuses to copy a particular message type, a normal forward
-        is attempted as a compatibility fallback.
+        New Telegram forum topics can briefly reject the first copy even after
+        create_forum_topic succeeds. We keep retrying the exact same source
+        message id, so text, links and media are never silently skipped.
         """
-        destination_chat_id = int(topic["support_group_id"])
-        destination_thread_id = int(topic["message_thread_id"])
         last_error = None
-        for attempt in range(3):
+        for attempt in range(10):
             try:
                 return await context.bot.copy_message(
-                    chat_id=destination_chat_id,
-                    message_thread_id=destination_thread_id,
+                    chat_id=int(topic["support_group_id"]),
+                    message_thread_id=int(topic["message_thread_id"]),
                     from_chat_id=from_chat_id,
                     message_id=message_id,
                 )
             except (TimedOut, NetworkError, RetryAfter) as exc:
                 last_error = exc
-                delay = float(getattr(exc, "retry_after", 0) or (0.35 * (attempt + 1)))
-                await asyncio.sleep(min(max(delay, 0.2), 3.0))
+                delay = float(getattr(exc, "retry_after", 0) or (0.55 * (attempt + 1)))
+                await asyncio.sleep(min(max(delay, 0.35), 6.0))
             except BadRequest as exc:
-                # Keep stale/closed-topic errors visible to the caller so the
-                # permanent mapping can be repaired before retrying.
+                last_error = exc
+                text = str(exc or "").lower()
                 if self._is_stale_support_topic_error(exc):
-                    raise
-                last_error = exc
-                break
+                    # A freshly-created topic can temporarily report the same
+                    # error as a missing thread. Retry before declaring it stale.
+                    await asyncio.sleep(min(0.8 + (attempt * 0.45), 5.0))
+                    continue
+                # Some Telegram message types cannot be copied. Forwarding keeps
+                # the original text/link/media intact.
+                try:
+                    return await context.bot.forward_message(
+                        chat_id=int(topic["support_group_id"]),
+                        message_thread_id=int(topic["message_thread_id"]),
+                        from_chat_id=from_chat_id,
+                        message_id=message_id,
+                    )
+                except (TimedOut, NetworkError, RetryAfter) as forward_exc:
+                    last_error = forward_exc
+                    await asyncio.sleep(min(0.7 + (attempt * 0.45), 6.0))
+                except TelegramError:
+                    raise exc
             except TelegramError as exc:
-                last_error = exc
-                break
-
-        # Compatibility fallback for message types Telegram may not allow to
-        # be copied. Forwarding also keeps links, captions and media intact.
-        try:
-            return await context.bot.forward_message(
-                chat_id=destination_chat_id,
-                message_thread_id=destination_thread_id,
-                from_chat_id=from_chat_id,
-                message_id=message_id,
-            )
-        except (TimedOut, NetworkError, RetryAfter) as exc:
-            last_error = exc
-            delay = float(getattr(exc, "retry_after", 0) or 0.75)
-            await asyncio.sleep(min(max(delay, 0.2), 3.0))
-            return await context.bot.forward_message(
-                chat_id=destination_chat_id,
-                message_thread_id=destination_thread_id,
-                from_chat_id=from_chat_id,
-                message_id=message_id,
-            )
-        except TelegramError:
-            if last_error:
-                raise last_error
-            raise
+                # Final format fallback for copy-restricted messages.
+                try:
+                    return await context.bot.forward_message(
+                        chat_id=int(topic["support_group_id"]),
+                        message_thread_id=int(topic["message_thread_id"]),
+                        from_chat_id=from_chat_id,
+                        message_id=message_id,
+                    )
+                except TelegramError:
+                    raise exc
+        if last_error:
+            raise last_error
+        raise RuntimeError("Support message delivery exhausted all retries")
 
     async def _ensure_support_topic_reliably(self, context, owner, user, support):
         """Wait for/create the permanent topic before forwarding the first message."""
         last_error=None
-        for attempt in range(3):
+        for attempt in range(6):
             try:
                 return await self.ensure_support_topic(context, owner, user, support)
             except (TimedOut, NetworkError, RetryAfter, RuntimeError) as exc:
                 last_error=exc
-                delay=float(getattr(exc,"retry_after",0) or (0.75*(attempt+1)))
+                delay=float(getattr(exc,"retry_after",0) or (0.9*(attempt+1)))
                 await asyncio.sleep(min(max(delay,0.5),4.0))
         if last_error:
             raise last_error
@@ -165,9 +163,6 @@ class CloneLiveSupportMixin:
         # support topics by themselves.
         if chat.type!="private" or user.id==owner:
             return
-        # Accept text/links and every user-generated Telegram media/content
-        # type. ``effective_attachment`` covers photos, videos, documents,
-        # audio, voice, animation, stickers and media-group items.
         has_user_content=bool(
             message.text
             or message.caption
@@ -176,8 +171,6 @@ class CloneLiveSupportMixin:
             or message.location
             or message.venue
             or message.poll
-            or getattr(message, "dice", None)
-            or getattr(message, "game", None)
         )
         if not has_user_content:
             return
@@ -275,11 +268,11 @@ class CloneLiveSupportMixin:
         except TelegramError as exc:
             await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
-            await message.reply_text("❌ Support message could not be sent after automatic retries. Please try again.")
+            await message.reply_text("❌ Support delivery is temporarily pending. Your message has been saved and will be retried; you do not need to resend it.")
         except Exception as exc:
             await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Unexpected live support routing failure owner=%s user=%s",owner,user.id)
-            await message.reply_text("❌ Support message could not be sent. Please try again.")
+            await message.reply_text("❌ Support delivery is temporarily pending. Your message has been saved and will be retried; you do not need to resend it.")
         # Do not stop the update here. Live Support is a mirror of customer
         # traffic; normal bot handlers must still be allowed to process the
         # same message after it has been copied.
