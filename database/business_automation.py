@@ -272,11 +272,13 @@ async def upsert_business_recipient(owner_id: int, connection_id: str, chat_id: 
     await _collection(BUSINESS_RECIPIENT_COLLECTION).update_one(
         {"owner_id": int(owner_id), "connection_id": str(connection_id), "chat_id": int(chat_id)},
         {"$set": {
+            "user_id": int(getattr(user, "id", 0) or chat_id),
             "first_name": str(getattr(user, "first_name", "") or ""),
             "last_name": str(getattr(user, "last_name", "") or ""),
             "username": str(getattr(user, "username", "") or ""),
             "active": True,
             "last_seen_at": _now(),
+            "updated_at": _now(),
         }, "$setOnInsert": {"created_at": _now()}},
         upsert=True,
     )
