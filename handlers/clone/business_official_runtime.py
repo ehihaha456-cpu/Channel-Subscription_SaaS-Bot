@@ -20,6 +20,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
+from database.business_delivery import record_business_contact
 from database.business_automation import (
     get_business_welcome, list_business_auto_replies, list_business_reply_templates,
     mark_business_recipient_inactive, upsert_business_recipient,
@@ -286,6 +287,16 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             return
 
         await upsert_business_recipient(owner_id, connection_id, message.chat_id, sender)
+        # Keep a direct numeric-ID route for payment-success mirroring. This is
+        # independent of usernames and survives username changes.
+        await record_business_contact(
+            owner_id,
+            sender_id,
+            mode="official",
+            account_user_id=business_user_id,
+            connection_id=connection_id,
+            chat_id=message.chat_id,
+        )
 
         settings = await get_seller_settings(owner_id)
         if not settings.get("business_automation_enabled"):
