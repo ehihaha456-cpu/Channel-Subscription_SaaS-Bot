@@ -56,7 +56,7 @@ class CloneRuntimeLifecycleMixin:
                 await asyncio.wait_for(app.start(), timeout=15)
                 await asyncio.wait_for(
                     app.updater.start_polling(
-                        drop_pending_updates=True,
+                        drop_pending_updates=False,
                         allowed_updates=Update.ALL_TYPES,
                         bootstrap_retries=-1,
                     ),
