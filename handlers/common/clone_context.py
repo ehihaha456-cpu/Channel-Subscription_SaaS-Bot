@@ -37,7 +37,7 @@ from database.referral_unlock import (
     save_referral_unlock,
 )
 from database.live_support import (
-    count_support_blocks, delete_support_topic, get_live_support_settings,
+    count_support_blocks, delete_support_topic, reset_support_topic_mapping, get_live_support_settings,
     get_private_message_link, get_support_topic, get_topic_by_thread,
     is_support_blocked, save_private_message_link, save_support_topic,
     claim_support_topic_creation, complete_support_topic_creation,
