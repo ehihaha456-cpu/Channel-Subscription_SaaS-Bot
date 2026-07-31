@@ -108,9 +108,20 @@ class CloneLiveSupportMixin:
         chat=update.effective_chat
         if not message or not user or user.is_bot or not chat:
             return
-        # Telegram Business-account updates belong to Business Automation and
-        # must never be copied into Clone Bot Live Support.
-        if getattr(update, "business_message", None) is not None or getattr(update, "business_connection", None) is not None:
+        # Telegram Business-account updates belong exclusively to Business
+        # Automation and must never enter Clone Bot Live Support.  Telegram can
+        # deliver both new and edited business messages, while
+        # ``effective_message`` may still expose the business message object.
+        # Check every update variant as well as the message-level connection ID
+        # so text, media, albums and edited messages are all excluded.
+        is_business_update = bool(
+            getattr(update, "business_message", None) is not None
+            or getattr(update, "edited_business_message", None) is not None
+            or getattr(update, "business_connection", None) is not None
+            or getattr(update, "deleted_business_messages", None) is not None
+            or getattr(message, "business_connection_id", None)
+        )
+        if is_business_update:
             return
         owner=self.owner(context)
         support=await get_live_support_settings(owner)
