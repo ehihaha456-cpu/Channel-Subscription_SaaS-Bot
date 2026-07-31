@@ -31,6 +31,7 @@ from database.business_official import (
     save_official_business_connection,
 )
 from database.seller_bots import get_bot_by_data_owner_id
+from utils.branding import append_branding
 from database.seller_data import (
     claim_business_welcome,
     get_seller_settings,
@@ -310,7 +311,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             owner_id,
             business_user_id or owner_id,
             sender_id,
-            welcome_once=bool(settings.get("business_welcome_once", True)),
+            welcome_once=True,
         )
 
         delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
@@ -323,6 +324,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
+                text = await append_branding(text)
                 welcome_message_ids = await _send_configured_message(
                     context,
                     chat_id=message.chat_id,

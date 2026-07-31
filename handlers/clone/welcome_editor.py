@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard, parse_editor_buttons
+from utils.branding import append_branding
 
 
 class CloneWelcomeEditorMixin:
@@ -91,14 +92,8 @@ class CloneWelcomeEditorMixin:
         else:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
 
-        # Ye branding seller edit/remove nahi kar sakta. Main bot username
-        # Render ke MAIN_BOT_USERNAME environment variable se aata hai.
-        creator_line=(
-            "\n\n🤖 Powered by "
-            f'<a href="https://t.me/{MAIN_BOT_USERNAME}">'
-            f"@{MAIN_BOT_USERNAME}</a>"
-        )
-        text=f"{welcome_text}{creator_line}"
+        # Platform branding is controlled only from the Owner Dashboard.
+        text=await append_branding(welcome_text)
 
         # Seller ke welcome buttons fully removable hain. Empty list ka matlab
         # welcome message ke niche koi button nahi dikhana.
