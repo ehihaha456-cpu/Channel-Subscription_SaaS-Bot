@@ -7,12 +7,20 @@ class CloneSupportCoreMixin:
     _support_topic_locks = {}
 
     @staticmethod
-    def _support_datetime(value):
+    def _support_datetime(value, timezone_name="Asia/Kolkata", fmt="%d-%m-%Y %I:%M:%S %p %Z"):
+        """Format support dates without depending on SellerBotManager."""
         if not value:
             return "-"
-        if value.tzinfo is None:
-            value=value.replace(tzinfo=timezone.utc)
-        return SellerBotManager.format_dt(value)
+        try:
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            try:
+                zone = ZoneInfo(timezone_name or "Asia/Kolkata")
+            except (ZoneInfoNotFoundError, ValueError, TypeError):
+                zone = ZoneInfo("Asia/Kolkata")
+            return value.astimezone(zone).strftime(fmt)
+        except Exception:
+            return str(value)
 
     async def support_user_details_text(self,owner,user):
         record=await get_user(owner,user.id) or {}
