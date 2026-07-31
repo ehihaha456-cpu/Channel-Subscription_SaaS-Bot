@@ -20,181 +20,73 @@ def _live_support_fifo_lock(owner_id: int, user_id: int):
 
 class CloneLiveSupportMixin:
     @staticmethod
-    def _is_closed_support_topic_error(exc):
+    def _is_stale_support_topic_error(exc):
         text = str(exc or "").lower()
-        return any(marker in text for marker in (
-            "topic_closed", "topic closed", "message thread is closed",
-        ))
-
-    @staticmethod
-    def _is_missing_support_topic_error(exc):
-        text = str(exc or "").lower()
-        return any(marker in text for marker in (
-            "message thread not found", "forum topic not found",
-        ))
-
-    @classmethod
-    def _is_stale_support_topic_error(cls, exc):
-        return cls._is_closed_support_topic_error(exc) or cls._is_missing_support_topic_error(exc)
-
-    async def _reopen_support_topic(self, context, topic):
-        """Reopen the same permanent topic; never create a second topic for a closed one."""
-        try:
-            await context.bot.reopen_forum_topic(
-                chat_id=int(topic["support_group_id"]),
-                message_thread_id=int(topic["message_thread_id"]),
-            )
-        except BadRequest as exc:
-            text = str(exc or "").lower()
-            # Already open is a successful state for our purpose.
-            if not any(marker in text for marker in ("topic_not_modified", "not modified", "already open")):
-                raise
-
-    async def _send_support_message_direct(self, context, topic, message):
-        """Send customer content directly into the existing forum topic.
-
-        Telegram occasionally rejects copy_message for the first update after
-        an idle period even though normal sends to that same thread work. Using
-        the original file_id/content removes that dependency. The MongoDB
-        delivery claim in route_live_support_message still guarantees that the
-        same source update is completed only once.
-        """
-        common = {
-            "chat_id": int(topic["support_group_id"]),
-            "message_thread_id": int(topic["message_thread_id"]),
-        }
-        caption = message.caption or None
-
-        if message.text:
-            return await context.bot.send_message(
-                text=message.text,
-                entities=message.entities or None,
-                **common,
-            )
-        if message.photo:
-            return await context.bot.send_photo(
-                photo=message.photo[-1].file_id,
-                caption=caption,
-                caption_entities=message.caption_entities or None,
-                **common,
-            )
-        if message.video:
-            return await context.bot.send_video(
-                video=message.video.file_id,
-                caption=caption,
-                caption_entities=message.caption_entities or None,
-                **common,
-            )
-        if message.animation:
-            return await context.bot.send_animation(
-                animation=message.animation.file_id,
-                caption=caption,
-                caption_entities=message.caption_entities or None,
-                **common,
-            )
-        if message.document:
-            return await context.bot.send_document(
-                document=message.document.file_id,
-                caption=caption,
-                caption_entities=message.caption_entities or None,
-                **common,
-            )
-        if message.audio:
-            return await context.bot.send_audio(
-                audio=message.audio.file_id,
-                caption=caption,
-                caption_entities=message.caption_entities or None,
-                **common,
-            )
-        if message.voice:
-            return await context.bot.send_voice(
-                voice=message.voice.file_id,
-                caption=caption,
-                caption_entities=message.caption_entities or None,
-                **common,
-            )
-        if message.video_note:
-            return await context.bot.send_video_note(video_note=message.video_note.file_id, **common)
-        if message.sticker:
-            return await context.bot.send_sticker(sticker=message.sticker.file_id, **common)
-        if message.contact:
-            return await context.bot.send_contact(
-                phone_number=message.contact.phone_number,
-                first_name=message.contact.first_name,
-                last_name=message.contact.last_name,
-                vcard=message.contact.vcard,
-                **common,
-            )
-        if message.location:
-            kwargs = {
-                "latitude": message.location.latitude,
-                "longitude": message.location.longitude,
-                **common,
-            }
-            if message.location.horizontal_accuracy is not None:
-                kwargs["horizontal_accuracy"] = message.location.horizontal_accuracy
-            if message.location.live_period is not None:
-                kwargs["live_period"] = message.location.live_period
-            if message.location.heading is not None:
-                kwargs["heading"] = message.location.heading
-            if message.location.proximity_alert_radius is not None:
-                kwargs["proximity_alert_radius"] = message.location.proximity_alert_radius
-            return await context.bot.send_location(**kwargs)
-        if message.venue:
-            return await context.bot.send_venue(
-                latitude=message.venue.location.latitude,
-                longitude=message.venue.location.longitude,
-                title=message.venue.title,
-                address=message.venue.address,
-                foursquare_id=message.venue.foursquare_id,
-                foursquare_type=message.venue.foursquare_type,
-                google_place_id=message.venue.google_place_id,
-                google_place_type=message.venue.google_place_type,
-                **common,
-            )
-        if message.poll:
-            return await context.bot.send_poll(
-                question=message.poll.question,
-                options=[option.text for option in message.poll.options],
-                is_anonymous=message.poll.is_anonymous,
-                allows_multiple_answers=message.poll.allows_multiple_answers,
-                **common,
-            )
-
-        # Rare unsupported service/content types retain Telegram's native copy.
-        return await context.bot.copy_message(
-            from_chat_id=int(message.chat_id),
-            message_id=int(message.message_id),
-            **common,
+        markers = (
+            "message thread not found",
+            "topic_closed",
+            "topic closed",
+            "message thread is closed",
+            "forum topic",
         )
+        return any(marker in text for marker in markers)
 
-    async def _copy_to_support_topic_reliably(self, context, topic, message):
-        """Deliver directly, refreshing/reopening the same topic when needed."""
+    async def _copy_to_support_topic_reliably(self, context, topic, from_chat_id, message_id):
+        """Deliver every customer message with retries and a forward fallback.
+
+        New Telegram forum topics can briefly reject the first copy even after
+        create_forum_topic succeeds. We keep retrying the exact same source
+        message id, so text, links and media are never silently skipped.
+        """
         last_error = None
-        reopened = False
-        for attempt in range(10):
+        for attempt in range(24):
             try:
-                return await self._send_support_message_direct(context, topic, message)
-            except BadRequest as exc:
-                last_error = exc
-                if self._is_closed_support_topic_error(exc) and not reopened:
-                    await self._reopen_support_topic(context, topic)
-                    reopened = True
-                elif self._is_missing_support_topic_error(exc):
-                    # Let the caller reset only a genuinely missing mapping.
-                    raise
-                elif attempt >= 2:
-                    raise
+                return await context.bot.copy_message(
+                    chat_id=int(topic["support_group_id"]),
+                    message_thread_id=int(topic["message_thread_id"]),
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                )
             except (TimedOut, NetworkError, RetryAfter) as exc:
                 last_error = exc
-            except TelegramError as exc:
+                delay = float(getattr(exc, "retry_after", 0) or (0.55 * (attempt + 1)))
+                await asyncio.sleep(min(max(delay, 0.35), 6.0))
+            except BadRequest as exc:
                 last_error = exc
-                if attempt >= 2:
-                    raise
-            await asyncio.sleep(min(0.45 * (attempt + 1), 3.0))
+                text = str(exc or "").lower()
+                if self._is_stale_support_topic_error(exc):
+                    # A freshly-created topic can temporarily report the same
+                    # error as a missing thread. Retry before declaring it stale.
+                    await asyncio.sleep(min(0.8 + (attempt * 0.45), 5.0))
+                    continue
+                # Some Telegram message types cannot be copied. Forwarding keeps
+                # the original text/link/media intact.
+                try:
+                    return await context.bot.forward_message(
+                        chat_id=int(topic["support_group_id"]),
+                        message_thread_id=int(topic["message_thread_id"]),
+                        from_chat_id=from_chat_id,
+                        message_id=message_id,
+                    )
+                except (TimedOut, NetworkError, RetryAfter) as forward_exc:
+                    last_error = forward_exc
+                    await asyncio.sleep(min(0.7 + (attempt * 0.45), 6.0))
+                except TelegramError:
+                    raise exc
+            except TelegramError as exc:
+                # Final format fallback for copy-restricted messages.
+                try:
+                    return await context.bot.forward_message(
+                        chat_id=int(topic["support_group_id"]),
+                        message_thread_id=int(topic["message_thread_id"]),
+                        from_chat_id=from_chat_id,
+                        message_id=message_id,
+                    )
+                except TelegramError:
+                    raise exc
         if last_error:
             raise last_error
-        raise RuntimeError("Live support delivery failed")
+        raise RuntimeError("Support message delivery exhausted all retries")
 
     async def _ensure_support_topic_reliably(self, context, owner, user, support):
         """Wait for/create the permanent topic before forwarding the first message."""
@@ -289,44 +181,31 @@ class CloneLiveSupportMixin:
         if message.text and not message.text.startswith("/"):
             auto_reply=await match_support_auto_reply(owner,message.text)
         mode=support.get("mode","topic")
-        if mode == "topic" and not support.get("support_group_id"):
-            await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
-            raise ApplicationHandlerStop
 
-        # Topic creation and forwarding happen inside one FIFO section. A MongoDB
-        # receipt additionally prevents two Render workers from forwarding the
-        # same Telegram update twice, while failed attempts remain retryable.
-        receipt = None
+        # Direct FIFO delivery: the same original Telegram message ID is retried
+        # until Telegram accepts it. No receipt queue, debounce or background
+        # forwarding is involved.
         try:
             async with _live_support_fifo_lock(owner, user.id):
-                receipt = await claim_support_delivery(
-                    owner,
-                    "user_to_support",
-                    chat.id,
-                    message.message_id,
-                    stale_seconds=180,
-                )
-                if receipt is None:
-                    # This exact update is already completed or is currently
-                    # being handled by another worker.
-                    raise ApplicationHandlerStop
                 if mode=="topic":
+                    if not support.get("support_group_id"):
+                        await message.reply_text("⚠️ Live support group is not connected yet. Please try again later.")
+                        raise ApplicationHandlerStop
+
                     topic=await self._ensure_support_topic_reliably(context,owner,user,support)
                     try:
                         await self._copy_to_support_topic_reliably(
-                            context, topic, message,
+                            context, topic, chat.id, message.message_id,
                         )
                     except BadRequest as exc:
-                        if self._is_closed_support_topic_error(exc):
-                            await self._reopen_support_topic(context, topic)
-                            await self._copy_to_support_topic_reliably(context, topic, message)
-                        elif self._is_missing_support_topic_error(exc):
-                            logger.warning("Support topic missing owner=%s user=%s: %s",owner,user.id,exc)
-                            await reset_support_topic_mapping(owner,user.id,str(exc))
-                            topic=await self._ensure_support_topic_reliably(context,owner,user,support)
-                            await self._copy_to_support_topic_reliably(context, topic, message)
-                        else:
+                        if not self._is_stale_support_topic_error(exc):
                             raise
+                        logger.warning("Support topic stale owner=%s user=%s: %s",owner,user.id,exc)
+                        await reset_support_topic_mapping(owner,user.id,str(exc))
+                        topic=await self._ensure_support_topic_reliably(context,owner,user,support)
+                        await self._copy_to_support_topic_reliably(
+                            context, topic, chat.id, message.message_id,
+                        )
                 else:
                     await context.bot.send_message(
                         owner,
@@ -338,17 +217,6 @@ class CloneLiveSupportMixin:
                         message_id=message.message_id,
                     )
                     await save_private_message_link(owner,owner,copied.message_id,user.id)
-
-                await complete_support_delivery(
-                    receipt["_id"],
-                    target_chat_id=(
-                        int(topic["support_group_id"]) if mode == "topic" else int(owner)
-                    ),
-                    target_message_thread_id=(
-                        int(topic["message_thread_id"]) if mode == "topic" else None
-                    ),
-                )
-                receipt = None
 
                 if auto_reply:
                     try:
@@ -367,13 +235,9 @@ class CloneLiveSupportMixin:
         except ApplicationHandlerStop:
             raise
         except TelegramError as exc:
-            if receipt is not None:
-                await fail_support_delivery(receipt["_id"], str(exc))
             logger.exception("Live support routing failed owner=%s user=%s",owner,user.id)
             await message.reply_text("❌ Message could not be sent to live support. Please try again.")
-        except Exception as exc:
-            if receipt is not None:
-                await fail_support_delivery(receipt["_id"], str(exc))
+        except Exception:
             logger.exception("Unexpected live support routing failure owner=%s user=%s",owner,user.id)
             await message.reply_text("❌ Message could not be sent to live support. Please try again.")
 
@@ -591,6 +455,64 @@ class CloneLiveSupportMixin:
                     _MessageQueryAdapter(update.effective_message),
                     owner,
                     int(user["user_id"]),
+                )
+                return
+
+            if context.user_data.get("wait_user_custom_duration"):
+                user_id=int(context.user_data["wait_user_custom_duration"])
+                value=text.strip().lower()
+                try:
+                    if value.endswith("mo"):
+                        amount=int(value[:-2]); duration_minutes=amount*30*1440
+                    elif value.endswith("y"):
+                        amount=int(value[:-1]); duration_minutes=amount*365*1440
+                    elif value.endswith("m"):
+                        amount=int(value[:-1]); duration_minutes=amount
+                    elif value.endswith("h"):
+                        amount=int(value[:-1]); duration_minutes=amount*60
+                    elif value.endswith("d"):
+                        amount=int(value[:-1]); duration_minutes=amount*1440
+                    else:
+                        raise ValueError
+                    if amount <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    await update.effective_message.reply_text(
+                        "❌ Invalid duration. Use: 30m, 12h, 7d, 3mo or 1y.",
+                        reply_markup=self.back(f"a_user_view_{user_id}"),
+                    )
+                    return
+
+                plan_cfg, _ = await effective_plan(owner)
+                active_now = await active_subscriptions(owner)
+                already_active = any(int(x.get("user_id")) == user_id for x in active_now)
+                sub_limit = int(plan_cfg.get("active_subscriber_limit", 25))
+                if not already_active and sub_limit >= 0 and len(active_now) >= sub_limit:
+                    context.user_data.clear()
+                    await update.effective_message.reply_text(
+                        await plan_limit_warning(owner),
+                        reply_markup=self.limit_keyboard(f"a_user_view_{user_id}"),
+                    )
+                    return
+
+                await activate_subscription(
+                    owner, user_id, "Owner Assigned", duration_minutes,
+                    amount=0, duration_text=value,
+                )
+                delivery=await self.deliver_subscription_access(owner,user_id)
+                context.user_data.clear()
+                try:
+                    await context.bot.send_message(
+                        user_id,
+                        "🎉 Subscription activated/extended by admin.\n"
+                        f"Duration added: {value}\n\n"
+                        f"New invite links sent: {delivery.get('sent',0)}\n"
+                        f"Already joined: {delivery.get('already_member',0)}",
+                    )
+                except Exception:
+                    pass
+                await self.show_user_details(
+                    _MessageQueryAdapter(update.effective_message), owner, user_id,
                 )
                 return
 

@@ -76,8 +76,7 @@ class CloneUserUIMixin:
 
         banned=bool(user.get("banned"))
         keyboard=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎁 Give Subscription",callback_data=f"a_user_give_{user_id}")],
-            [InlineKeyboardButton("⌛ Extend Subscription",callback_data=f"a_user_extend_{user_id}")],
+            [InlineKeyboardButton("🎁 Give / Extend Subscription",callback_data=f"a_user_manage_{user_id}")],
             [InlineKeyboardButton("❌ Remove Subscription",callback_data=f"a_user_remove_{user_id}")],
             [InlineKeyboardButton(
                 "✅ Unban User" if banned else "🚫 Ban User",
@@ -88,27 +87,24 @@ class CloneUserUIMixin:
 
         await q.edit_message_text(text,reply_markup=keyboard)
 
-    async def show_admin_plan_selector(self,q,owner,user_id,mode):
+    async def show_admin_plan_selector(self,q,owner,user_id,mode="manage"):
         plans=await get_plans(owner,True)
-
-        if not plans:
-            await q.edit_message_text(
-                "❌ No active plans available.",
-                reply_markup=self.back(f"a_user_view_{user_id}"),
-            )
-            return
-
-        title="🎁 Choose plan to give" if mode=="give" else "⌛ Choose plan duration to extend"
         kb=[]
 
         for plan in plans:
             kb.append([InlineKeyboardButton(
                 f"{plan['name']} — {plan['duration_text']} — ₹{plan['price']:g}",
-                callback_data=f"a_user_apply_{mode}_{user_id}_{plan['plan_id']}",
+                callback_data=f"a_user_apply_manage_{user_id}_{plan['plan_id']}",
             )])
 
+        kb.append([InlineKeyboardButton("⌨️ Custom Duration",callback_data=f"a_user_custom_{user_id}")])
         kb.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_user_view_{user_id}")])
-        await q.edit_message_text(title,reply_markup=InlineKeyboardMarkup(kb))
+        await q.edit_message_text(
+            "🎁 Give / Extend Subscription\n\n"
+            "Select an existing plan or choose Custom Duration.\n\n"
+            "If the user already has an active subscription, the new duration is added to the remaining validity.",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
 
     async def payment_details_caption(
         self,
