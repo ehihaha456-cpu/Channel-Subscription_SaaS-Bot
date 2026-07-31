@@ -20,73 +20,195 @@ def _live_support_fifo_lock(owner_id: int, user_id: int):
 
 class CloneLiveSupportMixin:
     @staticmethod
-    def _is_stale_support_topic_error(exc):
+    def _is_closed_support_topic_error(exc):
         text = str(exc or "").lower()
-        markers = (
-            "message thread not found",
-            "topic_closed",
-            "topic closed",
-            "message thread is closed",
-            "forum topic",
-        )
-        return any(marker in text for marker in markers)
+        return any(marker in text for marker in (
+            "topic_closed", "topic closed", "message thread is closed",
+        ))
 
-    async def _copy_to_support_topic_reliably(self, context, topic, from_chat_id, message_id):
-        """Deliver every customer message with retries and a forward fallback.
+    @staticmethod
+    def _is_missing_support_topic_error(exc):
+        text = str(exc or "").lower()
+        return any(marker in text for marker in (
+            "message thread not found", "forum topic not found",
+        ))
 
-        New Telegram forum topics can briefly reject the first copy even after
-        create_forum_topic succeeds. We keep retrying the exact same source
-        message id, so text, links and media are never silently skipped.
+    @classmethod
+    def _is_stale_support_topic_error(cls, exc):
+        return cls._is_closed_support_topic_error(exc) or cls._is_missing_support_topic_error(exc)
+
+    async def _reopen_support_topic(self, context, topic):
+        """Reopen the same permanent topic; never create a second topic for a closed one."""
+        try:
+            await context.bot.reopen_forum_topic(
+                chat_id=int(topic["support_group_id"]),
+                message_thread_id=int(topic["message_thread_id"]),
+            )
+        except BadRequest as exc:
+            text = str(exc or "").lower()
+            # Already open is a successful state for our purpose.
+            if not any(marker in text for marker in ("topic_not_modified", "not modified", "already open")):
+                raise
+
+    async def _send_support_message_fallback(self, context, topic, message):
+        """Re-send the update from its file_id/content when copy/forward fails.
+
+        This is the final no-loss path. It uses the same existing topic and does
+        not touch the topic mapping, so it cannot create duplicate topics.
         """
+        common = {
+            "chat_id": int(topic["support_group_id"]),
+            "message_thread_id": int(topic["message_thread_id"]),
+        }
+        caption = message.caption or None
+        markup = getattr(message, "reply_markup", None)
+
+        if message.text:
+            return await context.bot.send_message(
+                text=message.text,
+                entities=message.entities or None,
+                reply_markup=markup,
+                **common,
+            )
+        if message.photo:
+            return await context.bot.send_photo(
+                photo=message.photo[-1].file_id,
+                caption=caption,
+                caption_entities=message.caption_entities or None,
+                **common,
+            )
+        if message.video:
+            return await context.bot.send_video(
+                video=message.video.file_id,
+                caption=caption,
+                caption_entities=message.caption_entities or None,
+                **common,
+            )
+        if message.animation:
+            return await context.bot.send_animation(
+                animation=message.animation.file_id,
+                caption=caption,
+                caption_entities=message.caption_entities or None,
+                **common,
+            )
+        if message.document:
+            return await context.bot.send_document(
+                document=message.document.file_id,
+                caption=caption,
+                caption_entities=message.caption_entities or None,
+                **common,
+            )
+        if message.audio:
+            return await context.bot.send_audio(
+                audio=message.audio.file_id,
+                caption=caption,
+                caption_entities=message.caption_entities or None,
+                **common,
+            )
+        if message.voice:
+            return await context.bot.send_voice(
+                voice=message.voice.file_id,
+                caption=caption,
+                caption_entities=message.caption_entities or None,
+                **common,
+            )
+        if message.video_note:
+            return await context.bot.send_video_note(video_note=message.video_note.file_id, **common)
+        if message.sticker:
+            return await context.bot.send_sticker(sticker=message.sticker.file_id, **common)
+        if message.contact:
+            return await context.bot.send_contact(
+                phone_number=message.contact.phone_number,
+                first_name=message.contact.first_name,
+                last_name=message.contact.last_name,
+                vcard=message.contact.vcard,
+                **common,
+            )
+        if message.location:
+            return await context.bot.send_location(
+                latitude=message.location.latitude,
+                longitude=message.location.longitude,
+                horizontal_accuracy=message.location.horizontal_accuracy,
+                live_period=message.location.live_period,
+                heading=message.location.heading,
+                proximity_alert_radius=message.location.proximity_alert_radius,
+                **common,
+            )
+        if message.venue:
+            return await context.bot.send_venue(
+                latitude=message.venue.location.latitude,
+                longitude=message.venue.location.longitude,
+                title=message.venue.title,
+                address=message.venue.address,
+                foursquare_id=message.venue.foursquare_id,
+                foursquare_type=message.venue.foursquare_type,
+                google_place_id=message.venue.google_place_id,
+                google_place_type=message.venue.google_place_type,
+                **common,
+            )
+        if message.poll:
+            options = [option.text for option in message.poll.options]
+            return await context.bot.send_poll(
+                question=message.poll.question,
+                options=options,
+                is_anonymous=message.poll.is_anonymous,
+                allows_multiple_answers=message.poll.allows_multiple_answers,
+                **common,
+            )
+        raise RuntimeError("Unsupported live support message type")
+
+    async def _copy_to_support_topic_reliably(self, context, topic, message):
+        """Copy the exact update, reopen a closed topic, then use content fallback."""
         last_error = None
-        for attempt in range(24):
+        reopened = False
+        for attempt in range(8):
             try:
                 return await context.bot.copy_message(
                     chat_id=int(topic["support_group_id"]),
                     message_thread_id=int(topic["message_thread_id"]),
-                    from_chat_id=from_chat_id,
-                    message_id=message_id,
+                    from_chat_id=int(message.chat_id),
+                    message_id=int(message.message_id),
                 )
             except (TimedOut, NetworkError, RetryAfter) as exc:
                 last_error = exc
-                delay = float(getattr(exc, "retry_after", 0) or (0.55 * (attempt + 1)))
-                await asyncio.sleep(min(max(delay, 0.35), 6.0))
+                delay = float(getattr(exc, "retry_after", 0) or (0.45 * (attempt + 1)))
+                await asyncio.sleep(min(max(delay, 0.3), 3.0))
             except BadRequest as exc:
                 last_error = exc
-                text = str(exc or "").lower()
-                if self._is_stale_support_topic_error(exc):
-                    # A freshly-created topic can temporarily report the same
-                    # error as a missing thread. Retry before declaring it stale.
-                    await asyncio.sleep(min(0.8 + (attempt * 0.45), 5.0))
+                if self._is_closed_support_topic_error(exc) and not reopened:
+                    await self._reopen_support_topic(context, topic)
+                    reopened = True
+                    await asyncio.sleep(0.35)
                     continue
-                # Some Telegram message types cannot be copied. Forwarding keeps
-                # the original text/link/media intact.
-                try:
-                    return await context.bot.forward_message(
-                        chat_id=int(topic["support_group_id"]),
-                        message_thread_id=int(topic["message_thread_id"]),
-                        from_chat_id=from_chat_id,
-                        message_id=message_id,
-                    )
-                except (TimedOut, NetworkError, RetryAfter) as forward_exc:
-                    last_error = forward_exc
-                    await asyncio.sleep(min(0.7 + (attempt * 0.45), 6.0))
-                except TelegramError:
-                    raise exc
+                if self._is_missing_support_topic_error(exc):
+                    await asyncio.sleep(min(0.5 + attempt * 0.35, 2.5))
+                    continue
+                break
             except TelegramError as exc:
-                # Final format fallback for copy-restricted messages.
-                try:
-                    return await context.bot.forward_message(
-                        chat_id=int(topic["support_group_id"]),
-                        message_thread_id=int(topic["message_thread_id"]),
-                        from_chat_id=from_chat_id,
-                        message_id=message_id,
-                    )
-                except TelegramError:
-                    raise exc
-        if last_error:
-            raise last_error
-        raise RuntimeError("Support message delivery exhausted all retries")
+                last_error = exc
+                break
+
+        # Forward once before rebuilding the message from Telegram file IDs.
+        try:
+            return await context.bot.forward_message(
+                chat_id=int(topic["support_group_id"]),
+                message_thread_id=int(topic["message_thread_id"]),
+                from_chat_id=int(message.chat_id),
+                message_id=int(message.message_id),
+            )
+        except BadRequest as exc:
+            last_error = exc
+            if self._is_closed_support_topic_error(exc):
+                await self._reopen_support_topic(context, topic)
+        except TelegramError as exc:
+            last_error = exc
+
+        try:
+            return await self._send_support_message_fallback(context, topic, message)
+        except TelegramError:
+            if last_error:
+                raise last_error
+            raise
 
     async def _ensure_support_topic_reliably(self, context, owner, user, support):
         """Wait for/create the permanent topic before forwarding the first message."""
@@ -206,17 +328,19 @@ class CloneLiveSupportMixin:
                     topic=await self._ensure_support_topic_reliably(context,owner,user,support)
                     try:
                         await self._copy_to_support_topic_reliably(
-                            context, topic, chat.id, message.message_id,
+                            context, topic, message,
                         )
                     except BadRequest as exc:
-                        if not self._is_stale_support_topic_error(exc):
+                        if self._is_closed_support_topic_error(exc):
+                            await self._reopen_support_topic(context, topic)
+                            await self._copy_to_support_topic_reliably(context, topic, message)
+                        elif self._is_missing_support_topic_error(exc):
+                            logger.warning("Support topic missing owner=%s user=%s: %s",owner,user.id,exc)
+                            await reset_support_topic_mapping(owner,user.id,str(exc))
+                            topic=await self._ensure_support_topic_reliably(context,owner,user,support)
+                            await self._copy_to_support_topic_reliably(context, topic, message)
+                        else:
                             raise
-                        logger.warning("Support topic stale owner=%s user=%s: %s",owner,user.id,exc)
-                        await reset_support_topic_mapping(owner,user.id,str(exc))
-                        topic=await self._ensure_support_topic_reliably(context,owner,user,support)
-                        await self._copy_to_support_topic_reliably(
-                            context, topic, chat.id, message.message_id,
-                        )
                 else:
                     await context.bot.send_message(
                         owner,
