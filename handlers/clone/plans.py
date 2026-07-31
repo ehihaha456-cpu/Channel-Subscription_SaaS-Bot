@@ -9,7 +9,7 @@ class ClonePlansMixin:
         settings=await get_seller_settings(owner)
         currency=settings.get("currency","INR")
         business_connection_id = getattr(q.message, "business_connection_id", None)
-        back_target = "ba_user_home" if business_connection_id else "c_home"
+        back_target = "c_home"
         back_keyboard=self.back(back_target)
 
         if not plans:
