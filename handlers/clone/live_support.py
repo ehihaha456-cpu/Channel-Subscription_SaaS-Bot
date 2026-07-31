@@ -50,24 +50,25 @@ class CloneLiveSupportMixin:
             if not any(marker in text for marker in ("topic_not_modified", "not modified", "already open")):
                 raise
 
-    async def _send_support_message_fallback(self, context, topic, message):
-        """Re-send the update from its file_id/content when copy/forward fails.
+    async def _send_support_message_direct(self, context, topic, message):
+        """Send customer content directly into the existing forum topic.
 
-        This is the final no-loss path. It uses the same existing topic and does
-        not touch the topic mapping, so it cannot create duplicate topics.
+        Telegram occasionally rejects copy_message for the first update after
+        an idle period even though normal sends to that same thread work. Using
+        the original file_id/content removes that dependency. The MongoDB
+        delivery claim in route_live_support_message still guarantees that the
+        same source update is completed only once.
         """
         common = {
             "chat_id": int(topic["support_group_id"]),
             "message_thread_id": int(topic["message_thread_id"]),
         }
         caption = message.caption or None
-        markup = getattr(message, "reply_markup", None)
 
         if message.text:
             return await context.bot.send_message(
                 text=message.text,
                 entities=message.entities or None,
-                reply_markup=markup,
                 **common,
             )
         if message.photo:
@@ -125,15 +126,20 @@ class CloneLiveSupportMixin:
                 **common,
             )
         if message.location:
-            return await context.bot.send_location(
-                latitude=message.location.latitude,
-                longitude=message.location.longitude,
-                horizontal_accuracy=message.location.horizontal_accuracy,
-                live_period=message.location.live_period,
-                heading=message.location.heading,
-                proximity_alert_radius=message.location.proximity_alert_radius,
+            kwargs = {
+                "latitude": message.location.latitude,
+                "longitude": message.location.longitude,
                 **common,
-            )
+            }
+            if message.location.horizontal_accuracy is not None:
+                kwargs["horizontal_accuracy"] = message.location.horizontal_accuracy
+            if message.location.live_period is not None:
+                kwargs["live_period"] = message.location.live_period
+            if message.location.heading is not None:
+                kwargs["heading"] = message.location.heading
+            if message.location.proximity_alert_radius is not None:
+                kwargs["proximity_alert_radius"] = message.location.proximity_alert_radius
+            return await context.bot.send_location(**kwargs)
         if message.venue:
             return await context.bot.send_venue(
                 latitude=message.venue.location.latitude,
@@ -147,68 +153,48 @@ class CloneLiveSupportMixin:
                 **common,
             )
         if message.poll:
-            options = [option.text for option in message.poll.options]
             return await context.bot.send_poll(
                 question=message.poll.question,
-                options=options,
+                options=[option.text for option in message.poll.options],
                 is_anonymous=message.poll.is_anonymous,
                 allows_multiple_answers=message.poll.allows_multiple_answers,
                 **common,
             )
-        raise RuntimeError("Unsupported live support message type")
+
+        # Rare unsupported service/content types retain Telegram's native copy.
+        return await context.bot.copy_message(
+            from_chat_id=int(message.chat_id),
+            message_id=int(message.message_id),
+            **common,
+        )
 
     async def _copy_to_support_topic_reliably(self, context, topic, message):
-        """Copy the exact update, reopen a closed topic, then use content fallback."""
+        """Deliver directly, refreshing/reopening the same topic when needed."""
         last_error = None
         reopened = False
-        for attempt in range(8):
+        for attempt in range(10):
             try:
-                return await context.bot.copy_message(
-                    chat_id=int(topic["support_group_id"]),
-                    message_thread_id=int(topic["message_thread_id"]),
-                    from_chat_id=int(message.chat_id),
-                    message_id=int(message.message_id),
-                )
-            except (TimedOut, NetworkError, RetryAfter) as exc:
-                last_error = exc
-                delay = float(getattr(exc, "retry_after", 0) or (0.45 * (attempt + 1)))
-                await asyncio.sleep(min(max(delay, 0.3), 3.0))
+                return await self._send_support_message_direct(context, topic, message)
             except BadRequest as exc:
                 last_error = exc
                 if self._is_closed_support_topic_error(exc) and not reopened:
                     await self._reopen_support_topic(context, topic)
                     reopened = True
-                    await asyncio.sleep(0.35)
-                    continue
-                if self._is_missing_support_topic_error(exc):
-                    await asyncio.sleep(min(0.5 + attempt * 0.35, 2.5))
-                    continue
-                break
+                elif self._is_missing_support_topic_error(exc):
+                    # Let the caller reset only a genuinely missing mapping.
+                    raise
+                elif attempt >= 2:
+                    raise
+            except (TimedOut, NetworkError, RetryAfter) as exc:
+                last_error = exc
             except TelegramError as exc:
                 last_error = exc
-                break
-
-        # Forward once before rebuilding the message from Telegram file IDs.
-        try:
-            return await context.bot.forward_message(
-                chat_id=int(topic["support_group_id"]),
-                message_thread_id=int(topic["message_thread_id"]),
-                from_chat_id=int(message.chat_id),
-                message_id=int(message.message_id),
-            )
-        except BadRequest as exc:
-            last_error = exc
-            if self._is_closed_support_topic_error(exc):
-                await self._reopen_support_topic(context, topic)
-        except TelegramError as exc:
-            last_error = exc
-
-        try:
-            return await self._send_support_message_fallback(context, topic, message)
-        except TelegramError:
-            if last_error:
-                raise last_error
-            raise
+                if attempt >= 2:
+                    raise
+            await asyncio.sleep(min(0.45 * (attempt + 1), 3.0))
+        if last_error:
+            raise last_error
+        raise RuntimeError("Live support delivery failed")
 
     async def _ensure_support_topic_reliably(self, context, owner, user, support):
         """Wait for/create the permanent topic before forwarding the first message."""
