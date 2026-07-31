@@ -12,11 +12,31 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a.startswith('a_user_view_'):
         await self.show_user_details(q, owner, int(a.replace('a_user_view_', '')))
         return True
+    if a.startswith('a_user_manage_'):
+        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_manage_', '')), 'manage')
+        return True
+    # Backward-compatible routing for old inline buttons still visible in chat.
     if a.startswith('a_user_give_'):
-        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_give_', '')), 'give')
+        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_give_', '')), 'manage')
         return True
     if a.startswith('a_user_extend_'):
-        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_extend_', '')), 'extend')
+        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_extend_', '')), 'manage')
+        return True
+    if a.startswith('a_user_custom_'):
+        user_id = int(a.replace('a_user_custom_', ''))
+        context.user_data.clear()
+        context.user_data['wait_user_custom_duration'] = user_id
+        await q.edit_message_text(
+            '⌨️ Custom Subscription Duration\n\n'
+            'Send duration in one of these formats:\n'
+            '• Minutes: 30m\n'
+            '• Hours: 12h\n'
+            '• Days: 7d\n'
+            '• Months: 3mo\n'
+            '• Years: 1y\n\n'
+            'Existing active validity will be preserved and the new duration will be added.',
+            reply_markup=self.back(f'a_user_view_{user_id}'),
+        )
         return True
     if a.startswith('a_user_apply_'):
         parts = a.split('_', 5)
