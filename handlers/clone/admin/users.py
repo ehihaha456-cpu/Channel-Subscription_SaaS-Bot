@@ -13,27 +13,50 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await self.show_user_details(q, owner, int(a.replace('a_user_view_', '')))
         return True
     if a.startswith('a_user_manage_'):
-        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_manage_', '')), 'manage')
+        user_id = int(a.replace('a_user_manage_', ''))
+        context.user_data.clear()
+        context.user_data['wait_user_custom_duration'] = user_id
+        await q.edit_message_text(
+            '🎁 Give / Extend Clone Bot Subscription\n\n'
+            'Send a custom duration:\n'
+            '30m, 12h, 7d, 3mo or 1y.\n\n'
+            'Existing active validity will be preserved and the new duration will be added.',
+            reply_markup=self.back(f'a_user_view_{user_id}'),
+        )
         return True
     # Backward-compatible routing for old inline buttons still visible in chat.
     if a.startswith('a_user_give_'):
-        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_give_', '')), 'manage')
+        user_id = int(a.replace('a_user_give_', ''))
+        context.user_data.clear()
+        context.user_data['wait_user_custom_duration'] = user_id
+        await q.edit_message_text(
+            '🎁 Give / Extend Clone Bot Subscription\n\n'
+            'Send a custom duration:\n'
+            '30m, 12h, 7d, 3mo or 1y.\n\n'
+            'Existing active validity will be preserved and the new duration will be added.',
+            reply_markup=self.back(f'a_user_view_{user_id}'),
+        )
         return True
     if a.startswith('a_user_extend_'):
-        await self.show_admin_plan_selector(q, owner, int(a.replace('a_user_extend_', '')), 'manage')
+        user_id = int(a.replace('a_user_extend_', ''))
+        context.user_data.clear()
+        context.user_data['wait_user_custom_duration'] = user_id
+        await q.edit_message_text(
+            '🎁 Give / Extend Clone Bot Subscription\n\n'
+            'Send a custom duration:\n'
+            '30m, 12h, 7d, 3mo or 1y.\n\n'
+            'Existing active validity will be preserved and the new duration will be added.',
+            reply_markup=self.back(f'a_user_view_{user_id}'),
+        )
         return True
     if a.startswith('a_user_custom_'):
         user_id = int(a.replace('a_user_custom_', ''))
         context.user_data.clear()
         context.user_data['wait_user_custom_duration'] = user_id
         await q.edit_message_text(
-            '⌨️ Custom Subscription Duration\n\n'
-            'Send duration in one of these formats:\n'
-            '• Minutes: 30m\n'
-            '• Hours: 12h\n'
-            '• Days: 7d\n'
-            '• Months: 3mo\n'
-            '• Years: 1y\n\n'
+            '🎁 Give / Extend Clone Bot Subscription\n\n'
+            'Send a custom duration:\n'
+            '30m, 12h, 7d, 3mo or 1y.\n\n'
             'Existing active validity will be preserved and the new duration will be added.',
             reply_markup=self.back(f'a_user_view_{user_id}'),
         )
