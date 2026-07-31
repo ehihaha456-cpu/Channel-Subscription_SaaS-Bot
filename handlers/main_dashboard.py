@@ -52,6 +52,7 @@ def owner_dashboard_keyboard():
             InlineKeyboardButton("🧾 Audit Logs", callback_data="owner_audit"),
         ],
         [InlineKeyboardButton("🌐 Official Links Settings", callback_data="official_settings")],
+        [InlineKeyboardButton("🏷 Branding", callback_data="sub_mgmt_branding")],
         [InlineKeyboardButton("🩺 Health Monitoring", callback_data="owner_health")],
         [InlineKeyboardButton("⚡ Performance Monitor", callback_data="owner_performance")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data="owner_terms_policy")],

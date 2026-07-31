@@ -9,6 +9,7 @@ from database.admins import is_admin
 from database.sellers import get_seller, sellers_collection
 from database.platform_features import reserve_payment_fingerprint, release_payment_fingerprint, audit
 from handlers.official_links import build_official_links_keyboard
+from utils.branding import default_branding_text, append_branding
 logger = logging.getLogger(__name__)
 
 from database.payment_gateways import get_gateway_config, set_gateway_preferences
@@ -406,10 +407,49 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if a=="sub_mgmt_revenue":
         r=await seller_revenue_summary(); await q.edit_message_text(f"💰 Seller Revenue\n\nTotal: ₹{r['total']:g} ({r['count']} payments)\nThis month: ₹{r['month_total']:g} ({r['month_count']} payments)",reply_markup=back()); return
     if a=="sub_mgmt_branding":
-        await q.edit_message_text(f"🏷 Branding Control\n\nCurrent: {cfg.get('branding_text','Powered by Subscription SaaS Bot')}\n\nBranding remains visible on Free and every Paid plan.",reply_markup=kb([[InlineKeyboardButton("✏ Edit Branding Text",callback_data="sub_mgmt_branding_edit")],[InlineKeyboardButton("⬅ Back",callback_data="sub_mgmt_home")]])); return
+        enabled=bool(cfg.get("branding_enabled",True))
+        current=str(cfg.get("branding_text") or "").strip() or default_branding_text()
+        await q.edit_message_text(
+            "🏷 Branding\n\n"
+            f"Status: {'Enabled ✅' if enabled else 'Disabled ❌'}\n"
+            f"Branding Text: {current}\n\n"
+            "This branding appears below Clone Bot and Business Automation welcome messages.",
+            reply_markup=kb([
+                [InlineKeyboardButton("❌ Disable Branding" if enabled else "✅ Enable Branding",callback_data="sub_mgmt_branding_toggle")],
+                [InlineKeyboardButton("✏ Edit Branding Text",callback_data="sub_mgmt_branding_edit")],
+                [InlineKeyboardButton("👁 Preview",callback_data="sub_mgmt_branding_preview")],
+                [InlineKeyboardButton("⬅ Owner Dashboard",callback_data="main_owner_dashboard")],
+            ]),
+        ); return
+    if a=="sub_mgmt_branding_toggle":
+        await update_config(branding_enabled=not bool(cfg.get("branding_enabled",True)))
+        cfg=await get_config(force_refresh=True)
+        enabled=bool(cfg.get("branding_enabled",True))
+        current=str(cfg.get("branding_text") or "").strip() or default_branding_text()
+        await q.edit_message_text(
+            "🏷 Branding\n\n"
+            f"Status: {'Enabled ✅' if enabled else 'Disabled ❌'}\n"
+            f"Branding Text: {current}\n\n"
+            "This branding appears below Clone Bot and Business Automation welcome messages.",
+            reply_markup=kb([
+                [InlineKeyboardButton("❌ Disable Branding" if enabled else "✅ Enable Branding",callback_data="sub_mgmt_branding_toggle")],
+                [InlineKeyboardButton("✏ Edit Branding Text",callback_data="sub_mgmt_branding_edit")],
+                [InlineKeyboardButton("👁 Preview",callback_data="sub_mgmt_branding_preview")],
+                [InlineKeyboardButton("⬅ Owner Dashboard",callback_data="main_owner_dashboard")],
+            ]),
+        ); return
+    if a=="sub_mgmt_branding_preview":
+        preview=await append_branding("👋 Welcome to your subscription bot!")
+        await q.message.reply_text(preview or "Branding is disabled.")
+        return
     if a=="sub_mgmt_branding_edit":
         context.user_data.clear(); context.user_data["sub_wait"]="branding"
-        await q.edit_message_text("Send new branding text.",reply_markup=back("sub_mgmt_branding")); return
+        await q.edit_message_text(
+            "✏ Edit Branding Text\n\n"
+            "Send the branding line.\n\n"
+            "Example:\n🤖 Powered by @MainBotUsername",
+            reply_markup=back("sub_mgmt_branding"),
+        ); return
 
 async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode=context.user_data.get("sub_wait")
