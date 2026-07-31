@@ -1,22 +1,32 @@
+"""Shared platform branding helpers for clone and Business Automation welcomes."""
+
 from __future__ import annotations
 
-import os
+from handlers.common.clone_context import MAIN_BOT_USERNAME
+from database.seller_subscriptions import get_config
 
-from database.settings import get_setting_value
-
-BRANDING_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
 def default_branding_text() -> str:
-    username = os.getenv("MAIN_BOT_USERNAME", "").strip().lstrip("@")
+    username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
     return f"🤖 Powered by @{username}" if username else "🤖 Powered by Main Bot"
 
 
-async def get_branding_block() -> str:
-    enabled = bool(await get_setting_value("branding_enabled", True))
-    if not enabled:
-        return ""
-    text = str(await get_setting_value("branding_text", "") or "").strip()
-    if not text:
-        text = default_branding_text()
-    return f"\n\n{BRANDING_SEPARATOR}\n\n{text}"
+async def branding_settings() -> tuple[bool, str]:
+    cfg = await get_config()
+    enabled = bool(cfg.get("branding_enabled", True))
+    text = str(cfg.get("branding_text") or "").strip() or default_branding_text()
+    return enabled, text
+
+
+async def append_branding(text: str) -> str:
+    base = str(text or "").rstrip()
+    enabled, branding = await branding_settings()
+    if not enabled or not branding:
+        return base
+    if branding.casefold() in base.casefold():
+        return base
+    if not base:
+        return branding
+    return f"{base}\n\n{SEPARATOR}\n\n{branding}"
