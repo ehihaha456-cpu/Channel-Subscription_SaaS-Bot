@@ -102,48 +102,55 @@ class CloneSupportCoreMixin:
         raise RuntimeError("Could not send support user details")
 
     async def _send_support_user_header(self, context, owner, user, topic):
-        """Send the first topic message once, with a plain-text fallback."""
+        """Best-effort topic header that can never fail customer delivery."""
         if topic.get("header_sent"):
             return topic
         if not await claim_support_topic_header(owner, user.id):
             return await get_support_topic(owner, user.id) or topic
 
-        group_id = int(topic["support_group_id"])
-        thread_id = int(topic["message_thread_id"])
-        blocked = await is_support_blocked(owner, user.id)
-        details = await self.support_user_details_text(owner, user)
         try:
-            sent = await self._send_support_header_reliably(
-                context,
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                text=details,
-                parse_mode="HTML",
-                reply_markup=self.support_topic_keyboard(user.id, blocked),
-                disable_web_page_preview=True,
+            group_id = int(topic["support_group_id"])
+            thread_id = int(topic["message_thread_id"])
+            blocked = await is_support_blocked(owner, user.id)
+            details = await self.support_user_details_text(owner, user)
+            try:
+                sent = await self._send_support_header_reliably(
+                    context,
+                    chat_id=group_id,
+                    message_thread_id=thread_id,
+                    text=details,
+                    parse_mode="HTML",
+                    reply_markup=self.support_topic_keyboard(user.id, blocked),
+                    disable_web_page_preview=True,
+                )
+            except BadRequest:
+                logger.exception(
+                    "Support details HTML failed; sending plain text owner=%s user=%s",
+                    owner, user.id,
+                )
+                sent = await self._send_support_header_reliably(
+                    context,
+                    chat_id=group_id,
+                    message_thread_id=thread_id,
+                    text=(
+                        f"🆕 New Support User\n\n"
+                        f"👤 Name: {user.full_name or user.id}\n"
+                        f"📝 Username: @{user.username if user.username else 'Not set'}\n"
+                        f"🆔 User ID: {user.id}\n"
+                        f"🔗 Mention: tg://user?id={user.id}"
+                    ),
+                    reply_markup=self.support_topic_keyboard(user.id, blocked),
+                    disable_web_page_preview=True,
+                )
+            await mark_support_topic_header(owner, user.id, sent.message_id)
+        except Exception as exc:
+            # The header is informational. Never let it abort or consume the
+            # customer's original support message.
+            await release_support_topic_header_claim(owner, user.id)
+            logger.warning(
+                "Support user header failed but message delivery will continue "
+                "owner=%s user=%s error=%s", owner, user.id, exc, exc_info=True,
             )
-        except BadRequest:
-            # Bad user data must never leave a newly-created topic empty.
-            logger.exception(
-                "Support details HTML failed; sending plain text owner=%s user=%s",
-                owner, user.id,
-            )
-            plain = (
-                f"🆕 New Support User\n\n"
-                f"👤 Name: {user.full_name or user.id}\n"
-                f"📝 Username: @{user.username if user.username else 'Not set'}\n"
-                f"🆔 User ID: {user.id}\n"
-                f"🔗 Mention: tg://user?id={user.id}"
-            )
-            sent = await self._send_support_header_reliably(
-                context,
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                text=plain,
-                reply_markup=self.support_topic_keyboard(user.id, blocked),
-                disable_web_page_preview=True,
-            )
-        await mark_support_topic_header(owner, user.id, sent.message_id)
         return await get_support_topic(owner, user.id) or topic
 
     async def ensure_support_topic(self,context,owner,user,support):
@@ -194,50 +201,27 @@ class CloneSupportCoreMixin:
                 forum_topic=await context.bot.create_forum_topic(
                     group_id,name=topic_name,
                 )
-                # create_forum_topic may return slightly before Telegram starts
-                # accepting messages in that thread.
+                # Publish the mapping first. Header delivery is optional and
+                # must never prevent the first customer message from using the
+                # newly-created topic.
                 await asyncio.sleep(0.8)
                 provisional={
+                    "owner_id": int(owner),
+                    "user_id": int(user.id),
                     "support_group_id":group_id,
                     "message_thread_id":forum_topic.message_thread_id,
                     "topic_name":topic_name,
+                    "status":"ready",
+                    "header_sent":False,
                 }
-                # Send details before publishing the topic as ready.
-                blocked=await is_support_blocked(owner,user.id)
-                details=await self.support_user_details_text(owner,user)
-                try:
-                    sent=await self._send_support_header_reliably(
-                    context,
-                        chat_id=group_id,
-                        message_thread_id=forum_topic.message_thread_id,
-                        text=details,
-                        parse_mode="HTML",
-                        reply_markup=self.support_topic_keyboard(user.id,blocked),
-                        disable_web_page_preview=True,
-                    )
-                except BadRequest:
-                    logger.exception(
-                        "Support details HTML failed; sending fallback owner=%s user=%s",
-                        owner,user.id,
-                    )
-                    sent=await self._send_support_header_reliably(
-                    context,
-                        chat_id=group_id,
-                        message_thread_id=forum_topic.message_thread_id,
-                        text=(
-                            f"🆕 New Support User\n\n"
-                            f"👤 Name: {user.full_name or user.id}\n"
-                            f"📝 Username: @{user.username if user.username else 'Not set'}\n"
-                            f"🆔 User ID: {user.id}\n"
-                            f"🔗 Mention: tg://user?id={user.id}"
-                        ),
-                        reply_markup=self.support_topic_keyboard(user.id,blocked),
-                    )
                 topic=await complete_support_topic_creation(
                     owner,user.id,claim_token,group_id,
-                    forum_topic.message_thread_id,topic_name,sent.message_id,
+                    forum_topic.message_thread_id,topic_name,None,
                 )
-                return topic or provisional
+                topic = topic or provisional
+                return await self._send_support_user_header(
+                    context, owner, user, topic,
+                )
             except Exception:
                 await fail_support_topic_creation(owner,user.id,claim_token)
                 # Remove an empty orphan topic when creation failed after the
