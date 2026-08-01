@@ -41,7 +41,7 @@ from database.live_support import (
     get_private_message_link, get_support_topic, get_topic_by_thread,
     is_support_blocked, save_private_message_link, save_support_topic,
     claim_support_topic_creation, complete_support_topic_creation,
-    fail_support_topic_creation, claim_support_topic_header, mark_support_topic_header,
+    fail_support_topic_creation, claim_support_topic_header, mark_support_topic_header, release_support_topic_header_claim,
     set_support_block, update_live_support_settings,
     list_support_templates, get_support_template, save_support_template,
     delete_support_template, list_support_auto_replies, get_support_auto_reply,
