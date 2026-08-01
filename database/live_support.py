@@ -167,27 +167,36 @@ async def complete_support_topic_creation(
     support_group_id: int,
     message_thread_id: int,
     topic_name: str,
-    header_message_id: int,
+    header_message_id: int | None = None,
 ):
+    """Publish a Telegram topic mapping as ready.
+
+    The mapping must become usable even when the optional user-details header
+    cannot be sent. Customer-message delivery must never depend on the header.
+    """
     now = datetime.now(timezone.utc)
+    values = {
+        "support_group_id": int(support_group_id),
+        "message_thread_id": int(message_thread_id),
+        "topic_name": str(topic_name),
+        "status": "ready",
+        "updated_at": now,
+    }
+    unset = {"claim_token": "", "claim_expires_at": ""}
+    if header_message_id:
+        values["header_message_id"] = int(header_message_id)
+        values["header_sent"] = True
+    else:
+        values["header_sent"] = False
+        unset["header_message_id"] = ""
+
     await c(TOPICS).update_one(
         {
             "owner_id": int(owner_id),
             "user_id": int(user_id),
             "claim_token": str(claim_token),
         },
-        {
-            "$set": {
-                "support_group_id": int(support_group_id),
-                "message_thread_id": int(message_thread_id),
-                "topic_name": str(topic_name),
-                "header_message_id": int(header_message_id),
-                "header_sent": True,
-                "status": "ready",
-                "updated_at": now,
-            },
-            "$unset": {"claim_token": "", "claim_expires_at": ""},
-        },
+        {"$set": values, "$unset": unset},
     )
     return await get_support_topic(owner_id, user_id)
 
@@ -229,6 +238,24 @@ async def claim_support_topic_header(owner_id: int, user_id: int) -> bool:
         },
     )
     return bool(result.modified_count)
+
+
+async def release_support_topic_header_claim(owner_id: int, user_id: int):
+    """Release a failed header-send lease immediately.
+
+    Header delivery is best effort and must never block or fail the customer's
+    actual support message.
+    """
+    await c(TOPICS).update_one(
+        {"owner_id": int(owner_id), "user_id": int(user_id)},
+        {
+            "$unset": {
+                "header_claim_token": "",
+                "header_claim_expires_at": "",
+            },
+            "$set": {"updated_at": datetime.now(timezone.utc)},
+        },
+    )
 
 
 async def mark_support_topic_header(
