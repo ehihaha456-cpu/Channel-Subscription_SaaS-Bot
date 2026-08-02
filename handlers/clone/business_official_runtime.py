@@ -390,13 +390,12 @@ async def handle_deleted_business_messages(update: Update, context: ContextTypes
             connection_doc = await save_official_business_connection(owner_id, connection)
         business_user_id = int(connection_doc.get("business_user_id") or owner_id)
         chat_id = int(deleted.chat.id)
-        # Telegram may report a full history clear as one deleted-business update.
-        # Remove every legacy/current first-contact key for this peer, not just the
-        # currently resolved Business account id. This guarantees that the next
-        # incoming customer message can atomically claim and receive the welcome.
-        await reset_business_welcome_for_peer(owner_id, chat_id)
+        # A Telegram chat-history clear or message deletion must not make the
+        # customer a first-time contact again.  The welcome claim is permanent
+        # per owner/account/customer, so keep BUSINESS_CONTACTS untouched.
         logger.info(
-            "Business welcome reset after deleted history owner=%s account=%s chat=%s ids=%s",
+            "Business messages deleted; permanent welcome claim preserved "
+            "owner=%s account=%s chat=%s ids=%s",
             owner_id,
             business_user_id,
             chat_id,
