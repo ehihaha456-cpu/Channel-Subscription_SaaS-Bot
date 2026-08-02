@@ -114,6 +114,17 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_stats':
         s = await stats(owner)
-        await q.edit_message_text(f"📊 Statistics\n\nUsers: {s['users']}\nPlans: {s['plans']}\nChannels: {s['channels']}\nPending: {s['pending']}\nRevenue: ₹{s['revenue']:g}", reply_markup=self.admin_menu())
+        text = (
+            "📊 Statistics\n\n"
+            f"👥 Total Users: {s.get('total_users', s.get('users', 0)):,}\n"
+            f"🟢 Active Users (Today): {s.get('active_users_today', 0):,}\n"
+            f"✅ Active Subscribers: {s.get('active_subscribers', s.get('active', 0)):,}\n"
+            f"📦 Plans: {s.get('plans', 0):,}\n"
+            f"📢 Channels / Groups: {s.get('channels', 0):,}\n"
+            f"⏳ Pending Payments: {s.get('pending', 0):,}\n"
+            f"💰 Today Revenue: ₹{float(s.get('today_revenue', 0) or 0):,.2f}\n"
+            f"💵 Total Revenue: ₹{float(s.get('total_revenue', s.get('revenue', 0)) or 0):,.2f}"
+        )
+        await q.edit_message_text(text, reply_markup=self.back('a_home'))
         return True
     return False
