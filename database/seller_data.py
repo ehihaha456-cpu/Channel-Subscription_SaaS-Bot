@@ -1,4 +1,6 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from uuid import uuid4
 from pymongo import ReturnDocument
 from database.mongo import get_database
@@ -1059,8 +1061,91 @@ async def release_referral_reward(
 
 
 async def stats(owner_id):
-    revenue=await c(PAYMENTS).aggregate([{"$match":{"owner_id":owner_id,"status":"approved"}},{"$group":{"_id":None,"total":{"$sum":"$amount"}}}]).to_list(length=1)
-    return {"users":await count_users(owner_id),"plans":await c(PLANS).count_documents({"owner_id":owner_id}),"channels":await c(CHANNELS).count_documents({"owner_id":owner_id,"active":True}),"pending":await c(PAYMENTS).count_documents({"owner_id":owner_id,"status":"pending"}),"revenue":revenue[0]["total"] if revenue else 0}
+    """Return a complete seller/clone-bot statistics snapshot.
+
+    Backward-compatible keys (``users``, ``active``, ``plans``, ``channels``,
+    ``pending`` and ``revenue``) are preserved for older dashboard callers.
+    """
+    owner_id = int(owner_id)
+    now = datetime.now(timezone.utc)
+
+    settings = await c(SETTINGS).find_one({"owner_id": owner_id}) or {}
+    timezone_name = settings.get("timezone") or "Asia/Kolkata"
+    try:
+        local_tz = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        local_tz = ZoneInfo("Asia/Kolkata")
+
+    local_now = now.astimezone(local_tz)
+    local_day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = local_day_start.astimezone(timezone.utc)
+
+    active_subscription_query = {
+        "owner_id": owner_id,
+        "active": True,
+        "expiry_date": {"$gt": now},
+    }
+    active_today_query = {
+        "owner_id": owner_id,
+        "updated_at": {"$gte": day_start_utc},
+    }
+
+    total_revenue_pipeline = [
+        {"$match": {"owner_id": owner_id, "status": "approved"}},
+        {"$group": {"_id": None, "total": {"$sum": {"$convert": {
+            "input": "$amount", "to": "double", "onError": 0, "onNull": 0,
+        }}}}},
+    ]
+    today_revenue_pipeline = [
+        {"$match": {
+            "owner_id": owner_id,
+            "status": "approved",
+            "$expr": {"$gte": [
+                {"$ifNull": ["$processed_at", {"$ifNull": ["$updated_at", "$created_at"]}]},
+                day_start_utc,
+            ]},
+        }},
+        {"$group": {"_id": None, "total": {"$sum": {"$convert": {
+            "input": "$amount", "to": "double", "onError": 0, "onNull": 0,
+        }}}}},
+    ]
+
+    (
+        total_users,
+        active_users_today,
+        active_subscribers,
+        plans,
+        channels,
+        pending,
+        total_revenue_rows,
+        today_revenue_rows,
+    ) = await asyncio.gather(
+        c(USERS).count_documents({"owner_id": owner_id}),
+        c(USERS).count_documents(active_today_query),
+        c(SUBS).count_documents(active_subscription_query),
+        c(PLANS).count_documents({"owner_id": owner_id}),
+        c(CHANNELS).count_documents({"owner_id": owner_id, "active": True}),
+        c(PAYMENTS).count_documents({"owner_id": owner_id, "status": "pending"}),
+        c(PAYMENTS).aggregate(total_revenue_pipeline).to_list(length=1),
+        c(PAYMENTS).aggregate(today_revenue_pipeline).to_list(length=1),
+    )
+
+    total_revenue = float(total_revenue_rows[0].get("total", 0) or 0) if total_revenue_rows else 0.0
+    today_revenue = float(today_revenue_rows[0].get("total", 0) or 0) if today_revenue_rows else 0.0
+
+    return {
+        "users": int(total_users),
+        "total_users": int(total_users),
+        "active_users_today": int(active_users_today),
+        "active_subscribers": int(active_subscribers),
+        "active": int(active_subscribers),
+        "plans": int(plans),
+        "channels": int(channels),
+        "pending": int(pending),
+        "today_revenue": today_revenue,
+        "total_revenue": total_revenue,
+        "revenue": total_revenue,
+    }
 
 async def reset_business_welcome(owner_id:int, account_user_id:int, peer_user_id:int):
     """Forget the first-contact claim so the next incoming message receives welcome again."""
