@@ -704,7 +704,7 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
     return {"status": status, "reason": reason, "components": components}
 
 
-async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict]) -> dict:
+async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict], progress_callback=None) -> dict:
     """Deliver sequentially and retry every non-permanent recipient error.
 
     Only blocked/deleted/unavailable accounts are reported as failed.
@@ -742,6 +742,22 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
             if result.get("status") == "pending":
                 next_pending.append(recipient)
 
+            if progress_callback is not None:
+                counts_now = Counter(str(x.get("status") or "pending") for x in final_results.values())
+                processed_now = counts_now["full"] + counts_now["partial"] + counts_now["failed"]
+                await progress_callback({
+                    "total": len(recipients),
+                    "full": counts_now["full"],
+                    "partial": counts_now["partial"],
+                    "failed": counts_now["failed"],
+                    "pending": counts_now["pending"],
+                    "processed": processed_now,
+                    "remaining": max(len(recipients) - processed_now, 0),
+                    "round": round_index + 1,
+                    "current": recipient,
+                    "state": "sending",
+                })
+
             if index < len(pending):
                 await asyncio.sleep(0.75)
 
@@ -754,6 +770,19 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
                 "Business broadcast retry round pending=%s wait=%.1fs owner=%s",
                 len(pending), delay, owner_id,
             )
+            if progress_callback is not None:
+                await progress_callback({
+                    "total": len(recipients),
+                    "full": sum(1 for x in final_results.values() if x.get("status") == "full"),
+                    "partial": sum(1 for x in final_results.values() if x.get("status") == "partial"),
+                    "failed": sum(1 for x in final_results.values() if x.get("status") == "failed"),
+                    "pending": len(pending),
+                    "processed": sum(1 for x in final_results.values() if x.get("status") in {"full", "partial", "failed"}),
+                    "remaining": len(pending),
+                    "round": round_index + 1,
+                    "state": "retry_wait",
+                    "wait_seconds": delay,
+                })
             await asyncio.sleep(delay)
 
     counts = Counter()
