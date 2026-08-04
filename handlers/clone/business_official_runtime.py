@@ -491,28 +491,30 @@ def _log_broadcast_send_error(
 
 
 def _is_permanently_unreachable(exc: Exception) -> bool:
-    """Only blocked/deleted/unavailable recipients are final failures.
+    """Return True when retrying the same recipient cannot fix delivery.
 
-    Telegram/network/rate-limit/configuration errors must not be counted as a
-    recipient failure because the user may still be reachable after retry or
-    after the broadcast content is corrected.
+    ``BUSINESS_PEER_USAGE_MISSING`` is returned by Telegram when the current
+    Business connection is not allowed to use that peer. Retrying the same
+    request does not change that permission, so the recipient must be skipped
+    and the broadcast must continue.
     """
-    text = str(exc or "").casefold()
+    text = str(exc or "").casefold().replace("-", "_")
     if isinstance(exc, Forbidden):
-        return any(token in text for token in (
-            "blocked", "bot was blocked", "user is deactivated",
-            "user deactivated", "account deactivated",
-        ))
+        # Forbidden responses are permanent for this broadcast attempt.
+        return True
     if isinstance(exc, BadRequest):
         return any(token in text for token in (
             "chat not found", "user not found", "user is deactivated",
             "peer_id_invalid", "peer id invalid", "account deleted",
+            "business_peer_usage_missing", "business peer usage missing",
+            "business connection not found", "business connection disabled",
         ))
     return False
 
 
 def _is_retryable_broadcast_error(exc: Exception) -> bool:
-    return not _is_permanently_unreachable(exc)
+    """Retry only errors that can realistically recover without changing data."""
+    return isinstance(exc, (RetryAfter, TimedOut, NetworkError))
 
 def _broadcast_failure_reason(exc: Exception) -> str:
     text = str(exc or "").casefold()
@@ -521,6 +523,9 @@ def _broadcast_failure_reason(exc: Exception) -> str:
             return "blocked_or_forbidden"
         return "no_permission"
     if isinstance(exc, BadRequest):
+        normalized = text.replace("-", "_")
+        if "business_peer_usage_missing" in normalized or "business peer usage missing" in text:
+            return "business_peer_unavailable"
         if "business connection" in text and ("not found" in text or "disabled" in text):
             return "connection_disabled"
         if "chat not found" in text:
@@ -766,12 +771,14 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
     reason = _broadcast_failure_reason(last_exc) if last_exc else "partial_delivery"
     if delivered > 0:
         status = "partial"
-    elif last_exc is not None and _is_permanently_unreachable(last_exc):
+    elif last_exc is not None and not _is_retryable_broadcast_error(last_exc):
+        # BadRequest/Forbidden will not recover by repeating the same payload.
+        # Count the recipient once, skip it, and continue with the next user.
         status = "failed"
-        await mark_business_recipient_inactive(owner_id, connection_id, chat_id, reason)
+        if _is_permanently_unreachable(last_exc):
+            await mark_business_recipient_inactive(owner_id, connection_id, chat_id, reason)
     else:
-        # Reachable/temporary/configuration failures are kept out of the final
-        # failed count. The outer sender retries them in later rounds.
+        # Only FloodWait/network/timeout errors enter the retry queue.
         status = "pending"
     logger.warning(
         "Business broadcast %s owner=%s chat=%s connection=%s components=%s "
