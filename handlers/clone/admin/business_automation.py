@@ -60,6 +60,92 @@ from services.business_automation_runtime import business_automation_runtime
 logger = logging.getLogger(__name__)
 
 
+def _broadcast_progress_text(data: dict, *, completed: bool = False) -> str:
+    total = int(data.get("total", 0))
+    full = int(data.get("full", 0))
+    partial = int(data.get("partial", 0))
+    failed = int(data.get("failed", 0))
+    pending = int(data.get("pending", 0))
+    processed = int(data.get("processed", full + partial + failed))
+    remaining = int(data.get("remaining", max(total - processed, 0)))
+    percent = int((processed / total) * 100) if total else 0
+    if completed:
+        title = "✅ Broadcast Completed"
+        status = "Status: ✅ Completed"
+    elif data.get("state") == "retry_wait":
+        title = "⚠️ Broadcast Processing..."
+        status = f"Status: 🔄 Waiting {int(float(data.get('wait_seconds', 0)))} seconds before retry"
+    else:
+        title = "📢 Broadcast Processing..."
+        status = "Status: 🟢 Sending"
+    lines = [
+        title, "", status, "",
+        f"Recipients: {total}",
+        f"✅ Fully Delivered: {full}",
+        f"⚠️ Partially Delivered: {partial}",
+        f"❌ Failed: {failed}",
+        f"🔄 Pending: {pending}",
+        f"⏳ Remaining: {remaining}",
+        "", f"📈 Progress: {processed} / {total} ({percent}%)",
+    ]
+    current = data.get("current") or {}
+    if current and not completed:
+        label = current.get("username") or current.get("first_name") or current.get("chat_id")
+        lines.extend(["", f"Current Recipient: {label}"])
+    return "\n".join(lines)
+
+
+async def _run_business_broadcast_with_progress(context, owner: int, item: dict, recipients: list[dict], chat_id: int, message_id: int):
+    from handlers.clone.business_official_runtime import send_official_business_broadcast
+    lock_key = f"ba_broadcast_running:{owner}"
+    last_edit = 0.0
+    last_processed = -1
+
+    async def progress(data: dict):
+        nonlocal last_edit, last_processed
+        now = asyncio.get_running_loop().time()
+        processed = int(data.get("processed", 0))
+        force = data.get("state") == "retry_wait"
+        if not force and processed == last_processed:
+            return
+        if not force and processed < int(data.get("total", 0)) and now - last_edit < 2.0 and processed % 5 != 0:
+            return
+        last_edit = now
+        last_processed = processed
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=_broadcast_progress_text(data),
+                reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
+            )
+        except Exception:
+            logger.debug("Business broadcast progress update skipped", exc_info=True)
+
+    try:
+        report = await send_official_business_broadcast(context, owner, item, recipients, progress_callback=progress)
+        await update_business_broadcast(owner, last_report=report, last_sent_at=datetime.now(timezone.utc))
+        final_data = dict(report)
+        final_data["processed"] = int(report.get("full", 0)) + int(report.get("partial", 0)) + int(report.get("failed", 0))
+        final_data["remaining"] = int(report.get("pending", 0))
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=_broadcast_progress_text(final_data, completed=True),
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
+        )
+    except Exception:
+        logger.exception("Business broadcast background task failed owner=%s", owner)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text="❌ Broadcast stopped because of an unexpected system error.\n\nYou can try again from Business Automation.",
+                reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
+            )
+        except Exception:
+            pass
+    finally:
+        context.application.bot_data.pop(lock_key, None)
+
+
 def _kb(rows):
     return InlineKeyboardMarkup(rows)
 
@@ -467,47 +553,28 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         item = await get_business_broadcast(owner)
         await _send_preview(q.message, item.get("text"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
     if action == "ba_bc_send":
-        from handlers.clone.business_official_runtime import send_official_business_broadcast
         item = await get_business_broadcast(owner)
         recipients = await list_business_recipients(owner)
         if not recipients:
             await q.answer("No Business Account users found.", show_alert=True); return True
+        lock_key = f"ba_broadcast_running:{owner}"
+        running = context.application.bot_data.get(lock_key)
+        if running and not running.done():
+            await q.answer("A Business Automation broadcast is already running.", show_alert=True); return True
+        initial = {"total": len(recipients), "full": 0, "partial": 0, "failed": 0, "pending": 0, "processed": 0, "remaining": len(recipients), "state": "sending"}
+        await q.edit_message_text(
+            _broadcast_progress_text(initial),
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
+        )
+        task = context.application.create_task(
+            _run_business_broadcast_with_progress(
+                context, owner, item, recipients, int(q.message.chat_id), int(q.message.message_id)
+            ),
+            name=f"business-broadcast-{owner}",
+        )
+        context.application.bot_data[lock_key] = task
         await q.answer("Broadcast started.")
-        report = await send_official_business_broadcast(context, owner, item, recipients)
-        await update_business_broadcast(owner, last_report=report, last_sent_at=datetime.now(timezone.utc))
-        reason_labels = {
-            "blocked_or_forbidden": "Blocked/forbidden",
-            "no_permission": "No reply permission",
-            "connection_disabled": "Business connection disabled",
-            "chat_unavailable": "Chat unavailable",
-            "invalid_buttons": "Invalid button or URL",
-            "invalid_media": "Invalid media",
-            "bad_request": "Telegram rejected request",
-            "rate_limited": "Rate limited",
-            "temporary_network_error": "Temporary network error",
-            "invalid_recipient": "Invalid recipient data",
-            "unknown_error": "Unknown error",
-        }
-        lines = [
-            "✅ Broadcast completed.", "",
-            f"Recipients: {report.get('total', 0)}",
-            f"✅ Fully delivered: {report.get('full', 0)}",
-            f"⚠️ Partially delivered: {report.get('partial', 0)}",
-            f"❌ Failed (blocked/deleted only): {report.get('failed', 0)}",
-            f"🔄 Pending after automatic retries: {report.get('pending', 0)}",
-        ]
-        reasons = report.get("reasons") or {}
-        if reasons:
-            lines.extend(["", "Delivery details:"])
-            for key, count in sorted(reasons.items(), key=lambda x: (-x[1], x[0])):
-                lines.append(f"• {reason_labels.get(key, key.replace('_', ' ').title())}: {count}")
-        component_failures = report.get("component_failures") or {}
-        if component_failures:
-            labels = {"media": "Media missing", "text": "Text missing", "buttons": "Buttons missing"}
-            lines.extend(["", "Partial delivery details:"])
-            for key, count in sorted(component_failures.items(), key=lambda x: (-x[1], x[0])):
-                lines.append(f"• {labels.get(key, key.title())}: {count}")
-        await q.message.reply_text("\n".join(lines), reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]])); return True
+        return True
     if action == "ba_welcome":
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_toggle":
