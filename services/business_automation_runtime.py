@@ -244,6 +244,13 @@ class BusinessAutomationRuntime:
                     if username:
                         value = f"https://t.me/{username}?start={feature}"
                         item_type = "url"
+                elif item_type == "clone":
+                    if bot_record is None:
+                        bot_record = await get_bot_by_data_owner_id(int(owner_id))
+                    username = str((bot_record or {}).get("bot_username") or "").lstrip("@")
+                    if username:
+                        value = f"https://t.me/{username}?start={value}"
+                        item_type = "url"
                 if item_type == "url" and value:
                     clean.append(Button.url(str(item.get("text") or "Open")[:64], value))
             if clean:
