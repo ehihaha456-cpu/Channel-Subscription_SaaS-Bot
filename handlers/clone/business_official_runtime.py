@@ -451,6 +451,45 @@ async def _broadcast_api_call(call, *, attempts: int = 12):
 
 
 
+def _telegram_error_details(exc: Exception) -> str:
+    """Return a safe, useful Telegram exception description for Render logs."""
+    parts = [f"type={type(exc).__name__}"]
+    message = str(exc or "").strip()
+    if message:
+        parts.append(f"message={message}")
+
+    # python-telegram-bot exceptions may expose extra response information on
+    # different versions. Read it defensively so diagnostics never break the
+    # broadcast itself.
+    for attr in ("retry_after", "new_chat_id", "migrate_to_chat_id"):
+        value = getattr(exc, attr, None)
+        if value not in (None, ""):
+            parts.append(f"{attr}={value}")
+
+    return " | ".join(parts)
+
+
+def _log_broadcast_send_error(
+    stage: str,
+    exc: Exception,
+    *,
+    owner_id: int | None = None,
+    chat_id: int | None = None,
+    connection_id: str = "",
+    media_type: str = "",
+    file_id: str = "",
+) -> None:
+    # Log only a short file-id prefix; the complete identifier is unnecessary
+    # and makes Render logs hard to read.
+    file_hint = f"{file_id[:18]}..." if file_id else ""
+    logger.warning(
+        "Business broadcast Telegram error stage=%s owner=%s chat=%s "
+        "connection=%s media_type=%s file_id=%s reason=%s",
+        stage, owner_id, chat_id, connection_id, media_type, file_hint,
+        _telegram_error_details(exc),
+    )
+
+
 def _is_permanently_unreachable(exc: Exception) -> bool:
     """Only blocked/deleted/unavailable recipients are final failures.
 
@@ -546,6 +585,12 @@ async def _send_broadcast_media(
             register_feature_origin(sent, text=text, markup=markup)
             return {"media": True, "text": True, "buttons": True, "errors": []}
         except Exception as exc:
+            _log_broadcast_send_error(
+                "combined_media", exc,
+                chat_id=common.get("chat_id"),
+                connection_id=str(common.get("business_connection_id") or ""),
+                media_type=kind, file_id=fid,
+            )
             errors.append(("combined_media", exc))
             return {"media": False, "text": not bool(text), "buttons": markup is None, "errors": errors}
 
@@ -576,6 +621,13 @@ async def _send_broadcast_media(
                     await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **kwargs))
         except Exception as exc:
             media_ok = False
+            _log_broadcast_send_error(
+                "visual_media", exc,
+                chat_id=common.get("chat_id"),
+                connection_id=str(common.get("business_connection_id") or ""),
+                media_type="album" if len(visual) > 1 else str(visual[0].get("type") or ""),
+                file_id=str(visual[0].get("file_id") or "") if visual else "",
+            )
             errors.append(("visual_media", exc))
 
     remaining_slots = max(0, 10 - len(visual))
@@ -593,6 +645,12 @@ async def _send_broadcast_media(
                 await _broadcast_api_call(lambda fid=fid, kwargs=kwargs: context.bot.send_document(document=fid, **kwargs))
         except Exception as exc:
             media_ok = False
+            _log_broadcast_send_error(
+                "other_media", exc,
+                chat_id=common.get("chat_id"),
+                connection_id=str(common.get("business_connection_id") or ""),
+                media_type=kind, file_id=fid,
+            )
             errors.append(("other_media", exc))
 
     text_ok = (not bool(text)) or caption_used
@@ -610,6 +668,11 @@ async def _send_broadcast_media(
             text_ok = True
             buttons_ok = True
         except Exception as exc:
+            _log_broadcast_send_error(
+                "buttons_or_text", exc,
+                chat_id=common.get("chat_id"),
+                connection_id=str(common.get("business_connection_id") or ""),
+            )
             errors.append(("buttons_or_text", exc))
             # Invalid markup must not block plain text delivery.
             if markup is not None and text and not caption_used:
@@ -617,6 +680,11 @@ async def _send_broadcast_media(
                     await _broadcast_api_call(lambda: context.bot.send_message(text=text, **common))
                     text_ok = True
                 except Exception as fallback_exc:
+                    _log_broadcast_send_error(
+                        "text_fallback", fallback_exc,
+                        chat_id=common.get("chat_id"),
+                        connection_id=str(common.get("business_connection_id") or ""),
+                    )
                     errors.append(("text_fallback", fallback_exc))
 
     return {"media": media_ok, "text": text_ok, "buttons": buttons_ok, "errors": errors}
@@ -667,12 +735,20 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
             components["text"] = True
             components["buttons"] = True
         except Exception as exc:
+            _log_broadcast_send_error(
+                "message", exc, owner_id=owner_id, chat_id=chat_id,
+                connection_id=connection_id,
+            )
             errors.append(("message", exc))
             if markup is not None and rendered_text:
                 try:
                     await _broadcast_api_call(lambda: context.bot.send_message(text=rendered_text, **common))
                     components["text"] = True
                 except Exception as retry_exc:
+                    _log_broadcast_send_error(
+                        "message_text_fallback", retry_exc, owner_id=owner_id,
+                        chat_id=chat_id, connection_id=connection_id,
+                    )
                     errors.append(("text_fallback", retry_exc))
 
     required = [
@@ -698,8 +774,10 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
         # failed count. The outer sender retries them in later rounds.
         status = "pending"
     logger.warning(
-        "Business broadcast %s owner=%s chat=%s components=%s reason=%s",
-        status, owner_id, chat_id, components, reason,
+        "Business broadcast %s owner=%s chat=%s connection=%s components=%s "
+        "reason=%s telegram_error=%s",
+        status, owner_id, chat_id, connection_id, components, reason,
+        _telegram_error_details(last_exc) if last_exc is not None else "none",
     )
     return {"status": status, "reason": reason, "components": components}
 
@@ -728,9 +806,11 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
                 raise
             except Exception as exc:
                 logger.exception(
-                    "Business broadcast recipient deferred owner=%s round=%s index=%s/%s chat=%s error=%s",
+                    "Business broadcast recipient deferred owner=%s round=%s index=%s/%s "
+                    "chat=%s connection=%s error=%s",
                     owner_id, round_index + 1, index, len(pending),
-                    recipient.get("chat_id"), type(exc).__name__,
+                    recipient.get("chat_id"), recipient.get("connection_id"),
+                    _telegram_error_details(exc),
                 )
                 result = {
                     "status": "failed" if _is_permanently_unreachable(exc) else "pending",
