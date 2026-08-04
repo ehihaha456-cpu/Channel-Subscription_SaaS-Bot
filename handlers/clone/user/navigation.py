@@ -144,9 +144,9 @@ async def handle(self, update, context, q, owner, action):
         await self.send_welcome(q.message, context, settings, q.from_user)
         return True
     if action == 'c_plans':
-        await self.show_plans(q, owner, True)
+        await self.show_plans(q, owner, True, context)
         return True
     if action in {'c_buy', 'c_renew'}:
-        await self.show_plans(q, owner, True)
+        await self.show_plans(q, owner, True, context)
         return True
     return False
