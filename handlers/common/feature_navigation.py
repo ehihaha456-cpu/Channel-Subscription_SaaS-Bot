@@ -10,10 +10,27 @@ _MAX = 5000
 _ORIGINS: OrderedDict[tuple[int, int], dict[str, Any]] = OrderedDict()
 
 
+def _message_key(message) -> tuple[int, int] | None:
+    """Return a stable key for normal and Telegram Business messages."""
+    if message is None:
+        return None
+    message_id = getattr(message, "message_id", None)
+    chat_id = getattr(message, "chat_id", None)
+    if chat_id is None:
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+    if message_id is None or chat_id is None:
+        return None
+    try:
+        return int(chat_id), int(message_id)
+    except (TypeError, ValueError):
+        return None
+
+
 def register_feature_origin(message, *, text: str = "", markup=None) -> None:
-    if message is None or not getattr(message, "message_id", None) or not getattr(message, "chat_id", None):
+    key = _message_key(message)
+    if key is None:
         return
-    key = (int(message.chat_id), int(message.message_id))
     _ORIGINS[key] = {"text": str(text or ""), "markup": markup}
     _ORIGINS.move_to_end(key)
     while len(_ORIGINS) > _MAX:
@@ -24,7 +41,9 @@ def capture_feature_origin(query, context) -> bool:
     message = getattr(query, "message", None)
     if message is None:
         return False
-    key = (int(message.chat_id), int(message.message_id))
+    key = _message_key(message)
+    if key is None:
+        return False
     origin = _ORIGINS.get(key)
     if not origin:
         # Business Automation messages can be created by a different bot
@@ -35,8 +54,23 @@ def capture_feature_origin(query, context) -> bool:
         if not text and markup is None:
             return False
         origin = {"text": text, "markup": markup}
+
+    # Persist the origin by message ID as well as in PTB context. Telegram
+    # Business callbacks can be handled by a different Application instance,
+    # where user_data may not be the same dictionary. The process-wide message
+    # registry keeps Back navigation tied to the exact broadcast message.
+    _ORIGINS[key] = {"text": str(origin.get("text") or ""), "markup": origin.get("markup")}
+    _ORIGINS.move_to_end(key)
+    while len(_ORIGINS) > _MAX:
+        _ORIGINS.popitem(last=False)
+
+    payload = {**_ORIGINS[key], "chat_id": key[0], "message_id": key[1]}
     try:
-        context.user_data["clone_feature_origin"] = {**origin, "chat_id": key[0], "message_id": key[1]}
+        context.user_data["clone_feature_origin"] = payload
+        try:
+            context.chat_data["clone_feature_origin"] = payload
+        except Exception:
+            pass
         return True
     except Exception:
         # Origin tracking must never stop the actual feature button action.
@@ -44,11 +78,34 @@ def capture_feature_origin(query, context) -> bool:
 
 
 def feature_back_callback(context) -> str:
-    return "c_return_origin" if context.user_data.get("clone_feature_origin") else "c_home"
+    try:
+        if context.user_data.get("clone_feature_origin"):
+            return "c_return_origin"
+    except Exception:
+        pass
+    try:
+        if context.chat_data.get("clone_feature_origin"):
+            return "c_return_origin"
+    except Exception:
+        pass
+    return "c_home"
 
 
 async def restore_feature_origin(query, context) -> bool:
-    origin = context.user_data.pop("clone_feature_origin", None)
+    origin = None
+    try:
+        origin = context.user_data.pop("clone_feature_origin", None)
+    except Exception:
+        pass
+    if not origin:
+        try:
+            origin = context.chat_data.pop("clone_feature_origin", None)
+        except Exception:
+            pass
+    if not origin:
+        key = _message_key(getattr(query, "message", None))
+        if key is not None:
+            origin = _ORIGINS.get(key)
     if not origin:
         return False
     text = str(origin.get("text") or "")
