@@ -8,6 +8,7 @@ from telegram.error import TelegramError
 
 _MAX = 5000
 _ORIGINS: OrderedDict[tuple[int, int], dict[str, Any]] = OrderedDict()
+_USER_ORIGINS: OrderedDict[int, dict[str, Any]] = OrderedDict()
 
 
 def _message_key(message) -> tuple[int, int] | None:
@@ -25,6 +26,25 @@ def _message_key(message) -> tuple[int, int] | None:
         return int(chat_id), int(message_id)
     except (TypeError, ValueError):
         return None
+
+
+def _user_key(query) -> int | None:
+    user = getattr(query, "from_user", None)
+    user_id = getattr(user, "id", None)
+    try:
+        return int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _remember_user_origin(query, payload: dict[str, Any]) -> None:
+    user_id = _user_key(query)
+    if user_id is None:
+        return
+    _USER_ORIGINS[user_id] = dict(payload)
+    _USER_ORIGINS.move_to_end(user_id)
+    while len(_USER_ORIGINS) > _MAX:
+        _USER_ORIGINS.popitem(last=False)
 
 
 def register_feature_origin(message, *, text: str = "", markup=None) -> None:
@@ -65,6 +85,11 @@ def capture_feature_origin(query, context) -> bool:
         _ORIGINS.popitem(last=False)
 
     payload = {**_ORIGINS[key], "chat_id": key[0], "message_id": key[1]}
+    # Telegram Business callbacks and the normal clone-bot callback can be
+    # processed by different PTB Application instances. Keep a process-wide
+    # per-user copy so the Back button can still restore the exact message
+    # after that message has been edited into Plans/Profile/etc.
+    _remember_user_origin(query, payload)
     try:
         context.user_data["clone_feature_origin"] = payload
         try:
@@ -93,34 +118,67 @@ def feature_back_callback(context) -> str:
 
 async def restore_feature_origin(query, context) -> bool:
     origin = None
+    source = ""
     try:
-        origin = context.user_data.pop("clone_feature_origin", None)
+        origin = context.user_data.get("clone_feature_origin")
+        if origin:
+            source = "user_data"
     except Exception:
         pass
     if not origin:
         try:
-            origin = context.chat_data.pop("clone_feature_origin", None)
+            origin = context.chat_data.get("clone_feature_origin")
+            if origin:
+                source = "chat_data"
         except Exception:
             pass
+    user_id = _user_key(query)
+    if not origin and user_id is not None:
+        origin = _USER_ORIGINS.get(user_id)
+        if origin:
+            source = "user_registry"
     if not origin:
         key = _message_key(getattr(query, "message", None))
         if key is not None:
             origin = _ORIGINS.get(key)
+            if origin:
+                source = "message_registry"
     if not origin:
         return False
+
     text = str(origin.get("text") or "")
     markup = origin.get("markup")
     try:
-        if getattr(query.message, "caption", None) is not None or getattr(query.message, "photo", None) or getattr(query.message, "video", None) or getattr(query.message, "document", None) or getattr(query.message, "animation", None):
+        message = getattr(query, "message", None)
+        has_media = bool(
+            getattr(message, "caption", None) is not None
+            or getattr(message, "photo", None)
+            or getattr(message, "video", None)
+            or getattr(message, "document", None)
+            or getattr(message, "animation", None)
+            or getattr(message, "audio", None)
+        )
+        if has_media:
             await query.edit_message_caption(caption=text or None, reply_markup=markup)
         else:
             await query.edit_message_text(text=text or "Choose an option below.", reply_markup=markup)
-        register_feature_origin(query.message, text=text, markup=markup)
-        return True
     except TelegramError as exc:
-        # Treat an already-restored message as success. Falling back to c_home
-        # here would create the normal Clone Bot welcome message.
-        if "message is not modified" in str(exc).casefold():
-            register_feature_origin(query.message, text=text, markup=markup)
-            return True
-        return False
+        if "message is not modified" not in str(exc).casefold():
+            return False
+
+    # Remove the transient context only after restoration succeeds. Keep the
+    # process-wide user origin so repeated feature -> Back navigation from the
+    # same Business Automation message remains reliable.
+    try:
+        context.user_data.pop("clone_feature_origin", None)
+    except Exception:
+        pass
+    try:
+        context.chat_data.pop("clone_feature_origin", None)
+    except Exception:
+        pass
+    register_feature_origin(query.message, text=text, markup=markup)
+    if user_id is not None:
+        _remember_user_origin(query, {**origin, "text": text, "markup": markup})
+    return True
+
