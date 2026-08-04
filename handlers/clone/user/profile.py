@@ -1,10 +1,11 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
+from handlers.common.feature_navigation import feature_back_callback
 
 
 async def handle(self, update, context, q, owner, action):
-    back_keyboard = self.back(clone_feature_back_target(context))
+    back_keyboard = self.back(feature_back_callback(context))
     if action == 'c_profile':
         try:
             timezone_name = await self.seller_timezone(owner)

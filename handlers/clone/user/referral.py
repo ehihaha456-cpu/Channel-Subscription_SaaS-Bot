@@ -1,10 +1,11 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
+from handlers.common.feature_navigation import feature_back_callback
 
 
 async def handle(self, update, context, q, owner, action):
-    back_keyboard = self.back(clone_feature_back_target(context))
+    back_keyboard = self.back(feature_back_callback(context))
     if action == 'c_referral':
         me = await context.bot.get_me()
         settings = await get_seller_settings(owner)
@@ -14,7 +15,7 @@ async def handle(self, update, context, q, owner, action):
         referral_link = f'https://t.me/{me.username}?start=ref_{q.from_user.id}'
         share_url = 'https://t.me/share/url?url=' + referral_link + '&text=Join%20this%20subscription%20bot'
         text = f'🎁 Referral Program\n\n👥 Total Referrals: {total}\n✅ Successful Referrals: {successful}\n🎉 Reward: {reward_days} Free Days per successful referral.\n\n🔗 Your Referral Link:\n{referral_link}'
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('📤 Share Referral Link', url=share_url)], [InlineKeyboardButton('⬅ Back', callback_data=clone_feature_back_target(context))]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('📤 Share Referral Link', url=share_url)], [InlineKeyboardButton('⬅ Back', callback_data='c_home')]])
         await self.safe_query_message(q, text, kb)
         return True
     if action == 'c_referral_unlock':
@@ -31,12 +32,12 @@ async def handle(self, update, context, q, owner, action):
         referral_link = f'https://t.me/{me.username}?start=ref_{q.from_user.id}'
         share_url = 'https://t.me/share/url?url=' + referral_link + '&text=Join%20this%20bot'
         if not enabled or not target_chat_id:
-            await self.safe_query_message(q, '🔓 Referral Unlock is not available right now.\n\nPlease contact support.', InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=clone_feature_back_target(context))]]))
+            await self.safe_query_message(q, '🔓 Referral Unlock is not available right now.\n\nPlease contact support.', InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_home')]]))
             return True
         if counted < required:
             count_instruction = f'Invite {required} new user(s) with your referral link.\n\n' if count_mode == 'start' else f'Invite {required} user(s) who complete a subscription.\n\n'
             text = '🔓 Unlock Private Access\n\n' + count_instruction + f'Progress: {progress}/{required}\n\nYour unique referral link:\n{referral_link}\n\nAfter the required referrals are completed, open this button again to receive the private invite link.'
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton('📤 Share Referral Link', url=share_url)], [InlineKeyboardButton('🔄 Check Progress', callback_data='c_referral_unlock')], [InlineKeyboardButton('⬅ Back', callback_data=clone_feature_back_target(context))]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('📤 Share Referral Link', url=share_url)], [InlineKeyboardButton('🔄 Check Progress', callback_data='c_referral_unlock')], [InlineKeyboardButton('⬅ Back', callback_data='c_home')]])
             await self.safe_query_message(q, text, kb)
             return True
         saved = await get_referral_unlock(owner, q.from_user.id)
@@ -48,8 +49,8 @@ async def handle(self, update, context, q, owner, action):
                 await save_referral_unlock(owner, q.from_user.id, int(target_chat_id), invite_link, duration_days)
             except Exception:
                 logger.exception('Referral unlock invite failed owner=%s user=%s', owner, q.from_user.id)
-                await self.safe_query_message(q, '❌ The private invite link could not be created.\n\nPlease contact support.', InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=clone_feature_back_target(context))]]))
+                await self.safe_query_message(q, '❌ The private invite link could not be created.\n\nPlease contact support.', InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_home')]]))
                 return True
-        await self.safe_query_message(q, f'🎉 Referral Target Completed!\n\nProgress: {counted}/{required}\nDestination: {target_title}\n\nUse your private one-time invite link below.', InlineKeyboardMarkup([[InlineKeyboardButton('🔓 Join Now', url=invite_link)], [InlineKeyboardButton('⬅ Back', callback_data=clone_feature_back_target(context))]]))
+        await self.safe_query_message(q, f'🎉 Referral Target Completed!\n\nProgress: {counted}/{required}\nDestination: {target_title}\n\nUse your private one-time invite link below.', InlineKeyboardMarkup([[InlineKeyboardButton('🔓 Join Now', url=invite_link)], [InlineKeyboardButton('⬅ Back', callback_data='c_home')]]))
         return True
     return False

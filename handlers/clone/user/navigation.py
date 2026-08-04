@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard
+from handlers.common.feature_navigation import capture_feature_origin, restore_feature_origin, feature_back_callback
 from database.business_automation import get_business_welcome
 from handlers.common.clone_context import MAIN_BOT_USERNAME
 from utils.branding import append_branding
@@ -107,7 +108,13 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
 
 
 async def handle(self, update, context, q, owner, action):
-    back_keyboard = self.back(clone_feature_back_target(context))
+    if action == 'c_return_origin':
+        if await restore_feature_origin(q, context):
+            return True
+        action = 'c_home'
+    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'}:
+        capture_feature_origin(q, context)
+    back_keyboard = self.back(feature_back_callback(context))
     if action == 'seller_current_plan':
         await q.edit_message_text(await current_plan_text(owner), reply_markup=self.limit_keyboard('a_home'))
         return True
@@ -122,24 +129,6 @@ async def handle(self, update, context, q, owner, action):
             lines.append(f"• {p.get('name', 'Plan')} — ₹{p.get('price', 0)} / {p.get('duration_days', 30)} days")
         lines += ['', 'Contact the SaaS owner to activate a plan.']
         await q.edit_message_text('\n'.join(lines), reply_markup=self.back('a_home'))
-        return True
-    if action == 'c_broadcast_home':
-        item = context.user_data.get('clone_broadcast_origin_item')
-        if not item:
-            from database.broadcast import get_seller_broadcast_draft
-            item = await get_seller_broadcast_draft(owner)
-        try:
-            await q.message.delete()
-        except TelegramError:
-            pass
-        await self._send_seller_broadcast_item(context.bot, q.from_user.id, item, {
-            'user_id': q.from_user.id,
-            'name': q.from_user.full_name,
-            'first_name': q.from_user.first_name,
-            'username': q.from_user.username,
-        })
-        context.user_data.pop('clone_feature_back_target', None)
-        context.user_data.pop('clone_broadcast_origin_item', None)
         return True
     if action in {'ba_user_home', 'c_home'}:
         business_connection_id = _business_connection_id(q.message)
