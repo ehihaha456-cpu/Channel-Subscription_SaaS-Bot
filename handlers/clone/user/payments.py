@@ -4,7 +4,7 @@ from handlers.common.clone_context import *
 
 
 async def handle(self, update, context, q, owner, action):
-    back_keyboard = self.back('c_home')
+    back_keyboard = self.back(clone_feature_back_target(context))
     if action.startswith('c_select_'):
         plan = await get_plan(owner, action.replace('c_select_', ''))
         if not plan:

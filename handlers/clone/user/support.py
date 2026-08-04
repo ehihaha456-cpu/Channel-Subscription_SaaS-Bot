@@ -4,7 +4,7 @@ from handlers.common.clone_context import *
 
 
 async def handle(self, update, context, q, owner, action):
-    back_keyboard = self.back('c_home')
+    back_keyboard = self.back(clone_feature_back_target(context))
     if action == 'c_support':
         support = await get_live_support_settings(owner)
         if not support.get('enabled'):

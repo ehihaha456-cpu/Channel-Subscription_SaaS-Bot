@@ -60,39 +60,54 @@ def _business_media(item: dict) -> list[dict]:
 
 
 async def _send_business_welcome(update, context, owner: int, business_connection_id: str):
-    """Restore the configured Business welcome on the same callback message."""
+    """Return feature navigation to the configured Business welcome, not /start."""
     item = await get_business_welcome(owner)
     user = update.effective_user
     text = _render_business_variables(str(item.get("text") or "Welcome!"), user)
     text = await append_branding(text)
     markup = build_editor_keyboard(_render_business_buttons(item.get("buttons") or [], user))
-    q = update.callback_query
-    message = q.message
-    has_media = bool(
-        getattr(message, "photo", None)
-        or getattr(message, "video", None)
-        or getattr(message, "animation", None)
-        or getattr(message, "document", None)
-        or getattr(message, "audio", None)
-    )
+    chat_id = update.effective_chat.id
+    media = _business_media(item)
+    common = {
+        "chat_id": chat_id,
+        "business_connection_id": business_connection_id,
+    }
 
-    try:
-        if has_media:
-            await q.edit_message_caption(caption=text, reply_markup=markup)
-        else:
-            await q.edit_message_text(
-                text=text,
-                reply_markup=markup,
-                disable_web_page_preview=True,
-            )
-    except Exception as exc:
-        # Telegram reports this when Back restores content that is already open.
-        if "message is not modified" not in str(exc).lower():
-            raise
+    if not media:
+        await context.bot.send_message(text=text, reply_markup=markup, **common)
+        return
+
+    if len(media) > 1:
+        album = []
+        for entry in media:
+            kind = str(entry.get("type") or "document").lower()
+            file_id = str(entry.get("file_id") or "")
+            if kind == "photo":
+                album.append(InputMediaPhoto(media=file_id))
+            elif kind == "video":
+                album.append(InputMediaVideo(media=file_id))
+            else:
+                album.append(InputMediaDocument(media=file_id))
+        await context.bot.send_media_group(media=album, **common)
+        await context.bot.send_message(text=text, reply_markup=markup, **common)
+        return
+
+    entry = media[0]
+    kind = str(entry.get("type") or "document").lower()
+    file_id = str(entry.get("file_id") or "")
+    kwargs = {**common, "caption": text, "reply_markup": markup}
+    if kind == "photo":
+        await context.bot.send_photo(photo=file_id, **kwargs)
+    elif kind == "video":
+        await context.bot.send_video(video=file_id, **kwargs)
+    elif kind == "animation":
+        await context.bot.send_animation(animation=file_id, **kwargs)
+    else:
+        await context.bot.send_document(document=file_id, **kwargs)
 
 
 async def handle(self, update, context, q, owner, action):
-    back_keyboard = self.back('c_home')
+    back_keyboard = self.back(clone_feature_back_target(context))
     if action == 'seller_current_plan':
         await q.edit_message_text(await current_plan_text(owner), reply_markup=self.limit_keyboard('a_home'))
         return True
@@ -107,6 +122,24 @@ async def handle(self, update, context, q, owner, action):
             lines.append(f"• {p.get('name', 'Plan')} — ₹{p.get('price', 0)} / {p.get('duration_days', 30)} days")
         lines += ['', 'Contact the SaaS owner to activate a plan.']
         await q.edit_message_text('\n'.join(lines), reply_markup=self.back('a_home'))
+        return True
+    if action == 'c_broadcast_home':
+        item = context.user_data.get('clone_broadcast_origin_item')
+        if not item:
+            from database.broadcast import get_seller_broadcast_draft
+            item = await get_seller_broadcast_draft(owner)
+        try:
+            await q.message.delete()
+        except TelegramError:
+            pass
+        await self._send_seller_broadcast_item(context.bot, q.from_user.id, item, {
+            'user_id': q.from_user.id,
+            'name': q.from_user.full_name,
+            'first_name': q.from_user.first_name,
+            'username': q.from_user.username,
+        })
+        context.user_data.pop('clone_feature_back_target', None)
+        context.user_data.pop('clone_broadcast_origin_item', None)
         return True
     if action in {'ba_user_home', 'c_home'}:
         business_connection_id = _business_connection_id(q.message)
