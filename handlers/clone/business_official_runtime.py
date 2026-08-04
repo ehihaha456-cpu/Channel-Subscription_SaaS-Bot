@@ -771,15 +771,14 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
     reason = _broadcast_failure_reason(last_exc) if last_exc else "partial_delivery"
     if delivered > 0:
         status = "partial"
-    elif last_exc is not None and not _is_retryable_broadcast_error(last_exc):
-        # BadRequest/Forbidden will not recover by repeating the same payload.
-        # Count the recipient once, skip it, and continue with the next user.
-        status = "failed"
-        if _is_permanently_unreachable(last_exc):
-            await mark_business_recipient_inactive(owner_id, connection_id, chat_id, reason)
+    elif last_exc is not None:
+        # Never stop the first delivery pass for a Telegram rejection.
+        # The caller moves this recipient to the end of the retry queue and
+        # immediately continues with the next recipient. Final failure is
+        # decided only after all configured retry rounds are exhausted.
+        status = "retry"
     else:
-        # Only FloodWait/network/timeout errors enter the retry queue.
-        status = "pending"
+        status = "retry"
     logger.warning(
         "Business broadcast %s owner=%s chat=%s connection=%s components=%s "
         "reason=%s telegram_error=%s",
@@ -790,21 +789,25 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
 
 
 async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict], progress_callback=None) -> dict:
-    """Deliver sequentially and retry every non-permanent recipient error.
+    """Deliver sequentially with an end-of-queue retry strategy.
 
-    Only blocked/deleted/unavailable accounts are reported as failed.
-    Telegram flood waits, network errors and other recoverable failures are
-    retried in multiple rounds and otherwise reported as pending, never as a
-    recipient failure.
+    A Telegram rejection never blocks the current pass and is not marked as
+    failed immediately. The recipient is moved to the end of a retry queue,
+    while delivery continues with the next recipient. After three retry
+    rounds, permanent Telegram rejections become failed; temporary/system
+    errors remain pending for a later run.
     """
     final_results = {}
-    pending = list(recipients)
-    retry_delays = (3.0, 10.0, 30.0, 60.0)
+    retry_queue = list(recipients)
+    # Initial pass + three retry rounds.
+    retry_delays = (3.0, 10.0, 30.0)
+    total_rounds = len(retry_delays) + 1
 
-    for round_index in range(len(retry_delays) + 1):
-        next_pending = []
-        for index, recipient in enumerate(pending, 1):
+    for round_index in range(total_rounds):
+        next_retry_queue = []
+        for index, recipient in enumerate(retry_queue, 1):
             key = (str(recipient.get("connection_id") or ""), int(recipient.get("chat_id") or 0))
+            last_exception = None
             try:
                 result = await _send_one_official_business_broadcast(
                     context, owner_id, item, recipient
@@ -812,61 +815,105 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                last_exception = exc
                 logger.exception(
-                    "Business broadcast recipient deferred owner=%s round=%s index=%s/%s "
+                    "Business broadcast recipient queued for retry owner=%s round=%s index=%s/%s "
                     "chat=%s connection=%s error=%s",
-                    owner_id, round_index + 1, index, len(pending),
+                    owner_id, round_index + 1, index, len(retry_queue),
                     recipient.get("chat_id"), recipient.get("connection_id"),
                     _telegram_error_details(exc),
                 )
                 result = {
-                    "status": "failed" if _is_permanently_unreachable(exc) else "pending",
+                    "status": "retry",
                     "reason": _broadcast_failure_reason(exc),
                     "components": {},
+                    "retryable": _is_retryable_broadcast_error(exc),
+                    "permanent": _is_permanently_unreachable(exc),
                 }
 
+            status = str(result.get("status") or "retry")
+            if status == "retry":
+                # Save enough classification data for finalization after the
+                # last retry round. _send_one already converted API errors to
+                # a reason, so infer permanence from the known reason when an
+                # exception object is unavailable here.
+                reason = str(result.get("reason") or "telegram_rejected")
+                permanent_reason = reason in {
+                    "blocked", "blocked_or_forbidden", "deleted_account",
+                    "chat_not_found", "chat_unavailable", "no_permission",
+                    "business_peer_unavailable", "business_connection_invalid",
+                    "connection_disabled", "peer_invalid", "forbidden",
+                    "invalid_buttons", "invalid_media", "bad_request",
+                }
+                is_last_round = round_index == total_rounds - 1
+                if not is_last_round:
+                    result["status"] = "retry"
+                    next_retry_queue.append(recipient)
+                elif bool(result.get("permanent")) or permanent_reason:
+                    result["status"] = "failed"
+                    try:
+                        await mark_business_recipient_inactive(
+                            owner_id, str(recipient.get("connection_id") or ""),
+                            int(recipient.get("chat_id") or 0), reason
+                        )
+                    except Exception:
+                        logger.debug("Could not mark business recipient inactive", exc_info=True)
+                else:
+                    # Temporary/system errors are not reported as permanent
+                    # failures after retries; keep them pending for a future run.
+                    result["status"] = "pending"
+
             final_results[key] = result
-            if result.get("status") == "pending":
-                next_pending.append(recipient)
 
             if progress_callback is not None:
-                counts_now = Counter(str(x.get("status") or "pending") for x in final_results.values())
-                processed_now = counts_now["full"] + counts_now["partial"] + counts_now["failed"]
+                counts_now = Counter(str(x.get("status") or "retry") for x in final_results.values())
+                completed_now = counts_now["full"] + counts_now["partial"] + counts_now["failed"]
+                retry_count = counts_now["retry"] + counts_now["pending"] + len(next_retry_queue)
+                # Count each recipient only once even while it moves through
+                # retry rounds. Remaining means not yet finally resolved.
+                unresolved = sum(1 for x in final_results.values() if str(x.get("status")) in {"retry", "pending"})
+                untouched = max(len(recipients) - len(final_results), 0)
                 await progress_callback({
                     "total": len(recipients),
                     "full": counts_now["full"],
                     "partial": counts_now["partial"],
                     "failed": counts_now["failed"],
                     "pending": counts_now["pending"],
-                    "processed": processed_now,
-                    "remaining": max(len(recipients) - processed_now, 0),
+                    "retry_queue": unresolved,
+                    "processed": completed_now,
+                    "remaining": unresolved + untouched,
                     "round": round_index + 1,
                     "current": recipient,
                     "state": "sending",
                 })
 
-            if index < len(pending):
+            # Move immediately to the next recipient; rejected recipients are
+            # retried only after the current pass finishes.
+            if index < len(retry_queue):
                 await asyncio.sleep(0.75)
 
-        pending = next_pending
-        if not pending:
+        retry_queue = next_retry_queue
+        if not retry_queue:
             break
         if round_index < len(retry_delays):
             delay = retry_delays[round_index]
             logger.warning(
-                "Business broadcast retry round pending=%s wait=%.1fs owner=%s",
-                len(pending), delay, owner_id,
+                "Business broadcast retry queue size=%s round=%s wait=%.1fs owner=%s",
+                len(retry_queue), round_index + 2, delay, owner_id,
             )
             if progress_callback is not None:
+                counts_now = Counter(str(x.get("status") or "retry") for x in final_results.values())
+                resolved = counts_now["full"] + counts_now["partial"] + counts_now["failed"]
                 await progress_callback({
                     "total": len(recipients),
-                    "full": sum(1 for x in final_results.values() if x.get("status") == "full"),
-                    "partial": sum(1 for x in final_results.values() if x.get("status") == "partial"),
-                    "failed": sum(1 for x in final_results.values() if x.get("status") == "failed"),
-                    "pending": len(pending),
-                    "processed": sum(1 for x in final_results.values() if x.get("status") in {"full", "partial", "failed"}),
-                    "remaining": len(pending),
-                    "round": round_index + 1,
+                    "full": counts_now["full"],
+                    "partial": counts_now["partial"],
+                    "failed": counts_now["failed"],
+                    "pending": counts_now["pending"],
+                    "retry_queue": len(retry_queue),
+                    "processed": resolved,
+                    "remaining": len(retry_queue),
+                    "round": round_index + 2,
                     "state": "retry_wait",
                     "wait_seconds": delay,
                 })
@@ -877,6 +924,8 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
     component_failures = Counter()
     for result in final_results.values():
         status = str(result.get("status") or "pending")
+        if status == "retry":
+            status = "pending"
         counts[status] += 1
         reason = str(result.get("reason") or "")
         if reason:
@@ -891,6 +940,7 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
         "partial": counts["partial"],
         "failed": counts["failed"],
         "pending": counts["pending"],
+        "retry_queue": 0,
         "reasons": dict(reasons),
         "component_failures": dict(component_failures),
     }
