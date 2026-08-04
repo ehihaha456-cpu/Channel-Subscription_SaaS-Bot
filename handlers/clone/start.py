@@ -3,6 +3,24 @@
 from handlers.common.clone_context import *
 
 
+class _StartFeatureQuery:
+    """Small callback-query adapter used by Clone Bot deep-link starts."""
+
+    def __init__(self, message, user, data: str):
+        self.message = message
+        self.from_user = user
+        self.data = data
+
+    async def answer(self, *args, **kwargs):
+        return None
+
+    async def edit_message_text(self, text, reply_markup=None, **kwargs):
+        return await self.message.reply_text(text, reply_markup=reply_markup, **kwargs)
+
+    async def edit_message_caption(self, caption=None, reply_markup=None, **kwargs):
+        return await self.message.reply_text(caption or "Choose an option below.", reply_markup=reply_markup)
+
+
 class CloneStartMixin:
     @staticmethod
     def _consume_background_task(task):
@@ -25,6 +43,29 @@ class CloneStartMixin:
                 await register_referral(owner,referrer_id,user.id)
             except Exception:
                 logger.exception("Referral registration failed owner=%s user=%s",owner,user.id)
+
+    async def _open_start_feature(self, update, context, owner: int, payload: str) -> bool:
+        """Open a requested Clone Bot feature directly from a t.me start payload."""
+        actions = {
+            "plans": "c_plans",
+            "buy": "c_buy",
+            "renew": "c_renew",
+            "profile": "c_profile",
+            "referral": "c_referral",
+            "referral_unlock": "c_referral_unlock",
+            "support": "c_support",
+        }
+        action = actions.get(str(payload or "").strip().lower())
+        if not action:
+            return False
+
+        from handlers.clone.user import navigation, profile, referral, support
+
+        query = _StartFeatureQuery(update.effective_message, update.effective_user, action)
+        for handler in (navigation, profile, referral, support):
+            if await handler.handle(self, update, context, query, owner, action):
+                return True
+        return False
 
     async def child_start(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
@@ -105,6 +146,12 @@ class CloneStartMixin:
                     owner,
                     (record or {}).get("bot_name","Subscription Bot"),
                 )
+
+            # Clone Bot deep links such as ?start=plans open the requested page
+            # directly instead of showing the normal welcome message first.
+            start_payload = str(context.args[0] if context.args else "").strip().lower()
+            if start_payload and await self._open_start_feature(update, context, owner, start_payload):
+                return
 
             # User-visible response is sent before referral and Live Support work.
             await self.send_welcome(

@@ -126,6 +126,12 @@ async def _inline_markup(owner_id: int, rows) -> InlineKeyboardMarkup | None:
                 clean.append(InlineKeyboardButton(text, callback_data=value[:64]))
             elif item_type == "url" and value:
                 clean.append(InlineKeyboardButton(text, url=value))
+            elif item_type == "clone" and value:
+                if bot_record is None:
+                    bot_record = await get_bot_by_data_owner_id(int(owner_id))
+                username = str((bot_record or {}).get("bot_username") or "").lstrip("@")
+                if username:
+                    clean.append(InlineKeyboardButton(text, url=f"https://t.me/{username}?start={value}"))
             elif value:
                 # Older editor records may omit the type. Preserve clone feature
                 # callbacks and treat web links as URL buttons.
