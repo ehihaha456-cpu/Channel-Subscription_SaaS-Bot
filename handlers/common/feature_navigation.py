@@ -27,7 +27,14 @@ def capture_feature_origin(query, context) -> bool:
     key = (int(message.chat_id), int(message.message_id))
     origin = _ORIGINS.get(key)
     if not origin:
-        return False
+        # Business Automation messages can be created by a different bot
+        # application instance, so the in-memory registry may not contain the
+        # message. Capture the currently displayed message directly instead.
+        text = str(getattr(message, "caption", None) or getattr(message, "text", None) or "")
+        markup = getattr(message, "reply_markup", None)
+        if not text and markup is None:
+            return False
+        origin = {"text": text, "markup": markup}
     try:
         context.user_data["clone_feature_origin"] = {**origin, "chat_id": key[0], "message_id": key[1]}
         return True
@@ -53,5 +60,10 @@ async def restore_feature_origin(query, context) -> bool:
             await query.edit_message_text(text=text or "Choose an option below.", reply_markup=markup)
         register_feature_origin(query.message, text=text, markup=markup)
         return True
-    except TelegramError:
+    except TelegramError as exc:
+        # Treat an already-restored message as success. Falling back to c_home
+        # here would create the normal Clone Bot welcome message.
+        if "message is not modified" in str(exc).casefold():
+            register_feature_origin(query.message, text=text, markup=markup)
+            return True
         return False
