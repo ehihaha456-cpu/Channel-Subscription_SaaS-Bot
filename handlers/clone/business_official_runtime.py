@@ -410,7 +410,15 @@ async def handle_deleted_business_messages(update: Update, context: ContextTypes
         logger.exception("Could not reset Business welcome after deleted messages owner=%s", owner_id)
 
 
-async def _broadcast_api_call(call, *, attempts: int = 3):
+async def _broadcast_api_call(call, *, attempts: int = 12):
+    """Run one Business API request with Telegram-safe retry handling.
+
+    Telegram's ``RetryAfter`` value is mandatory.  The old implementation
+    capped every wait at 30 seconds, so a request such as ``retry in 449
+    seconds`` was retried too early and the remaining recipients were counted
+    as failed.  Wait for the complete server-requested duration and retry the
+    same request instead.
+    """
     last_error = None
     for attempt in range(attempts):
         try:
@@ -422,16 +430,50 @@ async def _broadcast_api_call(call, *, attempts: int = 3):
                 wait = wait.total_seconds()
             except AttributeError:
                 pass
-            await asyncio.sleep(min(max(float(wait), 0.5), 30.0))
+            wait_seconds = max(float(wait), 1.0)
+            logger.warning(
+                "Business broadcast rate limited; waiting %.1f seconds before retry %s/%s",
+                wait_seconds,
+                attempt + 1,
+                attempts,
+            )
+            # Add a small safety margin because retrying at the exact boundary
+            # can immediately trigger another flood wait.
+            await asyncio.sleep(wait_seconds + 1.0)
         except (TimedOut, NetworkError) as exc:
             last_error = exc
             if attempt + 1 < attempts:
-                await asyncio.sleep(0.8 * (attempt + 1))
+                await asyncio.sleep(min(2.0 * (attempt + 1), 10.0))
                 continue
             raise
     if last_error:
         raise last_error
 
+
+
+def _is_permanently_unreachable(exc: Exception) -> bool:
+    """Only blocked/deleted/unavailable recipients are final failures.
+
+    Telegram/network/rate-limit/configuration errors must not be counted as a
+    recipient failure because the user may still be reachable after retry or
+    after the broadcast content is corrected.
+    """
+    text = str(exc or "").casefold()
+    if isinstance(exc, Forbidden):
+        return any(token in text for token in (
+            "blocked", "bot was blocked", "user is deactivated",
+            "user deactivated", "account deactivated",
+        ))
+    if isinstance(exc, BadRequest):
+        return any(token in text for token in (
+            "chat not found", "user not found", "user is deactivated",
+            "peer_id_invalid", "peer id invalid", "account deleted",
+        ))
+    return False
+
+
+def _is_retryable_broadcast_error(exc: Exception) -> bool:
+    return not _is_permanently_unreachable(exc)
 
 def _broadcast_failure_reason(exc: Exception) -> str:
     text = str(exc or "").casefold()
@@ -592,7 +634,7 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
     chat_id = int(recipient.get("chat_id") or 0)
     connection_id = str(recipient.get("connection_id") or "")
     if not chat_id or not connection_id:
-        return {"status": "failed", "reason": "invalid_recipient", "components": {}}
+        return {"status": "pending", "reason": "invalid_recipient", "components": {}}
 
     common = {"chat_id": chat_id, "business_connection_id": connection_id}
     rendered_text = _render_variables(str(item.get("text") or ""), user)
@@ -644,12 +686,17 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
     if all(required):
         return {"status": "full", "reason": "", "components": components}
 
-    reason = _broadcast_failure_reason(errors[-1][1]) if errors else "partial_delivery"
-    status = "partial" if delivered > 0 else "failed"
-    if status == "failed" and reason in {
-        "blocked_or_forbidden", "no_permission", "connection_disabled", "chat_unavailable"
-    }:
+    last_exc = errors[-1][1] if errors else None
+    reason = _broadcast_failure_reason(last_exc) if last_exc else "partial_delivery"
+    if delivered > 0:
+        status = "partial"
+    elif last_exc is not None and _is_permanently_unreachable(last_exc):
+        status = "failed"
         await mark_business_recipient_inactive(owner_id, connection_id, chat_id, reason)
+    else:
+        # Reachable/temporary/configuration failures are kept out of the final
+        # failed count. The outer sender retries them in later rounds.
+        status = "pending"
     logger.warning(
         "Business broadcast %s owner=%s chat=%s components=%s reason=%s",
         status, owner_id, chat_id, components, reason,
@@ -658,24 +705,62 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
 
 
 async def send_official_business_broadcast(context, owner_id: int, item: dict, recipients: list[dict]) -> dict:
-    semaphore = asyncio.Semaphore(5)
+    """Deliver sequentially and retry every non-permanent recipient error.
 
-    async def worker(recipient):
-        async with semaphore:
-            result = await _send_one_official_business_broadcast(context, owner_id, item, recipient)
-            await asyncio.sleep(0.08)
-            return result
+    Only blocked/deleted/unavailable accounts are reported as failed.
+    Telegram flood waits, network errors and other recoverable failures are
+    retried in multiple rounds and otherwise reported as pending, never as a
+    recipient failure.
+    """
+    final_results = {}
+    pending = list(recipients)
+    retry_delays = (3.0, 10.0, 30.0, 60.0)
 
-    results = await asyncio.gather(*(worker(r) for r in recipients), return_exceptions=True)
+    for round_index in range(len(retry_delays) + 1):
+        next_pending = []
+        for index, recipient in enumerate(pending, 1):
+            key = (str(recipient.get("connection_id") or ""), int(recipient.get("chat_id") or 0))
+            try:
+                result = await _send_one_official_business_broadcast(
+                    context, owner_id, item, recipient
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "Business broadcast recipient deferred owner=%s round=%s index=%s/%s chat=%s error=%s",
+                    owner_id, round_index + 1, index, len(pending),
+                    recipient.get("chat_id"), type(exc).__name__,
+                )
+                result = {
+                    "status": "failed" if _is_permanently_unreachable(exc) else "pending",
+                    "reason": _broadcast_failure_reason(exc),
+                    "components": {},
+                }
+
+            final_results[key] = result
+            if result.get("status") == "pending":
+                next_pending.append(recipient)
+
+            if index < len(pending):
+                await asyncio.sleep(0.75)
+
+        pending = next_pending
+        if not pending:
+            break
+        if round_index < len(retry_delays):
+            delay = retry_delays[round_index]
+            logger.warning(
+                "Business broadcast retry round pending=%s wait=%.1fs owner=%s",
+                len(pending), delay, owner_id,
+            )
+            await asyncio.sleep(delay)
+
     counts = Counter()
     reasons = Counter()
     component_failures = Counter()
-    for result in results:
-        if isinstance(result, Exception):
-            counts["failed"] += 1
-            reasons[_broadcast_failure_reason(result)] += 1
-            continue
-        status = str(result.get("status") or "failed")
+    for result in final_results.values():
+        status = str(result.get("status") or "pending")
         counts[status] += 1
         reason = str(result.get("reason") or "")
         if reason:
@@ -683,11 +768,13 @@ async def send_official_business_broadcast(context, owner_id: int, item: dict, r
         for component, delivered in (result.get("components") or {}).items():
             if not delivered:
                 component_failures[str(component)] += 1
+
     return {
         "total": len(recipients),
         "full": counts["full"],
         "partial": counts["partial"],
         "failed": counts["failed"],
+        "pending": counts["pending"],
         "reasons": dict(reasons),
         "component_failures": dict(component_failures),
     }
