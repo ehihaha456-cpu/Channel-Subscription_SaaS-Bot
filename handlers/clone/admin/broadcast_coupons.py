@@ -106,14 +106,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer('Add text or media first.', show_alert=True)
             return True
         await q.answer('Broadcast started.')
-        report = await self.send_seller_broadcast(owner, context, item)
-        item = await update_seller_broadcast_draft(owner, last_report=report, last_sent_at=datetime.now(timezone.utc))
         await q.message.reply_text(
-            '✅ Broadcast completed\n\n'
-            f"Recipients: {report['total']}\n"
-            f"Success: {report['success']}\n"
-            f"Failed: {report['failed']}",
+            '📤 Broadcast is running in the background.\n\nYou can continue using the bot.',
             reply_markup=_broadcast_keyboard(item),
+        )
+        context.application.create_task(
+            self.run_seller_broadcast_background(owner, context, item),
+            name=f"seller_broadcast_{owner}",
         )
         return True
     return False
