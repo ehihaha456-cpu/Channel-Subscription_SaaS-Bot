@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from copy import deepcopy
 from typing import Any
 
 from telegram.error import TelegramError
@@ -15,7 +14,7 @@ def register_feature_origin(message, *, text: str = "", markup=None) -> None:
     if message is None or not getattr(message, "message_id", None) or not getattr(message, "chat_id", None):
         return
     key = (int(message.chat_id), int(message.message_id))
-    _ORIGINS[key] = {"text": str(text or ""), "markup": deepcopy(markup)}
+    _ORIGINS[key] = {"text": str(text or ""), "markup": markup}
     _ORIGINS.move_to_end(key)
     while len(_ORIGINS) > _MAX:
         _ORIGINS.popitem(last=False)
@@ -29,8 +28,12 @@ def capture_feature_origin(query, context) -> bool:
     origin = _ORIGINS.get(key)
     if not origin:
         return False
-    context.user_data["clone_feature_origin"] = {**deepcopy(origin), "chat_id": key[0], "message_id": key[1]}
-    return True
+    try:
+        context.user_data["clone_feature_origin"] = {**origin, "chat_id": key[0], "message_id": key[1]}
+        return True
+    except Exception:
+        # Origin tracking must never stop the actual feature button action.
+        return False
 
 
 def feature_back_callback(context) -> str:
