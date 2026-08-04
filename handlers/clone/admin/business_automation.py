@@ -493,11 +493,12 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             f"Recipients: {report.get('total', 0)}",
             f"✅ Fully delivered: {report.get('full', 0)}",
             f"⚠️ Partially delivered: {report.get('partial', 0)}",
-            f"❌ Failed: {report.get('failed', 0)}",
+            f"❌ Failed (blocked/deleted only): {report.get('failed', 0)}",
+            f"🔄 Pending after automatic retries: {report.get('pending', 0)}",
         ]
         reasons = report.get("reasons") or {}
         if reasons:
-            lines.extend(["", "Failure details:"])
+            lines.extend(["", "Delivery details:"])
             for key, count in sorted(reasons.items(), key=lambda x: (-x[1], x[0])):
                 lines.append(f"• {reason_labels.get(key, key.replace('_', ' ').title())}: {count}")
         component_failures = report.get("component_failures") or {}
