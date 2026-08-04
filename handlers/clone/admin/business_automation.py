@@ -66,6 +66,7 @@ def _broadcast_progress_text(data: dict, *, completed: bool = False) -> str:
     partial = int(data.get("partial", 0))
     failed = int(data.get("failed", 0))
     pending = int(data.get("pending", 0))
+    retry_queue = int(data.get("retry_queue", 0))
     processed = int(data.get("processed", full + partial + failed))
     remaining = int(data.get("remaining", max(total - processed, 0)))
     percent = int((processed / total) * 100) if total else 0
@@ -84,9 +85,11 @@ def _broadcast_progress_text(data: dict, *, completed: bool = False) -> str:
         f"✅ Fully Delivered: {full}",
         f"⚠️ Partially Delivered: {partial}",
         f"❌ Failed: {failed}",
+        f"🔁 Retry Queue: {retry_queue}",
         f"🔄 Pending: {pending}",
         f"⏳ Remaining: {remaining}",
         "", f"📈 Progress: {processed} / {total} ({percent}%)",
+        f"🔁 Retry Round: {int(data.get('round', 1))}",
     ]
     current = data.get("current") or {}
     if current and not completed:
@@ -100,18 +103,26 @@ async def _run_business_broadcast_with_progress(context, owner: int, item: dict,
     lock_key = f"ba_broadcast_running:{owner}"
     last_edit = 0.0
     last_processed = -1
+    last_current = None
 
     async def progress(data: dict):
-        nonlocal last_edit, last_processed
+        nonlocal last_edit, last_processed, last_current
         now = asyncio.get_running_loop().time()
         processed = int(data.get("processed", 0))
+        current = data.get("current") or {}
+        current_key = (current.get("connection_id"), current.get("chat_id")) if current else None
         force = data.get("state") == "retry_wait"
-        if not force and processed == last_processed:
+        changed_recipient = current_key != last_current
+        if not force and processed == last_processed and not changed_recipient:
             return
-        if not force and processed < int(data.get("total", 0)) and now - last_edit < 2.0 and processed % 5 != 0:
+        # Keep Telegram edit traffic controlled, but still show that the worker
+        # is advancing through rejected recipients even when delivered count
+        # has not changed yet.
+        if not force and now - last_edit < 1.5 and processed % 5 != 0:
             return
         last_edit = now
         last_processed = processed
+        last_current = current_key
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id, message_id=message_id,
@@ -127,6 +138,8 @@ async def _run_business_broadcast_with_progress(context, owner: int, item: dict,
         final_data = dict(report)
         final_data["processed"] = int(report.get("full", 0)) + int(report.get("partial", 0)) + int(report.get("failed", 0))
         final_data["remaining"] = int(report.get("pending", 0))
+        final_data["retry_queue"] = 0
+        final_data["round"] = int(final_data.get("round", 1))
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=message_id,
             text=_broadcast_progress_text(final_data, completed=True),
