@@ -66,7 +66,11 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
     user = update.effective_user
     text = _render_business_variables(str(item.get("text") or "Welcome!"), user)
     text = await append_branding(text)
-    markup = build_editor_keyboard(_render_business_buttons(item.get("buttons") or [], user))
+    bot_record = await get_bot_by_data_owner_id(owner) or {}
+    markup = build_editor_keyboard(
+        _render_business_buttons(item.get("buttons") or [], user),
+        clone_username=str(bot_record.get("bot_username") or ""),
+    )
     chat_id = update.effective_chat.id
     media = _business_media(item)
     common = {
