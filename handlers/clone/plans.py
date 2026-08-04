@@ -1,15 +1,15 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from handlers.common.feature_navigation import feature_back_callback
 
 
 class ClonePlansMixin:
-    async def show_plans(self,q,owner,select=False):
+    async def show_plans(self, q, owner, select=False, context=None):
         plans=await get_plans(owner,True)
         settings=await get_seller_settings(owner)
         currency=settings.get("currency","INR")
-        business_connection_id = getattr(q.message, "business_connection_id", None)
-        back_target = clone_feature_back_target(context)
+        back_target = feature_back_callback(context) if context is not None else "c_home"
         back_keyboard=self.back(back_target)
 
         if not plans:
