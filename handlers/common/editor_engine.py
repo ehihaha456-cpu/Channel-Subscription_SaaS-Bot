@@ -45,6 +45,27 @@ def url_buttons_header() -> str:
     )
 
 
+
+def business_url_buttons_header() -> str:
+    """Compact Business Automation button instructions with Clone Bot deep links."""
+    return (
+        "🔗 Send URL, Feature or Clone Bot buttons\n\n"
+        "• Single Button:\n"
+        "Plans - feature:plans\n"
+        "Plans - clone:plans\n\n"
+        "• Same Row (use &&):\n"
+        "Plans - clone:plans && Profile - clone:profile\n\n"
+        "• Available Features:\n"
+        "plans, buy, renew, profile, referral, referral_unlock, support, home\n\n"
+        "• Open inside current message:\n"
+        "Button Title - feature:plans\n\n"
+        "• Open Clone Bot directly:\n"
+        "Button Title - clone:plans\n\n"
+        "• Custom URL / Username:\n"
+        "Website - https://example.com\n"
+        "Support - @username"
+    )
+
 def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
     """Parse editable message buttons while preserving the existing schema."""
     rows: list[list[dict[str, str]]] = []
@@ -96,9 +117,16 @@ def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
                 row.append({"text": title, "type": "callback", "value": callback})
                 continue
 
+            if target.startswith("clone:"):
+                feature = target.split(":", 1)[1].lower()
+                if feature not in FEATURE_CALLBACKS:
+                    raise ValueError("Unknown Clone Bot feature")
+                row.append({"text": title, "type": "clone", "value": feature})
+                continue
+
             supported = "/".join(FEATURE_CALLBACKS)
             raise ValueError(
-                "Target must be URL, @username, or feature:" + supported
+                "Target must be URL, @username, feature:" + supported + ", or clone:" + supported
             )
 
         if row:
@@ -113,6 +141,7 @@ def build_editor_keyboard(
     rows: Iterable[Iterable[dict[str, Any]]] | None,
     *,
     callback_prefix: str = "",
+    clone_username: str = "",
 ) -> InlineKeyboardMarkup | None:
     """Build a Telegram inline keyboard from the stored editor-button schema."""
     if not rows:
@@ -123,10 +152,16 @@ def build_editor_keyboard(
         built: list[InlineKeyboardButton] = []
         for item in row:
             text = str(item.get("text") or "Button")
-            if item.get("type") == "url":
+            item_type = str(item.get("type") or "callback")
+            if item_type == "url":
                 value = str(item.get("value") or "")
                 if value:
                     built.append(InlineKeyboardButton(text, url=value))
+            elif item_type == "clone":
+                feature = str(item.get("value") or "home").strip().lower()
+                username = str(clone_username or "").strip().lstrip("@")
+                if username:
+                    built.append(InlineKeyboardButton(text, url=f"https://t.me/{username}?start={feature}"))
             else:
                 callback = str(item.get("value") or "c_home")
                 if callback_prefix and callback.startswith("c_"):
