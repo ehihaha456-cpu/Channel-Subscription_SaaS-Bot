@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from handlers.common.feature_navigation import register_feature_origin
 
 
 class CloneSupportCoreMixin:
@@ -273,6 +274,7 @@ class CloneSupportCoreMixin:
         elif file_id and media_type=="animation": sent=await context.bot.send_animation(animation=file_id,caption=text or None,**kwargs)
         elif file_id and media_type=="document": sent=await context.bot.send_document(document=file_id,caption=text or None,**kwargs)
         else: sent=await context.bot.send_message(text=text or "(Empty template)",disable_web_page_preview=True,**kwargs)
+        register_feature_origin(sent, text=text or "(Empty template)", markup=keyboard)
         auto_delete_seconds=_template_auto_delete_seconds(template)
         if auto_delete_seconds > 0:
             asyncio.create_task(self._delete_template_message_later(context.bot,sent.chat_id,sent.message_id,auto_delete_seconds))

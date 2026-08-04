@@ -6,6 +6,8 @@ Normal MTProto account automation remains in ``services.business_automation_runt
 
 from __future__ import annotations
 
+from handlers.common.feature_navigation import register_feature_origin
+
 import asyncio
 import logging
 import re
@@ -196,6 +198,7 @@ async def _send_configured_message(
                 **common,
             )
             if getattr(text_message, "message_id", None):
+                register_feature_origin(text_message, text=rendered_text or "Choose an option below.", markup=markup)
                 message_ids.append(int(text_message.message_id))
         return message_ids
 
@@ -212,6 +215,7 @@ async def _send_configured_message(
             sent = await context.bot.send_animation(animation=file_id, **single_common)
         else:
             sent = await context.bot.send_document(document=file_id, **single_common)
+        register_feature_origin(sent, text=rendered_text, markup=markup)
         return [int(sent.message_id)] if getattr(sent, "message_id", None) else []
 
     sent = await context.bot.send_message(
@@ -219,6 +223,7 @@ async def _send_configured_message(
         reply_markup=markup,
         **common,
     )
+    register_feature_origin(sent, text=rendered_text or "Welcome!", markup=markup)
     return [int(sent.message_id)] if getattr(sent, "message_id", None) else []
 
 
@@ -489,13 +494,14 @@ async def _send_broadcast_media(
             kwargs["reply_markup"] = markup
         try:
             if kind == "photo":
-                await _broadcast_api_call(lambda: context.bot.send_photo(photo=fid, **kwargs))
+                sent = await _broadcast_api_call(lambda: context.bot.send_photo(photo=fid, **kwargs))
             elif kind == "video":
-                await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **kwargs))
+                sent = await _broadcast_api_call(lambda: context.bot.send_video(video=fid, **kwargs))
             elif kind == "animation":
-                await _broadcast_api_call(lambda: context.bot.send_animation(animation=fid, **kwargs))
+                sent = await _broadcast_api_call(lambda: context.bot.send_animation(animation=fid, **kwargs))
             else:
-                await _broadcast_api_call(lambda: context.bot.send_document(document=fid, **kwargs))
+                sent = await _broadcast_api_call(lambda: context.bot.send_document(document=fid, **kwargs))
+            register_feature_origin(sent, text=text, markup=markup)
             return {"media": True, "text": True, "buttons": True, "errors": []}
         except Exception as exc:
             errors.append(("combined_media", exc))
@@ -555,9 +561,10 @@ async def _send_broadcast_media(
     if markup is not None or (text and not caption_used):
         fallback_text = text if not caption_used else "Choose an option below."
         try:
-            await _broadcast_api_call(lambda: context.bot.send_message(
+            sent = await _broadcast_api_call(lambda: context.bot.send_message(
                 text=fallback_text or "Broadcast message", reply_markup=markup, **common
             ))
+            register_feature_origin(sent, text=fallback_text or "Broadcast message", markup=markup)
             text_ok = True
             buttons_ok = True
         except Exception as exc:
@@ -611,9 +618,10 @@ async def _send_one_official_business_broadcast(context, owner_id: int, item: di
         errors.extend(result.get("errors") or [])
     elif rendered_text or markup:
         try:
-            await _broadcast_api_call(lambda: context.bot.send_message(
+            sent = await _broadcast_api_call(lambda: context.bot.send_message(
                 text=rendered_text or "Choose an option below.", reply_markup=markup, **common
             ))
+            register_feature_origin(sent, text=rendered_text or "Choose an option below.", markup=markup)
             components["text"] = True
             components["buttons"] = True
         except Exception as exc:
