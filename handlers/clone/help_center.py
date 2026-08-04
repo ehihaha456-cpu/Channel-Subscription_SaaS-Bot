@@ -110,59 +110,96 @@ Important Notes
 
 What does this section do?
 
-Bot Settings controls the user-facing Welcome Message, media, buttons, branding and related Clone Bot appearance settings.
+Bot Settings controls the Clone Bot name, user-facing Welcome Message, support contact, currency, timezone, reminder timing and referral settings.
 
 ━━━━━━━━━━━━━━
-📝 Welcome Message
+🤖 Bot Name
+
+Admin Panel → Bot Settings → Bot Name
+
+Change the display name used by the Clone Bot in supported messages and pages. Enter the new name and save it.
+
+━━━━━━━━━━━━━━
+💬 Welcome Message
 
 Admin Panel → Bot Settings → Welcome Message
 
-Edit the main text shown to users. Supported variables can be used where the editor lists them. Save and use Preview before publishing.
+Edit the welcome text shown to users. From the same editor, you can add or remove media, add URL buttons, add Feature Buttons, rename buttons, arrange the button layout and preview the final welcome.
+
+• Text: write the main welcome content.
+• Media: add supported photo/video media.
+• URL Buttons: add a button name and complete URL.
+• Feature Buttons: add Plans, Buy, Renew, Profile, Referral, Support or Home.
+• Preview: check the final message before saving or publishing.
 
 ━━━━━━━━━━━━━━
-🖼 Welcome Media
+📞 Support Username
 
-Admin Panel → Bot Settings → Welcome Message → Add Media
+Admin Panel → Bot Settings → Support Username
 
-Add supported photo/video media. Remove or replace it from the same editor. For a single media item, caption and buttons appear with that media where supported.
-
-━━━━━━━━━━━━━━
-🔗 URL Buttons
-
-Admin Panel → Bot Settings → Welcome Message → URL Buttons
-
-Enter the button name and complete URL. Test every link after saving.
+Set the Telegram username users should contact for help. Enter a valid username, normally in @username format, and save it.
 
 ━━━━━━━━━━━━━━
-⭐ Feature Buttons
+💵 Currency
 
-Admin Panel → Bot Settings → Welcome Message → Feature Buttons
+Admin Panel → Bot Settings → Currency
 
-Add built-in actions such as Plans, Buy, Renew, Profile, Referral, Support or Home. These buttons open the matching Clone Bot feature.
+Choose the currency shown in plan prices, payment messages and supported payment pages. Select the required currency and confirm it.
 
-━━━━━━━━━━━━━━
-🔤 Button Names and Layout
-
-Use the available button editor to rename enabled buttons and arrange their rows. Do not use duplicate callback actions for different purposes.
+Important: Changing the currency label does not automatically convert existing plan prices. Review plan prices after changing it.
 
 ━━━━━━━━━━━━━━
-🏷 Branding
+🕒 Timezone
 
-Use the branding option to show the configured “Powered by” text where enabled by the platform owner.
+Admin Panel → Bot Settings → Timezone
+
+Select the timezone used for subscription expiry dates, scheduled actions, payment dates and other displayed times. Choose your region and save it.
+
+Important: Confirm the timezone before scheduling broadcasts or checking expiry times.
+
+━━━━━━━━━━━━━━
+🔔 Reminder Days
+
+Admin Panel → Bot Settings → Reminder Days
+
+Set how many days before subscription expiry the user should receive an expiry reminder. Enter the required number of days and save it.
+
+Example: Setting 3 sends the reminder approximately 3 days before expiry when the reminder system runs.
+
+━━━━━━━━━━━━━━
+🎁 Referral Reward Days
+
+Admin Panel → Bot Settings → Referral Reward Days
+
+Set how many subscription days a user receives as a referral reward after completing the configured referral requirement. Enter the reward duration and save it.
+
+Important: This setting controls reward duration; referral eligibility and counting rules are managed through Referral Unlock.
+
+━━━━━━━━━━━━━━
+🔓 Referral Unlock
+
+Admin Panel → Bot Settings → Referral Unlock
+
+Configure the referral-based access system. From this section you can enable or disable referral unlock, set the required referral count, select when referrals are counted, choose the reward duration/destination and manage eligible channel or group invite links where available.
+
+Test the referral flow using separate accounts before enabling it for all users.
 
 ━━━━━━━━━━━━━━
 📜 Terms & Policy
 
 Admin Panel → Terms & Policy
 
-Review the Terms, Privacy, Refund and Support text shown for the Clone Bot.
+Review or update the Terms, Privacy, Refund and Support information shown for the Clone Bot.
 
 ━━━━━━━━━━━━━━
 Important Notes
 
-• Always preview after changing text, media or buttons.
-• Feature buttons require their related feature to be configured.
-• Invalid URLs or removed media can make a saved button/message fail.""",
+• Always preview the Welcome Message after changing text, media or buttons.
+• Feature Buttons require their related feature to be configured.
+• Use a valid Telegram username and complete URLs.
+• Check plan prices after changing currency.
+• Check scheduled times and expiry dates after changing timezone.
+• Branding is controlled by the platform owner and is not a Seller Bot Settings option.""",
 
     "broadcast": """📢 Broadcast
 
