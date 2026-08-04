@@ -111,7 +111,13 @@ async def handle(self, update, context, q, owner, action):
     if action == 'c_return_origin':
         if await restore_feature_origin(q, context):
             return True
-        action = 'c_home'
+        # Never replace a Business Automation broadcast with the normal Clone
+        # Bot welcome when origin restoration is temporarily unavailable.
+        try:
+            await q.answer("Previous broadcast could not be restored. Please try again.", show_alert=True)
+        except Exception:
+            pass
+        return True
     if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'}:
         try:
             capture_feature_origin(q, context)
@@ -144,9 +150,9 @@ async def handle(self, update, context, q, owner, action):
         await self.send_welcome(q.message, context, settings, q.from_user)
         return True
     if action == 'c_plans':
-        await self.show_plans(q, owner, True)
+        await self.show_plans(q, owner, True, context)
         return True
     if action in {'c_buy', 'c_renew'}:
-        await self.show_plans(q, owner, True)
+        await self.show_plans(q, owner, True, context)
         return True
     return False
