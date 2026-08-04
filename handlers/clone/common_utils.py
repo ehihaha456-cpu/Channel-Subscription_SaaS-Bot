@@ -35,8 +35,26 @@ class CloneCommonUtilsMixin:
         return bool(await self.staff_record(update, context))
 
     async def safe_query_message(self,q,text,reply_markup=None):
-        """Edit text messages; reply with a new message when the button is on media."""
+        """Edit the callback's existing message, including media captions.
+
+        Feature navigation must stay on the same Business Automation welcome
+        message.  A media welcome has no text body, so editing its caption is
+        required instead of replying with another message.
+        """
+        message = q.message
+        has_media = bool(
+            getattr(message, "photo", None)
+            or getattr(message, "video", None)
+            or getattr(message, "animation", None)
+            or getattr(message, "document", None)
+            or getattr(message, "audio", None)
+        )
         try:
+            if has_media:
+                return await q.edit_message_caption(
+                    caption=text,
+                    reply_markup=reply_markup,
+                )
             return await q.edit_message_text(
                 text,
                 reply_markup=reply_markup,
@@ -44,17 +62,7 @@ class CloneCommonUtilsMixin:
             )
         except BadRequest as exc:
             error=str(exc).lower()
-            if (
-                "there is no text in the message to edit" in error
-                or "message can't be edited" in error
-                or "message is not modified" in error
-            ):
-                if "message is not modified" in error:
-                    return None
-                return await q.message.reply_text(
-                    text,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=True,
-                )
+            if "message is not modified" in error:
+                return None
             raise
 
