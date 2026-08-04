@@ -14,6 +14,7 @@ from handlers.common.editor_engine import (
     editor_text_prompt,
     parse_editor_buttons,
     url_buttons_header,
+    business_url_buttons_header,
 )
 from telethon import TelegramClient
 from telethon.errors import (
@@ -350,12 +351,14 @@ def _settings_keyboard(s):
     ])
 
 
-def _preview_markup(rows):
-    return build_editor_keyboard(rows)
+async def _preview_markup(owner: int, rows):
+    from database.seller_bots import get_bot_by_data_owner_id
+    record = await get_bot_by_data_owner_id(int(owner)) or {}
+    return build_editor_keyboard(rows, clone_username=str(record.get("bot_username") or ""))
 
 
-async def _send_preview(message, text, media_type, file_id, buttons, media_items=None):
-    markup = _preview_markup(buttons)
+async def _send_preview(message, owner, text, media_type, file_id, buttons, media_items=None):
+    markup = await _preview_markup(owner, buttons)
     text = text or "Preview message"
     items = list(media_items or [])
     if not items and file_id:
@@ -564,7 +567,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
     if action == "ba_bc_preview":
         item = await get_business_broadcast(owner)
-        await _send_preview(q.message, item.get("text"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
+        await _send_preview(q.message, owner, item.get("text"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
     if action == "ba_bc_send":
         item = await get_business_broadcast(owner)
         recipients = await list_business_recipients(owner)
@@ -601,7 +604,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await q.edit_message_text(editor_media_prompt("Business Welcome Media"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmmedia" if (welcome.get("media") or welcome.get("media_file_id")) else None, remove_label="Remove Media")); return True
     if action == "ba_welcome_buttons":
         context.user_data["ba_editor"] = {"field": "welcome_buttons"}
-        await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
+        await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
     if action == "ba_welcome_rmtext":
         welcome = await update_business_welcome(owner, text="")
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
@@ -612,7 +615,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         welcome = await update_business_welcome(owner, buttons=[])
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_preview":
-        await _send_preview(q.message, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons"), welcome.get("media")); await q.answer("Preview sent."); return True
+        await _send_preview(q.message, owner, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons"), welcome.get("media")); await q.answer("Preview sent."); return True
 
     if action == "ba_auto":
         await q.edit_message_text(
@@ -648,7 +651,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(editor_media_prompt("Auto Reply Media"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "auto_item_buttons", "reply_id": rid}
-            await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+            await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "toggle": item = await update_business_auto_reply_item(owner, rid, enabled=not item.get("enabled", True))
         elif op == "rmtext": item = await update_business_auto_reply_item(owner, rid, text="")
         elif op == "rmmedia": item = await update_business_auto_reply_item(owner, rid, media_type="", media_file_id="", media=[])
@@ -658,7 +661,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             auto_replies = await list_business_auto_replies(owner)
             await q.edit_message_text("✅ Auto reply deleted.", reply_markup=_auto_replies_keyboard(auto_replies)); return True
         elif op == "preview":
-            await _send_preview(q.message, item.get("text") or item.get("keyword"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
+            await _send_preview(q.message, owner, item.get("text") or item.get("keyword"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
         if item:
             await q.edit_message_text(_auto_item_text(item), reply_markup=_auto_item_keyboard(item)); return True
 
@@ -698,7 +701,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(editor_media_prompt("Reply Template Media"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "template_buttons", "template_id": tid}
-            await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+            await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "rmtext": item = await update_business_reply_template(owner, tid, text="")
         elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="", media=[])
         elif op == "rmbuttons": item = await update_business_reply_template(owner, tid, buttons=[])
@@ -707,7 +710,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             templates = await list_business_reply_templates(owner)
             await q.edit_message_text("✅ Reply template deleted.", reply_markup=_templates_keyboard(templates)); return True
         elif op == "preview":
-            await _send_preview(q.message, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
+            await _send_preview(q.message, owner, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
         if item:
             await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
 
