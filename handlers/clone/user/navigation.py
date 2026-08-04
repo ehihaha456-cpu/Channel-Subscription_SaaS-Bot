@@ -113,7 +113,11 @@ async def handle(self, update, context, q, owner, action):
             return True
         action = 'c_home'
     if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'}:
-        capture_feature_origin(q, context)
+        try:
+            capture_feature_origin(q, context)
+        except Exception:
+            # Back-navigation tracking is optional and must not block the feature itself.
+            pass
     back_keyboard = self.back(feature_back_callback(context))
     if action == 'seller_current_plan':
         await q.edit_message_text(await current_plan_text(owner), reply_markup=self.limit_keyboard('a_home'))
