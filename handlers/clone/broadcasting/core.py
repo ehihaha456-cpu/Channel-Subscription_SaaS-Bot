@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard, parse_editor_buttons
+from handlers.common.feature_navigation import register_feature_origin
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 
@@ -39,13 +40,14 @@ class CloneBroadcastMixin:
 
     async def _send_seller_broadcast_item(self, bot, chat_id, item, user):
         text = self._broadcast_variables(item.get("text"), user)
-        buttons = build_editor_keyboard(item.get("buttons"), callback_prefix="bc:")
+        buttons = build_editor_keyboard(item.get("buttons"))
         media = list(item.get("media") or [])
         if not media and item.get("media_file_id"):
             media = [{"type": item.get("media_type"), "file_id": item.get("media_file_id")}]
 
         if not media:
-            await bot.send_message(chat_id, text or "Broadcast", reply_markup=buttons)
+            sent = await bot.send_message(chat_id, text or "Broadcast", reply_markup=buttons)
+            register_feature_origin(sent, text=text or "Broadcast", markup=buttons)
             return
 
         if len(media) == 1:
@@ -53,15 +55,16 @@ class CloneBroadcastMixin:
             file_id = str(media[0].get("file_id") or "")
             kwargs = {"chat_id": chat_id, "caption": text or None, "reply_markup": buttons}
             if media_type == "photo":
-                await bot.send_photo(photo=file_id, **kwargs)
+                sent = await bot.send_photo(photo=file_id, **kwargs)
             elif media_type == "video":
-                await bot.send_video(video=file_id, **kwargs)
+                sent = await bot.send_video(video=file_id, **kwargs)
             elif media_type == "document":
-                await bot.send_document(document=file_id, **kwargs)
+                sent = await bot.send_document(document=file_id, **kwargs)
             elif media_type == "animation":
-                await bot.send_animation(animation=file_id, **kwargs)
+                sent = await bot.send_animation(animation=file_id, **kwargs)
             else:
                 raise ValueError("Unsupported broadcast media")
+            register_feature_origin(sent, text=text, markup=buttons)
             return
 
         album = []
@@ -73,7 +76,8 @@ class CloneBroadcastMixin:
             raise ValueError("No valid album media")
         await bot.send_media_group(chat_id=chat_id, media=album)
         if buttons:
-            await bot.send_message(chat_id, "Choose an option:", reply_markup=buttons)
+            sent = await bot.send_message(chat_id, "Choose an option:", reply_markup=buttons)
+            register_feature_origin(sent, text="Choose an option:", markup=buttons)
 
     async def send_seller_broadcast_preview(self, message, item):
         owner = int(message.chat_id)
@@ -98,35 +102,6 @@ class CloneBroadcastMixin:
                 logger.warning("Seller broadcast failed owner=%s user=%s error=%s", owner, user_id, exc)
             await asyncio.sleep(0.04)
         return {"total": total, "success": success, "failed": failed}
-
-    async def run_seller_broadcast_background(self, owner, context, item):
-        """Deliver a broadcast without blocking clone-bot callback processing."""
-        try:
-            report = await self.send_seller_broadcast(owner, context, item)
-            saved = await update_seller_broadcast_draft(
-                owner,
-                last_report=report,
-                last_sent_at=datetime.now(timezone.utc),
-            )
-            await context.bot.send_message(
-                chat_id=int(owner),
-                text=(
-                    "✅ Broadcast completed\n\n"
-                    f"Recipients: {report['total']}\n"
-                    f"Success: {report['success']}\n"
-                    f"Failed: {report['failed']}"
-                ),
-                reply_markup=__import__(
-                    "handlers.clone.admin.broadcast_coupons",
-                    fromlist=["_broadcast_keyboard"],
-                )._broadcast_keyboard(saved),
-            )
-        except Exception:
-            logger.exception("Seller broadcast background task failed owner=%s", owner)
-            try:
-                await context.bot.send_message(int(owner), "❌ Broadcast failed. Please try again.")
-            except Exception:
-                logger.exception("Seller broadcast failure notice failed owner=%s", owner)
 
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
