@@ -39,7 +39,7 @@ class CloneBroadcastMixin:
 
     async def _send_seller_broadcast_item(self, bot, chat_id, item, user):
         text = self._broadcast_variables(item.get("text"), user)
-        buttons = build_editor_keyboard(item.get("buttons"))
+        buttons = build_editor_keyboard(item.get("buttons"), callback_prefix="bc:")
         media = list(item.get("media") or [])
         if not media and item.get("media_file_id"):
             media = [{"type": item.get("media_type"), "file_id": item.get("media_file_id")}]
@@ -98,6 +98,35 @@ class CloneBroadcastMixin:
                 logger.warning("Seller broadcast failed owner=%s user=%s error=%s", owner, user_id, exc)
             await asyncio.sleep(0.04)
         return {"total": total, "success": success, "failed": failed}
+
+    async def run_seller_broadcast_background(self, owner, context, item):
+        """Deliver a broadcast without blocking clone-bot callback processing."""
+        try:
+            report = await self.send_seller_broadcast(owner, context, item)
+            saved = await update_seller_broadcast_draft(
+                owner,
+                last_report=report,
+                last_sent_at=datetime.now(timezone.utc),
+            )
+            await context.bot.send_message(
+                chat_id=int(owner),
+                text=(
+                    "✅ Broadcast completed\n\n"
+                    f"Recipients: {report['total']}\n"
+                    f"Success: {report['success']}\n"
+                    f"Failed: {report['failed']}"
+                ),
+                reply_markup=__import__(
+                    "handlers.clone.admin.broadcast_coupons",
+                    fromlist=["_broadcast_keyboard"],
+                )._broadcast_keyboard(saved),
+            )
+        except Exception:
+            logger.exception("Seller broadcast background task failed owner=%s", owner)
+            try:
+                await context.bot.send_message(int(owner), "❌ Broadcast failed. Please try again.")
+            except Exception:
+                logger.exception("Seller broadcast failure notice failed owner=%s", owner)
 
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
