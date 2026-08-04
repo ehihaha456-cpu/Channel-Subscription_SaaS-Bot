@@ -87,6 +87,11 @@ WELCOME_RUNTIME_VERSION="2026-07-13-main-role-dashboard-fix-13"
 MAIN_BOT_USERNAME=os.getenv("MAIN_BOT_USERNAME","Local_supplier3_bot").lstrip("@")
 
 
+def clone_feature_back_target(context) -> str:
+    """Return the message origin for end-user feature Back buttons."""
+    return str(context.user_data.get("clone_feature_back_target") or "c_home")
+
+
 def _seller_razorpay_webhook_url(owner_id: int) -> str:
     if not PUBLIC_BASE_URL:
         return "PUBLIC_BASE_URL is not configured"

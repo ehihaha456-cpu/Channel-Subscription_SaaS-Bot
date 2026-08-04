@@ -111,6 +111,8 @@ def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
 
 def build_editor_keyboard(
     rows: Iterable[Iterable[dict[str, Any]]] | None,
+    *,
+    callback_prefix: str = "",
 ) -> InlineKeyboardMarkup | None:
     """Build a Telegram inline keyboard from the stored editor-button schema."""
     if not rows:
@@ -127,6 +129,8 @@ def build_editor_keyboard(
                     built.append(InlineKeyboardButton(text, url=value))
             else:
                 callback = str(item.get("value") or "c_home")
+                if callback_prefix and callback.startswith("c_"):
+                    callback = f"{callback_prefix}{callback}"
                 built.append(InlineKeyboardButton(text, callback_data=callback))
         if built:
             keyboard.append(built)
