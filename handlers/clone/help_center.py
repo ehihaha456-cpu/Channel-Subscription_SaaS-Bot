@@ -308,7 +308,7 @@ Important Notes
 
 What does this section do?
 
-Business Automation connects supported Telegram user accounts and automates private-chat welcome messages, replies, templates and broadcasts separately from Clone Bot Live Support.
+Business Automation connects supported Telegram accounts and automates private-chat welcome messages, auto replies and reply templates separately from Clone Bot Live Support.
 
 ━━━━━━━━━━━━━━
 📱 Connect Telegram Account
@@ -331,12 +331,6 @@ Admin Panel → Business Automation → Welcome Message
 
 Configure text, supported media, URL buttons and Feature Buttons, then enable the welcome. It is sent according to the Welcome Once and other settings.
 
-━━━━━━━━━━━━━━
-📢 Broadcast
-
-Admin Panel → Business Automation → Broadcast
-
-Create the content, add buttons, preview and confirm. It sends to users recorded through connected-account conversations. Feature Button → Back should restore the original broadcast.
 
 ━━━━━━━━━━━━━━
 🤖 Auto Reply
