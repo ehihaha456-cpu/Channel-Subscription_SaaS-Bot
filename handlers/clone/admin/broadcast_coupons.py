@@ -105,14 +105,28 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not (item.get('text') or item.get('media') or item.get('media_file_id')):
             await q.answer('Add text or media first.', show_alert=True)
             return True
+
+        running = getattr(self, '_seller_broadcast_tasks', {}).get(int(owner))
+        if running and not running.done():
+            await q.answer('A broadcast is already running.', show_alert=True)
+            return True
+
         await q.answer('Broadcast started.')
-        await q.message.reply_text(
-            '📤 Broadcast is running in the background.\n\nYou can continue using the bot.',
-            reply_markup=_broadcast_keyboard(item),
+        await q.edit_message_text(
+            '📢 Broadcast Processing...\n\n'
+            'Status: 🟢 Starting\n\n'
+            '👥 Active Users: Counting...\n'
+            '✅ Delivered: 0\n'
+            '❌ Errors: 0\n'
+            '⏳ Remaining: Counting...\n\n'
+            '📈 Progress: 0%',
         )
-        context.application.create_task(
-            self.run_seller_broadcast_background(owner, context, item),
+        if not hasattr(self, '_seller_broadcast_tasks'):
+            self._seller_broadcast_tasks = {}
+        task = context.application.create_task(
+            self.run_seller_broadcast_background(owner, context, item, q.message),
             name=f"seller_broadcast_{owner}",
         )
+        self._seller_broadcast_tasks[int(owner)] = task
         return True
     return False
