@@ -84,7 +84,249 @@ class CloneBroadcastMixin:
         user = {"user_id": owner, "name": "Preview User", "username": "preview_user"}
         await self._send_seller_broadcast_item(message.get_bot(), owner, item, user)
 
+    @staticmethod
+    def _seller_broadcast_progress_text(total, delivered, failed, remaining, status="🟢 Sending"):
+        processed = delivered + failed
+        percent = int((processed * 100) / total) if total else 100
+        return (
+            "📢 Broadcast Processing...\n\n"
+            f"Status: {status}\n\n"
+            f"👥 Active Users: {total}\n"
+            f"✅ Delivered: {delivered}\n"
+            f"❌ Errors: {failed}\n"
+            f"⏳ Remaining: {remaining}\n\n"
+            f"📈 Progress: {processed} / {total} ({percent}%)"
+        )
+
+    async def run_seller_broadcast_background(self, owner, context, item, progress_message):
+        """Run seller broadcast without blocking clone-bot callbacks and update one live message."""
+        from database.seller_data import c, USERS
+
+        owner = int(owner)
+        delivered = failed = 0
+        users = []
+        try:
+            cursor = c(USERS).find(
+                {"owner_id": owner},
+                {"user_id": 1, "name": 1, "first_name": 1, "username": 1},
+            )
+            async for user in cursor:
+                user_id = user.get("user_id")
+                if user_id and int(user_id) != owner:
+                    users.append(user)
+
+            total = len(users)
+            await progress_message.edit_text(
+                self._seller_broadcast_progress_text(total, 0, 0, total)
+            )
+
+            last_update = 0.0
+            for index, user in enumerate(users, start=1):
+                user_id = int(user["user_id"])
+                try:
+                    await self._send_seller_broadcast_item(context.bot, user_id, item, user)
+                    delivered += 1
+                except RetryAfter as exc:
+                    wait_for = max(1, int(getattr(exc, "retry_after", 1)))
+                    await progress_message.edit_text(
+                        self._seller_broadcast_progress_text(
+                            total, delivered, failed, total - (delivered + failed),
+                            status=f"🟡 Telegram limit — retrying in {wait_for}s",
+                        )
+                    )
+                    await asyncio.sleep(wait_for + 1)
+                    try:
+                        await self._send_seller_broadcast_item(context.bot, user_id, item, user)
+                        delivered += 1
+                    except Exception as retry_exc:
+                        failed += 1
+                        logger.warning(
+                            "Seller broadcast retry failed owner=%s user=%s error=%s",
+                            owner, user_id, retry_exc,
+                        )
+                except Exception as exc:
+                    failed += 1
+                    logger.warning(
+                        "Seller broadcast failed owner=%s user=%s error=%s",
+                        owner, user_id, exc,
+                    )
+
+                remaining = total - (delivered + failed)
+                now = asyncio.get_running_loop().time()
+                if index == total or now - last_update >= 1.0:
+                    try:
+                        await progress_message.edit_text(
+                            self._seller_broadcast_progress_text(
+                                total, delivered, failed, remaining
+                            )
+                        )
+                    except BadRequest as exc:
+                        if "message is not modified" not in str(exc).lower():
+                            logger.warning("Seller broadcast progress update failed: %s", exc)
+                    last_update = now
+                await asyncio.sleep(0.08)
+
+            final_text = (
+                "✅ Broadcast Completed\n\n"
+                f"👥 Active Users: {total}\n"
+                f"✅ Delivered: {delivered}\n"
+                f"❌ Errors: {failed}\n"
+                "⏳ Remaining: 0\n\n"
+                f"📈 Progress: {total} / {total} (100%)"
+            )
+            await progress_message.edit_text(
+                final_text,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
+                ),
+            )
+            return {"total": total, "success": delivered, "failed": failed}
+        except Exception as exc:
+            logger.exception("Seller broadcast background failed owner=%s", owner)
+            try:
+                await progress_message.edit_text(
+                    "❌ Broadcast Stopped\n\n"
+                    f"Delivered: {delivered}\n"
+                    f"Errors: {failed}\n\n"
+                    f"Reason: {str(exc)[:300]}",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
+                    ),
+                )
+            except Exception:
+                pass
+            return {"total": delivered + failed, "success": delivered, "failed": failed}
+        finally:
+            tasks = getattr(self, "_seller_broadcast_tasks", None)
+            if isinstance(tasks, dict):
+                tasks.pop(owner, None)
+
+    @staticmethod
+    def _seller_broadcast_progress_text(total, delivered, failed, remaining, status="🟢 Sending"):
+        processed = delivered + failed
+        percent = int((processed * 100) / total) if total else 100
+        return (
+            "📢 Broadcast Processing...\n\n"
+            f"Status: {status}\n\n"
+            f"👥 Active Users: {total}\n"
+            f"✅ Delivered: {delivered}\n"
+            f"❌ Errors: {failed}\n"
+            f"⏳ Remaining: {remaining}\n\n"
+            f"📈 Progress: {processed} / {total} ({percent}%)"
+        )
+
+    async def run_seller_broadcast_background(self, owner, context, item, progress_message):
+        """Run a seller broadcast without blocking other clone-bot callbacks."""
+        from database.seller_data import c, USERS
+
+        owner = int(owner)
+        delivered = failed = 0
+        users = []
+        try:
+            cursor = c(USERS).find(
+                {"owner_id": owner},
+                {"user_id": 1, "name": 1, "first_name": 1, "username": 1},
+            )
+            async for user in cursor:
+                user_id = user.get("user_id")
+                if user_id and int(user_id) != owner:
+                    users.append(user)
+
+            total = len(users)
+            await progress_message.edit_text(
+                self._seller_broadcast_progress_text(total, 0, 0, total)
+            )
+
+            last_update = 0.0
+            for index, user in enumerate(users, start=1):
+                user_id = int(user["user_id"])
+                try:
+                    await self._send_seller_broadcast_item(context.bot, user_id, item, user)
+                    delivered += 1
+                except RetryAfter as exc:
+                    wait_for = max(1, int(getattr(exc, "retry_after", 1)))
+                    try:
+                        await progress_message.edit_text(
+                            self._seller_broadcast_progress_text(
+                                total,
+                                delivered,
+                                failed,
+                                total - (delivered + failed),
+                                status=f"🟡 Telegram limit — retrying in {wait_for}s",
+                            )
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(wait_for + 1)
+                    try:
+                        await self._send_seller_broadcast_item(context.bot, user_id, item, user)
+                        delivered += 1
+                    except Exception as retry_exc:
+                        failed += 1
+                        logger.warning(
+                            "Seller broadcast retry failed owner=%s user=%s error=%s",
+                            owner,
+                            user_id,
+                            retry_exc,
+                        )
+                except Exception as exc:
+                    failed += 1
+                    logger.warning(
+                        "Seller broadcast failed owner=%s user=%s error=%s",
+                        owner,
+                        user_id,
+                        exc,
+                    )
+
+                remaining = total - (delivered + failed)
+                now = asyncio.get_running_loop().time()
+                if index == total or now - last_update >= 1.0:
+                    try:
+                        await progress_message.edit_text(
+                            self._seller_broadcast_progress_text(
+                                total, delivered, failed, remaining
+                            )
+                        )
+                    except BadRequest as exc:
+                        if "message is not modified" not in str(exc).lower():
+                            logger.warning("Seller broadcast progress update failed: %s", exc)
+                    last_update = now
+                await asyncio.sleep(0.08)
+
+            await progress_message.edit_text(
+                "✅ Broadcast Completed\n\n"
+                f"👥 Active Users: {total}\n"
+                f"✅ Delivered: {delivered}\n"
+                f"❌ Errors: {failed}\n"
+                "⏳ Remaining: 0\n\n"
+                f"📈 Progress: {total} / {total} (100%)",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
+                ),
+            )
+            return {"total": total, "success": delivered, "failed": failed}
+        except Exception as exc:
+            logger.exception("Seller broadcast background failed owner=%s", owner)
+            try:
+                await progress_message.edit_text(
+                    "❌ Broadcast Stopped\n\n"
+                    f"Delivered: {delivered}\n"
+                    f"Errors: {failed}\n\n"
+                    f"Reason: {str(exc)[:300]}",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
+                    ),
+                )
+            except Exception:
+                pass
+            return {"total": delivered + failed, "success": delivered, "failed": failed}
+        finally:
+            tasks = getattr(self, "_seller_broadcast_tasks", None)
+            if isinstance(tasks, dict):
+                tasks.pop(owner, None)
+
     async def send_seller_broadcast(self, owner, context, item):
+        """Compatibility sender for older code paths."""
         from database.seller_data import c, USERS
 
         total = success = failed = 0
@@ -100,7 +342,7 @@ class CloneBroadcastMixin:
             except Exception as exc:
                 failed += 1
                 logger.warning("Seller broadcast failed owner=%s user=%s error=%s", owner, user_id, exc)
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(0.08)
         return {"total": total, "success": success, "failed": failed}
 
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
