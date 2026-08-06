@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -14,7 +14,6 @@ from handlers.common.editor_engine import (
     editor_text_prompt,
     parse_editor_buttons,
     url_buttons_header,
-    business_url_buttons_header,
 )
 from telethon import TelegramClient
 from telethon.errors import (
@@ -53,111 +52,12 @@ from database.business_automation import (
     update_business_auto_reply,
     update_business_reply_template,
     update_business_welcome,
-    get_business_broadcast, update_business_broadcast, list_business_recipients,
 )
 from utils.crypto import decrypt_secret, encrypt_secret
 from services.business_automation_runtime import business_automation_runtime
 
 logger = logging.getLogger(__name__)
 
-
-def _broadcast_progress_text(data: dict, *, completed: bool = False) -> str:
-    total = int(data.get("total", 0))
-    full = int(data.get("full", 0))
-    partial = int(data.get("partial", 0))
-    failed = int(data.get("failed", 0))
-    pending = int(data.get("pending", 0))
-    retry_queue = int(data.get("retry_queue", 0))
-    processed = int(data.get("processed", full + partial + failed))
-    remaining = int(data.get("remaining", max(total - processed, 0)))
-    percent = int((processed / total) * 100) if total else 0
-    if completed:
-        title = "✅ Broadcast Completed"
-        status = "Status: ✅ Completed"
-    elif data.get("state") == "retry_wait":
-        title = "⚠️ Broadcast Processing..."
-        status = f"Status: 🔄 Waiting {int(float(data.get('wait_seconds', 0)))} seconds before retry"
-    else:
-        title = "📢 Broadcast Processing..."
-        status = "Status: 🟢 Sending"
-    lines = [
-        title, "", status, "",
-        f"Recipients: {total}",
-        f"✅ Fully Delivered: {full}",
-        f"⚠️ Partially Delivered: {partial}",
-        f"❌ Failed: {failed}",
-        f"🔁 Retry Queue: {retry_queue}",
-        f"🔄 Pending: {pending}",
-        f"⏳ Remaining: {remaining}",
-        "", f"📈 Progress: {processed} / {total} ({percent}%)",
-        f"🔁 Retry Round: {int(data.get('round', 1))}",
-    ]
-    current = data.get("current") or {}
-    if current and not completed:
-        label = current.get("username") or current.get("first_name") or current.get("chat_id")
-        lines.extend(["", f"Current Recipient: {label}"])
-    return "\n".join(lines)
-
-
-async def _run_business_broadcast_with_progress(context, owner: int, item: dict, recipients: list[dict], chat_id: int, message_id: int):
-    from handlers.clone.business_official_runtime import send_official_business_broadcast
-    lock_key = f"ba_broadcast_running:{owner}"
-    last_edit = 0.0
-    last_processed = -1
-    last_current = None
-
-    async def progress(data: dict):
-        nonlocal last_edit, last_processed, last_current
-        now = asyncio.get_running_loop().time()
-        processed = int(data.get("processed", 0))
-        current = data.get("current") or {}
-        current_key = (current.get("connection_id"), current.get("chat_id")) if current else None
-        force = data.get("state") == "retry_wait"
-        changed_recipient = current_key != last_current
-        if not force and processed == last_processed and not changed_recipient:
-            return
-        # Keep Telegram edit traffic controlled, but still show that the worker
-        # is advancing through rejected recipients even when delivered count
-        # has not changed yet.
-        if not force and now - last_edit < 1.5 and processed % 5 != 0:
-            return
-        last_edit = now
-        last_processed = processed
-        last_current = current_key
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id,
-                text=_broadcast_progress_text(data),
-                reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
-            )
-        except Exception:
-            logger.debug("Business broadcast progress update skipped", exc_info=True)
-
-    try:
-        report = await send_official_business_broadcast(context, owner, item, recipients, progress_callback=progress)
-        await update_business_broadcast(owner, last_report=report, last_sent_at=datetime.now(timezone.utc))
-        final_data = dict(report)
-        final_data["processed"] = int(report.get("full", 0)) + int(report.get("partial", 0)) + int(report.get("failed", 0))
-        final_data["remaining"] = int(report.get("pending", 0))
-        final_data["retry_queue"] = 0
-        final_data["round"] = int(final_data.get("round", 1))
-        await context.bot.edit_message_text(
-            chat_id=chat_id, message_id=message_id,
-            text=_broadcast_progress_text(final_data, completed=True),
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
-        )
-    except Exception:
-        logger.exception("Business broadcast background task failed owner=%s", owner)
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id,
-                text="❌ Broadcast stopped because of an unexpected system error.\n\nYou can try again from Business Automation.",
-                reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
-            )
-        except Exception:
-            pass
-    finally:
-        context.application.bot_data.pop(lock_key, None)
 
 
 def _kb(rows):
@@ -183,7 +83,6 @@ def _home_keyboard(enabled: bool):
             InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
             InlineKeyboardButton("📝 Reply Templates", callback_data="ba_templates"),
         ],
-        [InlineKeyboardButton("📣 Broadcast", callback_data="ba_broadcast")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="ba_settings")],
         [InlineKeyboardButton("📊 Statistics", callback_data="ba_stats")],
         [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
@@ -199,13 +98,15 @@ async def _home(owner: int):
         "💼 Business Automation\n\n"
         "Connect your Telegram Business Account and automate customer conversations.\n\n"
         "📌 Setup Guide\n"
-        "1. Telegram Premium or Telegram Business must be active on your account.\n"
-        "2. Open Telegram Settings → Telegram Business → Chatbots.\n"
-        "3. Select and connect this Clone Bot.\n"
-        "4. Return here after Telegram confirms the connection.\n\n"
+        "1. Log in to your account using the official Telegram app.\n"
+        "2. Open Settings → Account → Chat Automation.\n"
+        "3. Use the bot username/search option.\n"
+        "4. Enter your Clone Bot username and select it.\n"
+        "5. Grant all permissions except Manage Gifts and Manage Stars.\n"
+        "6. Return here after Telegram confirms the connection.\n\n"
         f"Automation: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
         f"Business Account: {connection_status}\n\n"
-        "Use the options below to manage Welcome Message, Auto Reply, Reply Templates, Broadcast, Settings, and Statistics."
+        "After connecting, you can configure and control Welcome Message, Auto Reply, and Reply Templates from here. You can also manage Settings and view Statistics."
     )
     return text, _home_keyboard(enabled)
 
@@ -310,20 +211,6 @@ def _template_keyboard(item):
 
 
 
-def _broadcast_text(item):
-    return (
-        "📣 Business Account Broadcast\n\n"
-        "This broadcast is sent only to users who messaged the connected Telegram Business Account. "
-        "Clone Bot users, Main Bot users and Live Support users are excluded.\n\n"
-        + editor_header("Current Setup", {**item, "enabled": True}, variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")
-    )
-
-def _broadcast_keyboard(item):
-    base = editor_menu_keyboard("ba_bc", {**item, "enabled": True}, back_callback="ba_home", allow_toggle=False)
-    rows = list(base.inline_keyboard)
-    rows.insert(-1, [InlineKeyboardButton("📤 Send Broadcast", callback_data="ba_bc_send")])
-    return _kb(rows)
-
 def _settings_text(s):
     return (
         "⚙️ Business Automation Settings\n\nControl how automation works for every connected account. These settings are shared across all accounts.\n\n"
@@ -351,14 +238,12 @@ def _settings_keyboard(s):
     ])
 
 
-async def _preview_markup(owner: int, rows):
-    from database.seller_bots import get_bot_by_data_owner_id
-    record = await get_bot_by_data_owner_id(int(owner)) or {}
-    return build_editor_keyboard(rows, clone_username=str(record.get("bot_username") or ""))
+def _preview_markup(rows):
+    return build_editor_keyboard(rows)
 
 
-async def _send_preview(message, owner, text, media_type, file_id, buttons, media_items=None):
-    markup = await _preview_markup(owner, buttons)
+async def _send_preview(message, text, media_type, file_id, buttons, media_items=None):
+    markup = _preview_markup(buttons)
     text = text or "Preview message"
     items = list(media_items or [])
     if not items and file_id:
@@ -541,56 +426,6 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     else:
         templates = []
 
-    if action == "ba_broadcast":
-        item = await get_business_broadcast(owner)
-        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
-    if action == "ba_bc_text":
-        item = await get_business_broadcast(owner)
-        context.user_data["ba_editor"] = {"field": "broadcast_text"}
-        await q.edit_message_text(editor_text_prompt("Business Broadcast Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard("ba_broadcast", remove_callback="ba_bc_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
-    if action == "ba_bc_media":
-        item = await get_business_broadcast(owner)
-        context.user_data["ba_editor"] = {"field": "broadcast_media"}
-        await q.edit_message_text(editor_media_prompt("Business Broadcast Media"), reply_markup=_input_keyboard("ba_broadcast", remove_callback="ba_bc_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
-    if action == "ba_bc_buttons":
-        item = await get_business_broadcast(owner)
-        context.user_data["ba_editor"] = {"field": "broadcast_buttons"}
-        await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard("ba_broadcast", remove_callback="ba_bc_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
-    if action == "ba_bc_rmtext":
-        item = await update_business_broadcast(owner, text="")
-        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
-    if action == "ba_bc_rmmedia":
-        item = await update_business_broadcast(owner, media_type="", media_file_id="", media=[])
-        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
-    if action == "ba_bc_rmbuttons":
-        item = await update_business_broadcast(owner, buttons=[])
-        await q.edit_message_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item)); return True
-    if action == "ba_bc_preview":
-        item = await get_business_broadcast(owner)
-        await _send_preview(q.message, owner, item.get("text"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
-    if action == "ba_bc_send":
-        item = await get_business_broadcast(owner)
-        recipients = await list_business_recipients(owner)
-        if not recipients:
-            await q.answer("No Business Account users found.", show_alert=True); return True
-        lock_key = f"ba_broadcast_running:{owner}"
-        running = context.application.bot_data.get(lock_key)
-        if running and not running.done():
-            await q.answer("A Business Automation broadcast is already running.", show_alert=True); return True
-        initial = {"total": len(recipients), "full": 0, "partial": 0, "failed": 0, "pending": 0, "processed": 0, "remaining": len(recipients), "state": "sending"}
-        await q.edit_message_text(
-            _broadcast_progress_text(initial),
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")]]),
-        )
-        task = context.application.create_task(
-            _run_business_broadcast_with_progress(
-                context, owner, item, recipients, int(q.message.chat_id), int(q.message.message_id)
-            ),
-            name=f"business-broadcast-{owner}",
-        )
-        context.application.bot_data[lock_key] = task
-        await q.answer("Broadcast started.")
-        return True
     if action == "ba_welcome":
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_toggle":
@@ -604,7 +439,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await q.edit_message_text(editor_media_prompt("Business Welcome Media"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmmedia" if (welcome.get("media") or welcome.get("media_file_id")) else None, remove_label="Remove Media")); return True
     if action == "ba_welcome_buttons":
         context.user_data["ba_editor"] = {"field": "welcome_buttons"}
-        await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
+        await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
     if action == "ba_welcome_rmtext":
         welcome = await update_business_welcome(owner, text="")
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
@@ -615,7 +450,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         welcome = await update_business_welcome(owner, buttons=[])
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_preview":
-        await _send_preview(q.message, owner, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons"), welcome.get("media")); await q.answer("Preview sent."); return True
+        await _send_preview(q.message, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons"), welcome.get("media")); await q.answer("Preview sent."); return True
 
     if action == "ba_auto":
         await q.edit_message_text(
@@ -651,7 +486,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(editor_media_prompt("Auto Reply Media"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "auto_item_buttons", "reply_id": rid}
-            await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+            await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "toggle": item = await update_business_auto_reply_item(owner, rid, enabled=not item.get("enabled", True))
         elif op == "rmtext": item = await update_business_auto_reply_item(owner, rid, text="")
         elif op == "rmmedia": item = await update_business_auto_reply_item(owner, rid, media_type="", media_file_id="", media=[])
@@ -661,7 +496,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             auto_replies = await list_business_auto_replies(owner)
             await q.edit_message_text("✅ Auto reply deleted.", reply_markup=_auto_replies_keyboard(auto_replies)); return True
         elif op == "preview":
-            await _send_preview(q.message, owner, item.get("text") or item.get("keyword"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
+            await _send_preview(q.message, item.get("text") or item.get("keyword"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
         if item:
             await q.edit_message_text(_auto_item_text(item), reply_markup=_auto_item_keyboard(item)); return True
 
@@ -701,7 +536,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(editor_media_prompt("Reply Template Media"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "template_buttons", "template_id": tid}
-            await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+            await q.edit_message_text(url_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "rmtext": item = await update_business_reply_template(owner, tid, text="")
         elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="", media=[])
         elif op == "rmbuttons": item = await update_business_reply_template(owner, tid, buttons=[])
@@ -710,7 +545,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             templates = await list_business_reply_templates(owner)
             await q.edit_message_text("✅ Reply template deleted.", reply_markup=_templates_keyboard(templates)); return True
         elif op == "preview":
-            await _send_preview(q.message, owner, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
+            await _send_preview(q.message, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
         if item:
             await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
 
@@ -739,16 +574,6 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             f"• Renew: {int(st.get('renew_opened', 0))}\n"
             f"• Profile: {int(st.get('profile_opened', 0))}\n"
             f"• Referral: {int(st.get('referral_opened', 0))}\n\n"
-            "📣 Broadcast Totals\n"
-            f"• Broadcasts Sent: {int(st.get('broadcasts_sent', 0))}\n"
-            f"• Total Recipients: {int(st.get('broadcast_recipients', 0))}\n"
-            f"• Fully Delivered: {int(st.get('broadcast_fully_delivered', 0))}\n"
-            f"• Partially Delivered: {int(st.get('broadcast_partially_delivered', 0))}\n"
-            f"• Failed: {int(st.get('broadcast_failed', 0))}\n\n"
-            "📨 Last Broadcast\n"
-            f"• Fully Delivered: {int(st.get('last_broadcast_full', 0))}\n"
-            f"• Partially Delivered: {int(st.get('last_broadcast_partial', 0))}\n"
-            f"• Failed: {int(st.get('last_broadcast_failed', 0))}"
         )
         await q.edit_message_text(
             text,
@@ -830,10 +655,6 @@ async def handle_text(self, update, context):
     try:
         if field == "welcome_text":
             await update_business_welcome(owner, text=text)
-        elif field == "broadcast_text":
-            await update_business_broadcast(owner, text=text)
-        elif field == "broadcast_buttons":
-            await update_business_broadcast(owner, buttons=parse_editor_buttons(text))
         elif field == "auto_keyword_add":
             item = await create_business_auto_reply_item(owner, text)
             context.user_data.pop("ba_editor", None)
@@ -898,10 +719,7 @@ async def handle_text(self, update, context):
         return True
 
     context.user_data.pop("ba_editor", None)
-    if field.startswith("broadcast_"):
-        item = await get_business_broadcast(owner)
-        await update.effective_message.reply_text(_broadcast_text(item), reply_markup=_broadcast_keyboard(item))
-    elif field.startswith("welcome_"):
+    if field.startswith("welcome_"):
         item = await get_business_welcome(owner)
         await update.effective_message.reply_text(_welcome_text(item), reply_markup=_welcome_keyboard(item))
     elif field.startswith("auto_item_") or field == "auto_keyword_edit":
@@ -922,7 +740,7 @@ async def handle_media(self, update, context):
         return False
     editor = context.user_data.get("ba_editor") or {}
     field = str(editor.get("field") or "")
-    if field not in {"welcome_media", "auto_item_media", "template_media", "broadcast_media"}:
+    if field not in {"welcome_media", "auto_item_media", "template_media"}:
         return False
 
     msg = update.effective_message
@@ -942,10 +760,7 @@ async def handle_media(self, update, context):
     async def save_items(items):
         items = items[:10]
         first = items[0] if items else {"type": "", "file_id": ""}
-        if field == "broadcast_media":
-            await update_business_broadcast(owner, media=items, media_type=first["type"], media_file_id=first["file_id"])
-            back = "ba_broadcast"
-        elif field == "welcome_media":
+        if field == "welcome_media":
             await update_business_welcome(owner, media=items, media_type=first["type"], media_file_id=first["file_id"])
             back = "ba_welcome"
         elif field == "auto_item_media":
@@ -961,10 +776,7 @@ async def handle_media(self, update, context):
             back = f"ba_tpl_open_{tid}"
         context.user_data.pop("ba_editor", None)
         context.user_data.pop("ba_media_batch", None)
-        if field == "broadcast_media":
-            current = await get_business_broadcast(owner)
-            await msg.reply_text(_broadcast_text(current), reply_markup=_broadcast_keyboard(current))
-        elif field == "welcome_media":
+        if field == "welcome_media":
             current = await get_business_welcome(owner)
             await msg.reply_text(_welcome_text(current), reply_markup=_welcome_keyboard(current))
         elif field == "auto_item_media":
