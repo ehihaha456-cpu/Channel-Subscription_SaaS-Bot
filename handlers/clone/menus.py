@@ -20,10 +20,9 @@ class CloneMenusMixin:
             [InlineKeyboardButton("📨 Pending Payments", callback_data="a_pending"), InlineKeyboardButton("📜 Payment History", callback_data="a_history")],
             [InlineKeyboardButton("📢 Channels / Groups", callback_data="a_channels"), InlineKeyboardButton("⚙️ Bot Settings", callback_data="a_settings")],
             [InlineKeyboardButton("👥 User Management", callback_data="a_users"), InlineKeyboardButton("👮 Staff Management", callback_data="a_staff")],
-            [InlineKeyboardButton("📣 Broadcast", callback_data="a_broadcast"), InlineKeyboardButton("📊 Statistics", callback_data="a_stats")],
+            [InlineKeyboardButton("📣 Broadcast", callback_data="a_broadcast")],
             [InlineKeyboardButton("🗑 Deleting Messages", callback_data="dm_home"), InlineKeyboardButton("🔒 Content Protection", callback_data="cp_home")],
-            [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support")],
-            [InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")],
+            [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support"), InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")],
             [InlineKeyboardButton("🛡 Subscription Guard", callback_data="sg_home")],
             [InlineKeyboardButton("🗓 Scheduled", callback_data="a_broadcast_schedule")],
             [InlineKeyboardButton("📜 Terms & Policy", callback_data="a_terms")],
@@ -31,39 +30,12 @@ class CloneMenusMixin:
         ])
 
     async def admin_panel_text(self, owner_id:int, seller_user=None):
-        """Build the live summary shown above the clone-bot admin buttons."""
+        """Build the complete seller statistics summary above the admin buttons."""
         try:
             plan, _assignment = await effective_plan(owner_id)
             bot_record = await get_bot_by_data_owner_id(owner_id) or {}
             settings = await get_seller_settings(owner_id)
-            db = get_database()
-            now_utc = datetime.now(timezone.utc)
-            try:
-                local_tz = ZoneInfo(settings.get("timezone") or "Asia/Kolkata")
-            except (ZoneInfoNotFoundError, ValueError):
-                local_tz = ZoneInfo("Asia/Kolkata")
-            local_now = now_utc.astimezone(local_tz)
-            local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-            start_utc = local_start.astimezone(timezone.utc)
-
-            active_users = await db["seller_subscriptions"].count_documents({
-                "owner_id": owner_id,
-                "active": True,
-                "expiry_date": {"$gt": now_utc},
-            })
-            revenue_rows = await db["seller_payments"].aggregate([
-                {"$match": {
-                    "owner_id": owner_id,
-                    "status": "approved",
-                    "$or": [
-                        {"processed_at": {"$gte": start_utc}},
-                        {"updated_at": {"$gte": start_utc}},
-                        {"created_at": {"$gte": start_utc}},
-                    ],
-                }},
-                {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
-            ]).to_list(length=1)
-            today_revenue = revenue_rows[0].get("total", 0) if revenue_rows else 0
+            snapshot = await stats(owner_id)
 
             seller_username = getattr(seller_user, "username", None)
             seller_label = f"@{seller_username}" if seller_username else str(getattr(seller_user, "full_name", None) or owner_id)
@@ -80,9 +52,16 @@ class CloneMenusMixin:
                 f"👤 Seller: <b>{html.escape(seller_label)}</b>\n"
                 f"🤖 Clone Bot: <b>{html.escape(clone_label)}</b>\n"
                 f"💎 Plan: <b>{html.escape(str(plan.get('name', 'Free')))}</b>\n"
-                f"👥 Active Users: <b>{active_users:,}</b>\n"
-                f"💰 Today Revenue: <b>{symbol}{float(today_revenue or 0):,.2f}</b>\n"
-                f"{status_text}"
+                f"{status_text}\n\n"
+                "━━━━━━━━━━━━━━\n\n"
+                f"👥 Total Users: <b>{int(snapshot.get('total_users', 0)):,}</b>\n"
+                f"🟢 Active Today: <b>{int(snapshot.get('active_users_today', 0)):,}</b>\n"
+                f"✅ Active Subscribers: <b>{int(snapshot.get('active_subscribers', 0)):,}</b>\n"
+                f"📦 Plans: <b>{int(snapshot.get('plans', 0)):,}</b>\n"
+                f"📢 Channels / Groups: <b>{int(snapshot.get('channels', 0)):,}</b>\n"
+                f"⏳ Pending Payments: <b>{int(snapshot.get('pending', 0)):,}</b>\n"
+                f"💰 Today Revenue: <b>{symbol}{float(snapshot.get('today_revenue', 0) or 0):,.2f}</b>\n"
+                f"💵 Total Revenue: <b>{symbol}{float(snapshot.get('total_revenue', 0) or 0):,.2f}</b>"
             )
         except Exception:
             logger.exception("Failed to build seller admin summary owner=%s", owner_id)
