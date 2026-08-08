@@ -547,3 +547,62 @@ async def get_policy(key: str):
 
 async def set_policy(key: str, text: str):
     await col(POLICIES).update_one({"key": key}, {"$set": {"text": text, "updated_at": datetime.now(timezone.utc)}}, upsert=True)
+
+# ---------------------------------------------------------------------------
+# Scheduled Broadcast editor (campaign-style drafts)
+# ---------------------------------------------------------------------------
+async def create_scheduled_campaign(owner_id: int, name: str) -> dict:
+    now = datetime.now(timezone.utc)
+    doc = {
+        "job_id": uuid4().hex,
+        "owner_id": int(owner_id),
+        "kind": "scheduled_campaign",
+        "name": str(name or "Scheduled Broadcast").strip()[:80],
+        "text": "",
+        "media": [],
+        "buttons": [],
+        "schedule_at": None,
+        "repeat_interval": "",
+        "status": "paused",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await col(SCHEDULED).insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+async def list_scheduled_campaigns(owner_id: int, limit: int = 50) -> list[dict]:
+    return await col(SCHEDULED).find(
+        {"owner_id": int(owner_id), "kind": "scheduled_campaign"},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(length=limit)
+
+
+async def get_scheduled_campaign(owner_id: int, job_id: str) -> dict | None:
+    return await col(SCHEDULED).find_one(
+        {"owner_id": int(owner_id), "job_id": str(job_id), "kind": "scheduled_campaign"},
+        {"_id": 0},
+    )
+
+
+async def update_scheduled_campaign(owner_id: int, job_id: str, **fields) -> dict | None:
+    allowed = {
+        "name", "text", "media", "buttons", "schedule_at", "repeat_interval", "status",
+        "media_type", "media_file_id",
+    }
+    clean = {key: value for key, value in fields.items() if key in allowed}
+    clean["updated_at"] = datetime.now(timezone.utc)
+    return await col(SCHEDULED).find_one_and_update(
+        {"owner_id": int(owner_id), "job_id": str(job_id), "kind": "scheduled_campaign"},
+        {"$set": clean},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def delete_scheduled_campaign(owner_id: int, job_id: str) -> bool:
+    result = await col(SCHEDULED).delete_one(
+        {"owner_id": int(owner_id), "job_id": str(job_id), "kind": "scheduled_campaign"}
+    )
+    return result.deleted_count == 1
