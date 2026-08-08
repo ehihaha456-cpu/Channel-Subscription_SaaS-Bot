@@ -5,6 +5,7 @@ from handlers.common.editor_engine import build_editor_keyboard, parse_editor_bu
 from handlers.common.feature_navigation import register_feature_origin
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from telegram.error import RetryAfter
 
 
 class CloneBroadcastMixin:
@@ -84,24 +85,115 @@ class CloneBroadcastMixin:
         user = {"user_id": owner, "name": "Preview User", "username": "preview_user"}
         await self._send_seller_broadcast_item(message.get_bot(), owner, item, user)
 
-    async def send_seller_broadcast(self, owner, context, item):
+    async def send_seller_broadcast(self, owner, context, item, progress_callback=None):
         from database.seller_data import c, USERS
 
-        total = success = failed = 0
-        cursor = c(USERS).find({"owner_id": int(owner)}, {"user_id": 1, "name": 1, "first_name": 1, "username": 1})
+        users = []
+        cursor = c(USERS).find(
+            {"owner_id": int(owner)},
+            {"user_id": 1, "name": 1, "first_name": 1, "username": 1},
+        )
         async for user in cursor:
             user_id = user.get("user_id")
             if not user_id or int(user_id) == int(owner):
                 continue
-            total += 1
+            users.append(user)
+
+        total = len(users)
+        success = failed = 0
+        if progress_callback:
+            await progress_callback(total=total, success=0, failed=0, processed=0)
+
+        for index, user in enumerate(users, start=1):
+            user_id = int(user.get("user_id"))
             try:
-                await self._send_seller_broadcast_item(context.bot, int(user_id), item, user)
-                success += 1
+                while True:
+                    try:
+                        await self._send_seller_broadcast_item(context.bot, user_id, item, user)
+                        success += 1
+                        break
+                    except RetryAfter as exc:
+                        wait_for = max(1, int(getattr(exc, "retry_after", 1) or 1))
+                        logger.warning("Seller broadcast flood wait owner=%s user=%s retry_after=%s", owner, user_id, wait_for)
+                        await asyncio.sleep(wait_for + 1)
             except Exception as exc:
                 failed += 1
                 logger.warning("Seller broadcast failed owner=%s user=%s error=%s", owner, user_id, exc)
-            await asyncio.sleep(0.04)
+
+            if progress_callback:
+                await progress_callback(total=total, success=success, failed=failed, processed=index)
+            await asyncio.sleep(0.08)
+
         return {"total": total, "success": success, "failed": failed}
+
+    @staticmethod
+    def _seller_broadcast_progress_text(total, success, failed, processed, completed=False):
+        remaining = max(0, int(total) - int(processed))
+        percent = int((processed / total) * 100) if total else 100
+        title = "✅ Broadcast Completed" if completed else "📢 Broadcast Processing..."
+        status = "✅ Completed" if completed else "🟢 Sending"
+        return (
+            f"{title}\n\n"
+            f"Status: {status}\n\n"
+            f"👥 Total Users: {total}\n"
+            f"✅ Delivered: {success}\n"
+            f"❌ Failed: {failed}\n"
+            f"⏳ Remaining: {remaining}\n\n"
+            f"📈 Progress: {processed} / {total} ({percent}%)"
+        )
+
+    async def run_seller_broadcast_background(self, owner, context, item, progress_message):
+        async def update_progress(*, total, success, failed, processed):
+            if processed not in (0, total) and processed % 2:
+                return
+            try:
+                await progress_message.edit_text(self._seller_broadcast_progress_text(total, success, failed, processed, completed=False))
+            except Exception as exc:
+                if "Message is not modified" not in str(exc):
+                    logger.warning("Seller broadcast progress edit failed owner=%s error=%s", owner, exc)
+        try:
+            result = await self.send_seller_broadcast(owner, context, item, progress_callback=update_progress)
+            try:
+                await progress_message.edit_text(self._seller_broadcast_progress_text(result["total"], result["success"], result["failed"], result["total"], completed=True))
+            except Exception:
+                logger.exception("Seller broadcast final progress edit failed owner=%s", owner)
+        finally:
+            context.application.bot_data.pop(f"seller_broadcast_running:{int(owner)}", None)
+
+    async def seller_broadcast_confirm_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        owner = self.owner(context)
+        if int(update.effective_user.id) != int(owner):
+            return
+        pending = context.user_data.get("seller_broadcast_confirmation") or {}
+        if int(pending.get("owner_id") or 0) != int(owner):
+            await update.effective_message.reply_text("❌ No broadcast is waiting for confirmation.")
+            return
+        running_key = f"seller_broadcast_running:{int(owner)}"
+        if context.application.bot_data.get(running_key):
+            await update.effective_message.reply_text("⚠️ A broadcast is already running.")
+            return
+        item = pending.get("draft") or {}
+        if not (item.get("text") or item.get("media") or item.get("media_file_id")):
+            context.user_data.pop("seller_broadcast_confirmation", None)
+            await update.effective_message.reply_text("❌ Broadcast content is empty.")
+            return
+        context.user_data.pop("seller_broadcast_confirmation", None)
+        context.application.bot_data[running_key] = True
+        progress_message = await update.effective_message.reply_text(self._seller_broadcast_progress_text(0, 0, 0, 0, completed=False))
+        context.application.create_task(
+            self.run_seller_broadcast_background(owner, context, item, progress_message),
+            name=f"seller_broadcast_{owner}",
+        )
+
+    async def seller_broadcast_cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        owner = self.owner(context)
+        if int(update.effective_user.id) != int(owner):
+            return
+        pending = context.user_data.pop("seller_broadcast_confirmation", None)
+        if pending:
+            await update.effective_message.reply_text("❌ Broadcast cancelled.")
+        else:
+            await update.effective_message.reply_text("ℹ️ No broadcast is waiting for confirmation.")
 
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
