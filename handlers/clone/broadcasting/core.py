@@ -84,249 +84,7 @@ class CloneBroadcastMixin:
         user = {"user_id": owner, "name": "Preview User", "username": "preview_user"}
         await self._send_seller_broadcast_item(message.get_bot(), owner, item, user)
 
-    @staticmethod
-    def _seller_broadcast_progress_text(total, delivered, failed, remaining, status="🟢 Sending"):
-        processed = delivered + failed
-        percent = int((processed * 100) / total) if total else 100
-        return (
-            "📢 Broadcast Processing...\n\n"
-            f"Status: {status}\n\n"
-            f"👥 Active Users: {total}\n"
-            f"✅ Delivered: {delivered}\n"
-            f"❌ Errors: {failed}\n"
-            f"⏳ Remaining: {remaining}\n\n"
-            f"📈 Progress: {processed} / {total} ({percent}%)"
-        )
-
-    async def run_seller_broadcast_background(self, owner, context, item, progress_message):
-        """Run seller broadcast without blocking clone-bot callbacks and update one live message."""
-        from database.seller_data import c, USERS
-
-        owner = int(owner)
-        delivered = failed = 0
-        users = []
-        try:
-            cursor = c(USERS).find(
-                {"owner_id": owner},
-                {"user_id": 1, "name": 1, "first_name": 1, "username": 1},
-            )
-            async for user in cursor:
-                user_id = user.get("user_id")
-                if user_id and int(user_id) != owner:
-                    users.append(user)
-
-            total = len(users)
-            await progress_message.edit_text(
-                self._seller_broadcast_progress_text(total, 0, 0, total)
-            )
-
-            last_update = 0.0
-            for index, user in enumerate(users, start=1):
-                user_id = int(user["user_id"])
-                try:
-                    await self._send_seller_broadcast_item(context.bot, user_id, item, user)
-                    delivered += 1
-                except RetryAfter as exc:
-                    wait_for = max(1, int(getattr(exc, "retry_after", 1)))
-                    await progress_message.edit_text(
-                        self._seller_broadcast_progress_text(
-                            total, delivered, failed, total - (delivered + failed),
-                            status=f"🟡 Telegram limit — retrying in {wait_for}s",
-                        )
-                    )
-                    await asyncio.sleep(wait_for + 1)
-                    try:
-                        await self._send_seller_broadcast_item(context.bot, user_id, item, user)
-                        delivered += 1
-                    except Exception as retry_exc:
-                        failed += 1
-                        logger.warning(
-                            "Seller broadcast retry failed owner=%s user=%s error=%s",
-                            owner, user_id, retry_exc,
-                        )
-                except Exception as exc:
-                    failed += 1
-                    logger.warning(
-                        "Seller broadcast failed owner=%s user=%s error=%s",
-                        owner, user_id, exc,
-                    )
-
-                remaining = total - (delivered + failed)
-                now = asyncio.get_running_loop().time()
-                if index == total or now - last_update >= 1.0:
-                    try:
-                        await progress_message.edit_text(
-                            self._seller_broadcast_progress_text(
-                                total, delivered, failed, remaining
-                            )
-                        )
-                    except BadRequest as exc:
-                        if "message is not modified" not in str(exc).lower():
-                            logger.warning("Seller broadcast progress update failed: %s", exc)
-                    last_update = now
-                await asyncio.sleep(0.08)
-
-            final_text = (
-                "✅ Broadcast Completed\n\n"
-                f"👥 Active Users: {total}\n"
-                f"✅ Delivered: {delivered}\n"
-                f"❌ Errors: {failed}\n"
-                "⏳ Remaining: 0\n\n"
-                f"📈 Progress: {total} / {total} (100%)"
-            )
-            await progress_message.edit_text(
-                final_text,
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
-                ),
-            )
-            return {"total": total, "success": delivered, "failed": failed}
-        except Exception as exc:
-            logger.exception("Seller broadcast background failed owner=%s", owner)
-            try:
-                await progress_message.edit_text(
-                    "❌ Broadcast Stopped\n\n"
-                    f"Delivered: {delivered}\n"
-                    f"Errors: {failed}\n\n"
-                    f"Reason: {str(exc)[:300]}",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
-                    ),
-                )
-            except Exception:
-                pass
-            return {"total": delivered + failed, "success": delivered, "failed": failed}
-        finally:
-            tasks = getattr(self, "_seller_broadcast_tasks", None)
-            if isinstance(tasks, dict):
-                tasks.pop(owner, None)
-
-    @staticmethod
-    def _seller_broadcast_progress_text(total, delivered, failed, remaining, status="🟢 Sending"):
-        processed = delivered + failed
-        percent = int((processed * 100) / total) if total else 100
-        return (
-            "📢 Broadcast Processing...\n\n"
-            f"Status: {status}\n\n"
-            f"👥 Active Users: {total}\n"
-            f"✅ Delivered: {delivered}\n"
-            f"❌ Errors: {failed}\n"
-            f"⏳ Remaining: {remaining}\n\n"
-            f"📈 Progress: {processed} / {total} ({percent}%)"
-        )
-
-    async def run_seller_broadcast_background(self, owner, context, item, progress_message):
-        """Run a seller broadcast without blocking other clone-bot callbacks."""
-        from database.seller_data import c, USERS
-
-        owner = int(owner)
-        delivered = failed = 0
-        users = []
-        try:
-            cursor = c(USERS).find(
-                {"owner_id": owner},
-                {"user_id": 1, "name": 1, "first_name": 1, "username": 1},
-            )
-            async for user in cursor:
-                user_id = user.get("user_id")
-                if user_id and int(user_id) != owner:
-                    users.append(user)
-
-            total = len(users)
-            await progress_message.edit_text(
-                self._seller_broadcast_progress_text(total, 0, 0, total)
-            )
-
-            last_update = 0.0
-            for index, user in enumerate(users, start=1):
-                user_id = int(user["user_id"])
-                try:
-                    await self._send_seller_broadcast_item(context.bot, user_id, item, user)
-                    delivered += 1
-                except RetryAfter as exc:
-                    wait_for = max(1, int(getattr(exc, "retry_after", 1)))
-                    try:
-                        await progress_message.edit_text(
-                            self._seller_broadcast_progress_text(
-                                total,
-                                delivered,
-                                failed,
-                                total - (delivered + failed),
-                                status=f"🟡 Telegram limit — retrying in {wait_for}s",
-                            )
-                        )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait_for + 1)
-                    try:
-                        await self._send_seller_broadcast_item(context.bot, user_id, item, user)
-                        delivered += 1
-                    except Exception as retry_exc:
-                        failed += 1
-                        logger.warning(
-                            "Seller broadcast retry failed owner=%s user=%s error=%s",
-                            owner,
-                            user_id,
-                            retry_exc,
-                        )
-                except Exception as exc:
-                    failed += 1
-                    logger.warning(
-                        "Seller broadcast failed owner=%s user=%s error=%s",
-                        owner,
-                        user_id,
-                        exc,
-                    )
-
-                remaining = total - (delivered + failed)
-                now = asyncio.get_running_loop().time()
-                if index == total or now - last_update >= 1.0:
-                    try:
-                        await progress_message.edit_text(
-                            self._seller_broadcast_progress_text(
-                                total, delivered, failed, remaining
-                            )
-                        )
-                    except BadRequest as exc:
-                        if "message is not modified" not in str(exc).lower():
-                            logger.warning("Seller broadcast progress update failed: %s", exc)
-                    last_update = now
-                await asyncio.sleep(0.08)
-
-            await progress_message.edit_text(
-                "✅ Broadcast Completed\n\n"
-                f"👥 Active Users: {total}\n"
-                f"✅ Delivered: {delivered}\n"
-                f"❌ Errors: {failed}\n"
-                "⏳ Remaining: 0\n\n"
-                f"📈 Progress: {total} / {total} (100%)",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
-                ),
-            )
-            return {"total": total, "success": delivered, "failed": failed}
-        except Exception as exc:
-            logger.exception("Seller broadcast background failed owner=%s", owner)
-            try:
-                await progress_message.edit_text(
-                    "❌ Broadcast Stopped\n\n"
-                    f"Delivered: {delivered}\n"
-                    f"Errors: {failed}\n\n"
-                    f"Reason: {str(exc)[:300]}",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("⬅ Broadcast", callback_data="a_broadcast")]]
-                    ),
-                )
-            except Exception:
-                pass
-            return {"total": delivered + failed, "success": delivered, "failed": failed}
-        finally:
-            tasks = getattr(self, "_seller_broadcast_tasks", None)
-            if isinstance(tasks, dict):
-                tasks.pop(owner, None)
-
     async def send_seller_broadcast(self, owner, context, item):
-        """Compatibility sender for older code paths."""
         from database.seller_data import c, USERS
 
         total = success = failed = 0
@@ -342,13 +100,155 @@ class CloneBroadcastMixin:
             except Exception as exc:
                 failed += 1
                 logger.warning("Seller broadcast failed owner=%s user=%s error=%s", owner, user_id, exc)
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.04)
         return {"total": total, "success": success, "failed": failed}
 
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
         if update.effective_user.id != owner:
             return
+
+        scheduled_editor = context.user_data.get("scheduled_broadcast_editor") or {}
+        scheduled_field = str(scheduled_editor.get("field") or "")
+        if scheduled_field:
+            from handlers.clone.admin.broadcast_coupons import (
+                _scheduled_editor_text, _scheduled_editor_keyboard,
+                _scheduled_settings_text, _scheduled_settings_keyboard,
+            )
+
+            async def edit_scheduled_menu(text, markup):
+                chat_id = scheduled_editor.get("menu_chat_id")
+                message_id = scheduled_editor.get("menu_message_id")
+                if chat_id and message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=int(chat_id), message_id=int(message_id),
+                            text=text, reply_markup=markup,
+                        )
+                        try:
+                            await update.effective_message.delete()
+                        except Exception:
+                            pass
+                        return
+                    except Exception:
+                        logger.exception("Scheduled broadcast menu edit failed owner=%s", owner)
+                await update.effective_message.reply_text(text, reply_markup=markup)
+
+            raw = (update.effective_message.text or update.effective_message.caption or "").strip()
+            if scheduled_field == "name":
+                if not raw:
+                    await update.effective_message.reply_text("❌ Send a broadcast name.")
+                    raise ApplicationHandlerStop
+                item = await create_scheduled_campaign(owner, raw)
+                context.user_data.pop("scheduled_broadcast_editor", None)
+                await edit_scheduled_menu(_scheduled_editor_text(item), _scheduled_editor_keyboard(item))
+                raise ApplicationHandlerStop
+
+            job_id = str(scheduled_editor.get("job_id") or "")
+            item = await get_scheduled_campaign(owner, job_id)
+            if not item:
+                context.user_data.pop("scheduled_broadcast_editor", None)
+                await update.effective_message.reply_text("❌ Scheduled broadcast not found.")
+                raise ApplicationHandlerStop
+
+            if scheduled_field == "text":
+                if not raw:
+                    await update.effective_message.reply_text("❌ Send text.")
+                    raise ApplicationHandlerStop
+                item = await update_scheduled_campaign(owner, job_id, text=raw)
+                context.user_data.pop("scheduled_broadcast_editor", None)
+                await edit_scheduled_menu(_scheduled_editor_text(item), _scheduled_editor_keyboard(item))
+                raise ApplicationHandlerStop
+
+            if scheduled_field == "buttons":
+                try:
+                    buttons = parse_editor_buttons(raw)
+                except ValueError as exc:
+                    await update.effective_message.reply_text(f"❌ {exc}")
+                    raise ApplicationHandlerStop
+                item = await update_scheduled_campaign(owner, job_id, buttons=buttons)
+                context.user_data.pop("scheduled_broadcast_editor", None)
+                await edit_scheduled_menu(_scheduled_editor_text(item), _scheduled_editor_keyboard(item))
+                raise ApplicationHandlerStop
+
+            if scheduled_field == "schedule":
+                try:
+                    parsed = datetime.strptime(raw, "%d %b %Y %I:%M %p")
+                    if parsed <= datetime.now():
+                        raise ValueError("past")
+                    display = parsed.strftime("%d %b %Y • %I:%M %p")
+                except Exception:
+                    await update.effective_message.reply_text(
+                        "❌ Use: 02 Sep 2026 06:50 PM\nThe date/time must be in the future."
+                    )
+                    raise ApplicationHandlerStop
+                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, status="active")
+                context.user_data.pop("scheduled_broadcast_editor", None)
+                await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
+                raise ApplicationHandlerStop
+
+            if scheduled_field == "repeat":
+                import re
+                match = re.fullmatch(r"([1-9]\d*)([smhdSMHD])", raw)
+                if not match:
+                    await update.effective_message.reply_text("❌ Use formats like 6s, 7m, 8h or 9d.")
+                    raise ApplicationHandlerStop
+                interval = f"{match.group(1)}{match.group(2).lower()}"
+                item = await update_scheduled_campaign(owner, job_id, repeat_interval=interval, status="active")
+                context.user_data.pop("scheduled_broadcast_editor", None)
+                await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
+                raise ApplicationHandlerStop
+
+            if scheduled_field == "media":
+                msg = update.effective_message
+                media_type = ""
+                file_id = ""
+                if msg.photo:
+                    media_type, file_id = "photo", msg.photo[-1].file_id
+                elif msg.video:
+                    media_type, file_id = "video", msg.video.file_id
+                elif msg.document:
+                    media_type, file_id = "document", msg.document.file_id
+                elif msg.animation:
+                    media_type, file_id = "animation", msg.animation.file_id
+                if not file_id:
+                    await msg.reply_text("❌ Send a photo, video, GIF or document.")
+                    raise ApplicationHandlerStop
+
+                async def save_scheduled_media(items):
+                    ordered = sorted(items[:10], key=lambda x: int(x.get("message_id") or 0))
+                    clean = [{"type": x["type"], "file_id": x["file_id"]} for x in ordered]
+                    first = clean[0]
+                    saved = await update_scheduled_campaign(
+                        owner, job_id, media=clean, media_type=first["type"], media_file_id=first["file_id"]
+                    )
+                    context.user_data.pop("scheduled_broadcast_editor", None)
+                    context.user_data.pop("scheduled_media_batch", None)
+                    await edit_scheduled_menu(_scheduled_editor_text(saved), _scheduled_editor_keyboard(saved))
+
+                entry = {"type": media_type, "file_id": file_id, "message_id": msg.message_id}
+                group_id = str(msg.media_group_id or "")
+                if not group_id:
+                    await save_scheduled_media([entry])
+                    raise ApplicationHandlerStop
+                batch = context.user_data.get("scheduled_media_batch")
+                if not batch or batch.get("group_id") != group_id:
+                    batch = {"group_id": group_id, "items": [], "generation": 0}
+                    context.user_data["scheduled_media_batch"] = batch
+                if len(batch["items"]) < 10:
+                    batch["items"].append(entry)
+                batch["generation"] += 1
+                generation = batch["generation"]
+
+                async def finalize_scheduled_album():
+                    await asyncio.sleep(1.2)
+                    current = context.user_data.get("scheduled_media_batch") or {}
+                    if current.get("group_id") != group_id or current.get("generation") != generation:
+                        return
+                    await save_scheduled_media(list(current.get("items") or []))
+
+                context.application.create_task(finalize_scheduled_album())
+                raise ApplicationHandlerStop
 
         editor = context.user_data.get("seller_broadcast_editor") or {}
         field = str(editor.get("field") or "")
