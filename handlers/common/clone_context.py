@@ -66,6 +66,8 @@ from database.platform_features import (
     save_failed_delivery,
     save_scheduled_broadcast,
     set_scheduled_status,
+    create_scheduled_campaign, list_scheduled_campaigns, get_scheduled_campaign,
+    update_scheduled_campaign, delete_scheduled_campaign,
 )
 from database.seller_data import (
     activate_subscription, fulfill_subscription_payment, active_subscriptions, add_channel, create_payment, create_automatic_payment, create_plan, delete_plan,
