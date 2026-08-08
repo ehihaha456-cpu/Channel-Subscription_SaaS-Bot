@@ -239,12 +239,14 @@ def _settings_keyboard(s):
     ])
 
 
-def _preview_markup(rows):
-    return build_editor_keyboard(rows)
+def _preview_markup(rows, clone_username: str = ""):
+    return build_editor_keyboard(rows, clone_username=clone_username)
 
 
 async def _send_preview(message, text, media_type, file_id, buttons, media_items=None):
-    markup = _preview_markup(buttons)
+    bot = message.get_bot()
+    clone_username = str(getattr(bot, "username", "") or "").lstrip("@")
+    markup = _preview_markup(buttons, clone_username)
     text = text or "Preview message"
     items = list(media_items or [])
     if not items and file_id:
