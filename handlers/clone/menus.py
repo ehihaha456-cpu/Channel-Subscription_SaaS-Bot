@@ -25,8 +25,7 @@ class CloneMenusMixin:
             [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support")],
             [InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")],
             [InlineKeyboardButton("🛡 Subscription Guard", callback_data="sg_home")],
-            [InlineKeyboardButton("📅 Scheduled Broadcast", callback_data="a_broadcast_schedule"), InlineKeyboardButton("🎟 Coupons", callback_data="a_coupons")],
-            [InlineKeyboardButton("🔁 Retry Failed", callback_data="a_retry_failed"), InlineKeyboardButton("🤝 Seller Referral", callback_data="a_seller_referral")],
+            [InlineKeyboardButton("🗓 Scheduled", callback_data="a_broadcast_schedule")],
             [InlineKeyboardButton("📜 Terms & Policy", callback_data="a_terms")],
             [InlineKeyboardButton("🆘 Help & Commands", callback_data="a_help")],
         ])
