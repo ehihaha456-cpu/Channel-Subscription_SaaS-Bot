@@ -292,14 +292,15 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not (item.get('text') or item.get('media') or item.get('media_file_id')):
             await q.answer('Add text or media first.', show_alert=True)
             return True
-        await q.answer('Broadcast started.')
+        context.user_data['seller_broadcast_confirmation'] = {
+            'owner_id': int(owner),
+            'draft': item,
+        }
+        await q.answer()
         await q.message.reply_text(
-            '📤 Broadcast is running in the background.\n\nYou can continue using the bot.',
-            reply_markup=_broadcast_keyboard(item),
-        )
-        context.application.create_task(
-            self.run_seller_broadcast_background(owner, context, item),
-            name=f"seller_broadcast_{owner}",
+            "📢 Broadcast Confirmation\n\n"
+            "Send /confirm to start this broadcast.\n"
+            "Send /cancel to cancel it."
         )
         return True
     return False
