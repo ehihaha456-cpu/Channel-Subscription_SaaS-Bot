@@ -29,6 +29,98 @@ def _broadcast_keyboard(item):
     return InlineKeyboardMarkup(rows)
 
 
+
+def _scheduled_home_text(items):
+    active = sum(1 for x in items if x.get("status") == "active")
+    paused = sum(1 for x in items if x.get("status") != "active")
+    return (
+        "📅 Scheduled Broadcasts\n\n"
+        f"Total: {len(items)}\n"
+        f"🟢 Active: {active}\n"
+        f"⏸ Paused: {paused}\n\n"
+        "Create and manage reusable scheduled broadcast drafts."
+    )
+
+
+def _scheduled_home_keyboard(items):
+    rows = [[InlineKeyboardButton("➕ Add Scheduled Broadcast", callback_data="a_sb_add")]]
+    for item in items[:20]:
+        icon = "🟢" if item.get("status") == "active" else "⏸"
+        name = str(item.get("name") or "Scheduled Broadcast")[:35]
+        rows.append([InlineKeyboardButton(f"{icon} {name}", callback_data=f"a_sb_open_{item['job_id']}")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="a_home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _scheduled_editor_text(item):
+    media_count = len(item.get("media") or [])
+    button_count = sum(len(row) for row in (item.get("buttons") or []))
+    status = "🟢 Active" if item.get("status") == "active" else "⏸ Paused"
+    return (
+        "📅 Scheduled Broadcast\n\n"
+        f"Name: {item.get('name') or 'Scheduled Broadcast'}\n"
+        f"Status: {status}\n\n"
+        f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
+        f"🖼 Media: {media_count}/10\n" if media_count else
+        "📅 Scheduled Broadcast\n\n"
+        f"Name: {item.get('name') or 'Scheduled Broadcast'}\n"
+        f"Status: {status}\n\n"
+        f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
+        "🖼 Media: ❌ Not added\n"
+    ) + (
+        f"🔗 Buttons: {button_count}\n\n"
+        f"📆 Schedule: {item.get('schedule_at') or 'Not Set'}\n"
+        f"🔁 Repeat: {item.get('repeat_interval') or 'Not Set'}"
+    )
+
+
+def _scheduled_editor_keyboard(item):
+    job_id = item["job_id"]
+    pause_label = "⏸ Pause" if item.get("status") == "active" else "▶️ Resume"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Edit Text", callback_data=f"a_sb_text_{job_id}"), InlineKeyboardButton("🖼 Edit Media", callback_data=f"a_sb_media_{job_id}")],
+        [InlineKeyboardButton("🔗 Edit Buttons", callback_data=f"a_sb_buttons_{job_id}")],
+        [InlineKeyboardButton("👁 Full Preview", callback_data=f"a_sb_preview_{job_id}")],
+        [InlineKeyboardButton("📅 Schedule Settings", callback_data=f"a_sb_settings_{job_id}")],
+        [InlineKeyboardButton(pause_label, callback_data=f"a_sb_toggle_{job_id}")],
+        [InlineKeyboardButton("🗑 Delete", callback_data=f"a_sb_delete_{job_id}")],
+        [InlineKeyboardButton("⬅ Back", callback_data="a_broadcast_schedule")],
+    ])
+
+
+def _scheduled_settings_text(item):
+    return (
+        "📅 Schedule Settings\n\n"
+        "Configure when this broadcast should be sent automatically.\n\n"
+        "Examples\n\n"
+        "One-Time\n"
+        "02 Sep 2026 • 06:50 PM\n\n"
+        "Recurring\n"
+        "6s = Every 6 Seconds\n"
+        "7m = Every 7 Minutes\n"
+        "8h = Every 8 Hours\n"
+        "9d = Every 9 Days\n\n"
+        f"Current Schedule: {item.get('schedule_at') or 'Not Set'}\n"
+        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}"
+    )
+
+
+def _scheduled_settings_keyboard(item):
+    job_id = item["job_id"]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Schedule", callback_data=f"a_sb_schedule_{job_id}")],
+        [InlineKeyboardButton("🔁 Repeat Broadcast", callback_data=f"a_sb_repeat_{job_id}")],
+        [InlineKeyboardButton("⬅ Back", callback_data=f"a_sb_open_{job_id}")],
+    ])
+
+
+def _scheduled_input_keyboard(job_id, remove_action=None):
+    rows = []
+    if remove_action:
+        rows.append([InlineKeyboardButton("🗑 Remove", callback_data=f"a_sb_{remove_action}_{job_id}")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"a_sb_open_{job_id}")])
+    return InlineKeyboardMarkup(rows)
+
 def _input_keyboard(back_callback, remove_callback=None, remove_label="Remove"):
     rows = []
     if remove_callback:
@@ -39,9 +131,104 @@ def _input_keyboard(back_callback, remove_callback=None, remove_label="Remove"):
 
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_broadcast_schedule':
-        context.user_data.clear()
-        context.user_data['wait_scheduled_broadcast'] = True
-        await q.edit_message_text('🗓 Send a message with first line in this format:\nYYYY-MM-DD HH:MM\n\nWrite the broadcast text after the first line. Time uses your configured timezone.', reply_markup=self.back())
+        context.user_data.pop('scheduled_broadcast_editor', None)
+        context.user_data.pop('scheduled_media_batch', None)
+        items = await list_scheduled_campaigns(owner)
+        await q.edit_message_text(_scheduled_home_text(items), reply_markup=_scheduled_home_keyboard(items))
+        return True
+    if a == 'a_sb_add':
+        context.user_data['scheduled_broadcast_editor'] = {
+            'field': 'name', 'menu_chat_id': q.message.chat_id, 'menu_message_id': q.message.message_id
+        }
+        await q.edit_message_text(
+            '➕ Add Scheduled Broadcast\n\nSend a name for this broadcast.\n\nExample: Morning Promotion',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='a_broadcast_schedule')]]),
+        )
+        return True
+    if a.startswith('a_sb_open_'):
+        job_id = a.removeprefix('a_sb_open_')
+        item = await get_scheduled_campaign(owner, job_id)
+        if not item:
+            await q.answer('Scheduled broadcast not found.', show_alert=True)
+            return True
+        await q.edit_message_text(_scheduled_editor_text(item), reply_markup=_scheduled_editor_keyboard(item))
+        return True
+    for prefix, field in (('a_sb_text_', 'text'), ('a_sb_media_', 'media'), ('a_sb_buttons_', 'buttons')):
+        if a.startswith(prefix):
+            job_id = a.removeprefix(prefix)
+            item = await get_scheduled_campaign(owner, job_id)
+            if not item:
+                await q.answer('Scheduled broadcast not found.', show_alert=True)
+                return True
+            context.user_data['scheduled_broadcast_editor'] = {
+                'field': field, 'job_id': job_id,
+                'menu_chat_id': q.message.chat_id, 'menu_message_id': q.message.message_id,
+            }
+            if field == 'text':
+                prompt = editor_text_prompt('Scheduled Broadcast Text', variables='{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}')
+                remove = 'rmtext' if item.get('text') else None
+            elif field == 'media':
+                prompt = editor_media_prompt('Scheduled Broadcast Media')
+                remove = 'rmmedia' if item.get('media') else None
+            else:
+                prompt = url_buttons_header()
+                remove = 'rmbuttons' if item.get('buttons') else None
+            await q.edit_message_text(prompt, reply_markup=_scheduled_input_keyboard(job_id, remove))
+            return True
+    if a.startswith('a_sb_settings_'):
+        job_id = a.removeprefix('a_sb_settings_')
+        item = await get_scheduled_campaign(owner, job_id)
+        if item:
+            await q.edit_message_text(_scheduled_settings_text(item), reply_markup=_scheduled_settings_keyboard(item))
+        return True
+    if a.startswith('a_sb_schedule_'):
+        job_id = a.removeprefix('a_sb_schedule_')
+        context.user_data['scheduled_broadcast_editor'] = {
+            'field': 'schedule', 'job_id': job_id, 'menu_chat_id': q.message.chat_id, 'menu_message_id': q.message.message_id
+        }
+        await q.edit_message_text(
+            '📅 Schedule\n\nSend the date and time for this broadcast.\n\nExample:\n02 Sep 2026 06:50 PM\n\nAccepted format: DD Mon YYYY HH:MM AM/PM',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_settings_{job_id}')]]),
+        )
+        return True
+    if a.startswith('a_sb_repeat_'):
+        job_id = a.removeprefix('a_sb_repeat_')
+        context.user_data['scheduled_broadcast_editor'] = {
+            'field': 'repeat', 'job_id': job_id, 'menu_chat_id': q.message.chat_id, 'menu_message_id': q.message.message_id
+        }
+        await q.edit_message_text(
+            '🔁 Repeat Broadcast\n\nSend how often this broadcast should repeat.\n\nExamples:\n6s = Every 6 Seconds\n7m = Every 7 Minutes\n8h = Every 8 Hours\n9d = Every 9 Days',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_settings_{job_id}')]]),
+        )
+        return True
+    if a.startswith('a_sb_toggle_'):
+        job_id = a.removeprefix('a_sb_toggle_')
+        item = await get_scheduled_campaign(owner, job_id)
+        if item:
+            status = 'paused' if item.get('status') == 'active' else 'active'
+            item = await update_scheduled_campaign(owner, job_id, status=status)
+            await q.edit_message_text(_scheduled_editor_text(item), reply_markup=_scheduled_editor_keyboard(item))
+        return True
+    if a.startswith('a_sb_delete_'):
+        job_id = a.removeprefix('a_sb_delete_')
+        await delete_scheduled_campaign(owner, job_id)
+        items = await list_scheduled_campaigns(owner)
+        await q.edit_message_text(_scheduled_home_text(items), reply_markup=_scheduled_home_keyboard(items))
+        return True
+    for prefix, field, value in (('a_sb_rmtext_', 'text', ''), ('a_sb_rmmedia_', 'media', []), ('a_sb_rmbuttons_', 'buttons', [])):
+        if a.startswith(prefix):
+            job_id = a.removeprefix(prefix)
+            item = await update_scheduled_campaign(owner, job_id, **{field: value})
+            await q.edit_message_text(_scheduled_editor_text(item), reply_markup=_scheduled_editor_keyboard(item))
+            return True
+    if a.startswith('a_sb_preview_'):
+        job_id = a.removeprefix('a_sb_preview_')
+        item = await get_scheduled_campaign(owner, job_id)
+        if not item or not (item.get('text') or item.get('media')):
+            await q.answer('Add text or media first.', show_alert=True)
+            return True
+        await self.send_seller_broadcast_preview(q.message, item)
+        await q.answer('Preview sent.')
         return True
     if a == 'a_coupons':
         coupons = await list_coupons(owner)
@@ -105,28 +292,14 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not (item.get('text') or item.get('media') or item.get('media_file_id')):
             await q.answer('Add text or media first.', show_alert=True)
             return True
-
-        running = getattr(self, '_seller_broadcast_tasks', {}).get(int(owner))
-        if running and not running.done():
-            await q.answer('A broadcast is already running.', show_alert=True)
-            return True
-
         await q.answer('Broadcast started.')
-        await q.edit_message_text(
-            '📢 Broadcast Processing...\n\n'
-            'Status: 🟢 Starting\n\n'
-            '👥 Active Users: Counting...\n'
-            '✅ Delivered: 0\n'
-            '❌ Errors: 0\n'
-            '⏳ Remaining: Counting...\n\n'
-            '📈 Progress: 0%',
+        await q.message.reply_text(
+            '📤 Broadcast is running in the background.\n\nYou can continue using the bot.',
+            reply_markup=_broadcast_keyboard(item),
         )
-        if not hasattr(self, '_seller_broadcast_tasks'):
-            self._seller_broadcast_tasks = {}
-        task = context.application.create_task(
-            self.run_seller_broadcast_background(owner, context, item, q.message),
+        context.application.create_task(
+            self.run_seller_broadcast_background(owner, context, item),
             name=f"seller_broadcast_{owner}",
         )
-        self._seller_broadcast_tasks[int(owner)] = task
         return True
     return False
