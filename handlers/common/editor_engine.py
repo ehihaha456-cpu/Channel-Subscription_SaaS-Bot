@@ -47,23 +47,24 @@ def url_buttons_header() -> str:
 
 
 def business_url_buttons_header() -> str:
-    """Compact Business Automation button instructions with Clone Bot deep links."""
+    """Business Automation button instructions. feature:* opens Clone Bot features."""
     return (
-        "🔗 Send URL, Feature or Clone Bot buttons\n\n"
-        "• Single Button:\n"
-        "Plans - feature:plans\n"
-        "Plans - clone:plans\n\n"
+        "🔗 Send URL, Username or Feature buttons\n\n"
+        "• URL Button:\n"
+        "Button Title - https://example.com\n\n"
+        "• Username Button:\n"
+        "Button Title - @username\n\n"
         "• Same Row (use &&):\n"
-        "Plans - clone:plans && Profile - clone:profile\n\n"
-        "• Available Features:\n"
-        "plans, buy, renew, profile, referral, referral_unlock, support, home\n\n"
-        "• Open inside current message:\n"
-        "Button Title - feature:plans\n\n"
-        "• Open Clone Bot directly:\n"
-        "Button Title - clone:plans\n\n"
-        "• Custom URL / Username:\n"
-        "Website - https://example.com\n"
-        "Support - @username"
+        "Plans - feature:plans && Profile - feature:profile\n\n"
+        "• Feature Buttons:\n"
+        "Plans - feature:plans\n"
+        "Buy - feature:buy\n"
+        "Profile - feature:profile\n"
+        "Renew - feature:renew\n"
+        "Referral - feature:referral\n"
+        "Unlock - feature:referral_unlock\n"
+        "Support - feature:support\n"
+        "Home - feature:home"
     )
 
 def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
