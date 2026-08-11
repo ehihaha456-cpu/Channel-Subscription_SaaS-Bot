@@ -1,0 +1,57 @@
+from copy import deepcopy
+from datetime import datetime, timezone
+import uuid
+from database.mongo import get_database
+from database.deleting_messages import DEFAULT_SETTINGS, deep_merge
+
+COLLECTION='seller_group_manager'
+
+def c(): return get_database()[COLLECTION]
+def now(): return datetime.now(timezone.utc)
+
+async def ensure_group(owner_id:int, chat_id:int, title:str='Group'):
+    key={'owner_id':int(owner_id),'chat_id':int(chat_id)}
+    await c().update_one(key,{'$setOnInsert':{**key,'title':title,'welcome':{'enabled':False,'text':'','media':[],'buttons':[]},'auto_replies':[],'templates':[],'moderation':deepcopy(DEFAULT_SETTINGS),'created_at':now()},'$set':{'title':title,'updated_at':now()}},upsert=True)
+    return await c().find_one(key)
+
+async def get_group(owner_id:int, chat_id:int, title:str='Group'):
+    return await ensure_group(owner_id,chat_id,title)
+
+async def update_welcome(owner_id,chat_id,**values):
+    await ensure_group(owner_id,chat_id)
+    await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{**{f'welcome.{k}':v for k,v in values.items()},'updated_at':now()}})
+    return await get_group(owner_id,chat_id)
+
+async def get_moderation(owner_id,chat_id):
+    doc=await get_group(owner_id,chat_id)
+    return deep_merge(DEFAULT_SETTINGS,doc.get('moderation') or {})
+
+async def set_moderation_value(owner_id,chat_id,path,value):
+    await ensure_group(owner_id,chat_id)
+    await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{f'moderation.{path}':value,'updated_at':now()}})
+    return await get_moderation(owner_id,chat_id)
+
+async def reset_moderation(owner_id,chat_id):
+    await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{'moderation':deepcopy(DEFAULT_SETTINGS),'updated_at':now()}},upsert=True)
+
+async def list_auto_replies(owner_id,chat_id):
+    return (await get_group(owner_id,chat_id)).get('auto_replies') or []
+async def save_auto_reply(owner_id,chat_id,item):
+    doc=await get_group(owner_id,chat_id); items=doc.get('auto_replies') or []
+    rid=item.get('id') or uuid.uuid4().hex[:10]; item={**item,'id':rid}
+    items=[x for x in items if x.get('id')!=rid]+[item]
+    await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{'auto_replies':items,'updated_at':now()}}); return item
+async def delete_auto_reply(owner_id,chat_id,rid):
+    await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$pull':{'auto_replies':{'id':rid}},'$set':{'updated_at':now()}})
+
+async def list_templates(owner_id,chat_id): return (await get_group(owner_id,chat_id)).get('templates') or []
+async def save_template(owner_id,chat_id,item):
+    doc=await get_group(owner_id,chat_id); items=doc.get('templates') or []
+    tid=item.get('id') or uuid.uuid4().hex[:10]; item={**item,'id':tid}
+    items=[x for x in items if x.get('id')!=tid]+[item]
+    await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{'templates':items,'updated_at':now()}}); return item
+
+async def get_auto_reply(owner_id,chat_id,rid):
+    return next((x for x in await list_auto_replies(owner_id,chat_id) if x.get("id")==rid),None)
+async def get_template(owner_id,chat_id,tid):
+    return next((x for x in await list_templates(owner_id,chat_id) if x.get("id")==tid),None)
