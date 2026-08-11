@@ -1,7 +1,8 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
-from handlers.clone.admin import business_automation
+from handlers.clone.admin import business_automation, group_manager
+from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler
 from telegram.request import HTTPXRequest
@@ -19,11 +20,17 @@ class CloneRuntimeAppMixin:
         )
 
     async def business_automation_text_handler(self, update, context):
+        handled = await group_manager.handle_text(self, update, context)
+        if handled:
+            raise ApplicationHandlerStop
         handled = await business_automation.handle_text(self, update, context)
         if handled:
             raise ApplicationHandlerStop
 
     async def business_automation_media_handler(self, update, context):
+        handled = await group_manager.handle_media(self, update, context)
+        if handled:
+            raise ApplicationHandlerStop
         handled = await business_automation.handle_media(self, update, context)
         if handled:
             raise ApplicationHandlerStop
@@ -74,7 +81,7 @@ class CloneRuntimeAppMixin:
         )
         app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
         app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
-        app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_)"))
+        app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
             app.add_handler(handler,group=-7)
@@ -84,6 +91,8 @@ class CloneRuntimeAppMixin:
             app.add_handler(handler,group=-7)
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, subscription_guard_new_members), group=-29)
+        app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_manager_message), group=-19)
         app.add_handler(MessageHandler(filters.ALL,moderate_seller_message),group=-20)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
