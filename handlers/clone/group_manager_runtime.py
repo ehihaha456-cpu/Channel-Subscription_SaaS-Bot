@@ -3,7 +3,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from database.group_manager import get_group
 from handlers.common.editor_engine import build_editor_keyboard
-from database.seller_data import get_bot_by_data_owner_id
+from database.seller_bots import get_bot_by_data_owner_id
 
 
 def vars_text(text,user,chat):
