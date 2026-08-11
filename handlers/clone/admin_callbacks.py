@@ -1,9 +1,9 @@
 """Clone-bot administrator callback router."""
 
 from handlers.common.clone_context import *
-from handlers.clone.admin import dashboard, plans, channels, welcome, gateways, live_support, payments, broadcast_coupons, referrals, help_terms, staff, users, business_automation
+from handlers.clone.admin import dashboard, plans, channels, welcome, gateways, live_support, payments, broadcast_coupons, referrals, help_terms, staff, users, business_automation, group_manager
 
-_ADMIN_HANDLERS = (business_automation, dashboard, plans, channels, welcome, gateways, live_support, payments, broadcast_coupons, referrals, help_terms, staff, users)
+_ADMIN_HANDLERS = (group_manager, business_automation, dashboard, plans, channels, welcome, gateways, live_support, payments, broadcast_coupons, referrals, help_terms, staff, users)
 
 class CloneAdminCallbacksMixin:
     async def admin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

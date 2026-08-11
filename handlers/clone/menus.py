@@ -21,7 +21,7 @@ class CloneMenusMixin:
             [InlineKeyboardButton("📢 Channels / Groups", callback_data="a_channels"), InlineKeyboardButton("⚙️ Bot Settings", callback_data="a_settings")],
             [InlineKeyboardButton("👥 User Management", callback_data="a_users"), InlineKeyboardButton("👮 Staff Management", callback_data="a_staff")],
             [InlineKeyboardButton("📣 Broadcast", callback_data="a_broadcast")],
-            [InlineKeyboardButton("🗑 Deleting Messages", callback_data="dm_home"), InlineKeyboardButton("🔒 Content Protection", callback_data="cp_home")],
+            [InlineKeyboardButton("🛡 Group Manager", callback_data="gm_home"), InlineKeyboardButton("🔒 Content Protection", callback_data="cp_home")],
             [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support"), InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")],
             [InlineKeyboardButton("🛡 Subscription Guard", callback_data="sg_home")],
             [InlineKeyboardButton("📅 Scheduled Broadcast", callback_data="a_broadcast_schedule")],
