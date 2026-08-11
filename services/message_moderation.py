@@ -244,7 +244,12 @@ class MessageModerationService:
         if message.from_user and message.from_user.is_bot:
             return ModerationDecision(False)
 
-        settings = settings or await get_deleting_message_settings(self.owner_id)
+        if settings is None:
+            try:
+                from database.group_manager import get_moderation
+                settings = await get_moderation(self.owner_id, message.chat.id)
+            except Exception:
+                settings = await get_deleting_message_settings(self.owner_id)
         if not settings.get("enabled", True):
             return ModerationDecision(False)
 
