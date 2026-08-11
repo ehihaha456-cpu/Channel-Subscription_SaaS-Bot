@@ -2,7 +2,8 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from handlers.common.editor_engine import build_editor_keyboard, editor_header, editor_menu_keyboard, editor_text_prompt, editor_media_prompt, business_url_buttons_header, parse_editor_buttons
 from handlers.common.feature_navigation import register_feature_origin
-from database.seller_data import get_channels, get_bot_by_data_owner_id
+from database.seller_data import get_channels
+from database.seller_bots import get_bot_by_data_owner_id
 from database.group_manager import get_group, update_welcome, list_auto_replies, save_auto_reply, list_templates, save_template, get_moderation, set_moderation_value, reset_moderation, get_auto_reply, get_template
 
 logger=logging.getLogger(__name__)
