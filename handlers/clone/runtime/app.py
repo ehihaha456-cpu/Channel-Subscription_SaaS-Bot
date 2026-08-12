@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
 from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message, group_manager_special_callback
+from handlers.clone.group_manager_protection_runtime import group_manager_protection_message
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler
 from telegram.request import HTTPXRequest
@@ -93,6 +94,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, subscription_guard_new_members), group=-29)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
+        app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-21)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_manager_message), group=-19)
         app.add_handler(MessageHandler(filters.ALL,moderate_seller_message),group=-20)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
