@@ -16,7 +16,7 @@ async def ensure_group(owner_id:int, chat_id:int, title:str='Group'):
         {
             '$setOnInsert': {
                 **key,
-                'welcome': {'enabled': False, 'text': '', 'media': [], 'buttons': []},
+                'welcome': {'enabled': False, 'text': '', 'media': [], 'buttons': [], 'delete_last_welcome': False, 'last_message_id': None},
                 'auto_replies': [],
                 'templates': [],
                 'moderation': deepcopy(DEFAULT_SETTINGS),
