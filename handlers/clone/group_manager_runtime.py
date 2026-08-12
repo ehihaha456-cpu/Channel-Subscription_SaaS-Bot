@@ -4,8 +4,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.group_manager import get_group, update_welcome
-from handlers.common.editor_engine import build_editor_keyboard
+from database.group_manager import get_group, update_welcome, get_auto_reply, get_template
+from handlers.clone.group_manager_buttons import build_group_keyboard, find_button
 from database.seller_bots import get_bot_by_data_owner_id
 
 
@@ -55,15 +55,15 @@ async def _send(bot,chat_id,item,text,markup,reply_to=None):
     if typ=='video': return await bot.send_video(video=fid,**common)
     return await bot.send_document(document=fid,**common)
 
-async def _markup(owner,item):
-    rec=await get_bot_by_data_owner_id(owner) or {}; return build_editor_keyboard(item.get('buttons'),clone_username=(rec.get('bot_username') or '').lstrip('@'))
+async def _markup(owner,item,item_key):
+    return build_group_keyboard(item.get('buttons'),item_key=item_key)
 
 async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
     if not m or m.chat.type not in {'group','supergroup'}: return
     owner=int(context.application.bot_data.get('seller_owner_id') or 0); doc=await get_group(owner,m.chat.id,m.chat.title or 'Group'); item=doc.get('welcome') or {}
     if not item.get('enabled') or not (item.get('text') or item.get('media')): return
-    markup=await _markup(owner,item)
+    markup=await _markup(owner,item,'w')
     for user in m.new_chat_members or []:
         if user.is_bot: continue
         if item.get('delete_last_welcome') and item.get('last_message_id'):
@@ -86,7 +86,76 @@ async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE)
     low=text.casefold()
     for item in doc.get('auto_replies') or []:
         if item.get('enabled',True) and (item.get('keyword') or '').casefold() in low and (item.get('text') or item.get('media')):
-            await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item),m.message_id); return
+            await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item,'a'+str(item.get('id') or '')),m.message_id); return
     for item in doc.get('templates') or []:
         if item.get('enabled',True) and low==(item.get('keyword') or '').casefold() and (item.get('text') or item.get('media')):
-            await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item),m.message_id); return
+            await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item,'t'+str(item.get('id') or '')),m.message_id); return
+
+
+async def group_manager_special_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.data:
+        return
+
+    data = q.data
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    group_id = None
+    item_key = ""
+    row_index = col_index = -1
+
+    try:
+        if data.startswith("gmspv_"):
+            # Preview callback: gmspv_<groupid>_<itemkey>_<row>_<col>
+            rest = data[len("gmspv_"):]
+            gid_s, item_key, row_s, col_s = rest.split("_", 3)
+            group_id = int(gid_s)
+            row_index, col_index = int(row_s), int(col_s)
+        elif data.startswith("gmsp_"):
+            # Live group callback: gmsp_<itemkey>_<row>_<col>
+            rest = data[len("gmsp_"):]
+            item_key, row_s, col_s = rest.rsplit("_", 2)
+            group_id = int(q.message.chat.id)
+            row_index, col_index = int(row_s), int(col_s)
+        else:
+            return
+    except Exception:
+        await q.answer("Button data is invalid.", show_alert=True)
+        return
+
+    doc = await get_group(owner, group_id)
+    item = None
+    if item_key == "w":
+        item = doc.get("welcome") or {}
+    elif item_key.startswith("a"):
+        item = await get_auto_reply(owner, group_id, item_key[1:])
+    elif item_key.startswith("t"):
+        item = await get_template(owner, group_id, item_key[1:])
+
+    button = find_button(item or {}, row_index, col_index)
+    if not button:
+        await q.answer("This button is no longer available.", show_alert=True)
+        return
+
+    typ = str(button.get("type") or "")
+    value = str(button.get("value") or "")
+
+    if typ == "popup":
+        await q.answer(value[:200], show_alert=False)
+        return
+    if typ == "alert":
+        await q.answer(value[:200], show_alert=True)
+        return
+    if typ == "rules":
+        try:
+            chat = await context.bot.get_chat(group_id)
+            rules = str(getattr(chat, "description", "") or "No group rules have been set.")
+        except Exception:
+            rules = "No group rules have been set."
+        await q.answer(rules[:200], show_alert=True)
+        return
+    if typ == "copy":
+        # Used only as fallback when Telegram/PTB CopyTextButton is unavailable.
+        await q.answer(("Copy: " + value)[:200], show_alert=True)
+        return
+
+    await q.answer()
