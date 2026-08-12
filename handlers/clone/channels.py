@@ -11,8 +11,8 @@ class CloneChannelsMixin:
         chat=update.effective_chat
         message=update.effective_message
 
-        if not user or user.id != owner:
-            await message.reply_text("❌ Sirf bot seller/admin group connect kar sakta hai.")
+        if not user or not await self.auth(update, context):
+            # Non-bot-admin members (including Telegram group admins) get no reply.
             return
         if not chat or chat.type not in {"group", "supergroup"}:
             await message.reply_text(

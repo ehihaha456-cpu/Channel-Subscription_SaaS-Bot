@@ -32,8 +32,8 @@ class CloneSupportCommandsMixin:
         user=update.effective_user
         chat=update.effective_chat
         message=update.effective_message
-        if not user or user.id!=owner:
-            await message.reply_text("❌ Sirf Clone Bot seller/admin support group connect kar sakta hai.")
+        if not user or not await self.auth(update, context):
+            # Non-bot-admin members (including Telegram group admins) get no reply.
             return
         if not chat or chat.type!="supergroup" or not getattr(chat,"is_forum",False):
             await message.reply_text("❌ /connectsupport ko Topics ON wale private supergroup ke andar bhejo.")
