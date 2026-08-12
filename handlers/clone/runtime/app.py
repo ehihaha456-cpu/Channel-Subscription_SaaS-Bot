@@ -36,6 +36,47 @@ class CloneRuntimeAppMixin:
         if handled:
             raise ApplicationHandlerStop
 
+
+    async def connected_group_command_guard(self, update, context):
+        message = update.effective_message
+        user = update.effective_user
+        chat = update.effective_chat
+        if not message or not user or not chat or chat.type not in {"group", "supergroup"}:
+            return
+
+        command = (message.text or "").split()[0].split("@", 1)[0].lstrip("/").lower()
+        if command not in {"start", "version", "admin", "help", "connectgroup", "connectsupport"}:
+            return
+
+        # /connectgroup and /connectsupport are silent for everyone except
+        # Clone Bot seller/staff admins. Telegram group-admin status alone is not enough.
+        if command in {"connectgroup", "connectsupport"}:
+            if not await self.auth(update, context):
+                raise ApplicationHandlerStop
+            return
+
+        # /start, /version, /admin and /help must stay completely silent inside
+        # groups already connected to this Clone Bot (subscription/group-manager
+        # groups or the connected Live Support group), even for bot admins.
+        owner = self.owner(context)
+        connected = False
+        try:
+            channels = await get_channels(owner)
+            connected = any(int(item.get("chat_id", 0) or 0) == int(chat.id) for item in channels or [])
+        except Exception:
+            logger.exception("Failed to check connected groups for command guard owner=%s chat=%s", owner, chat.id)
+
+        if not connected:
+            try:
+                support = await get_live_support_settings(owner)
+                support_group_id = int(support.get("support_group_id") or 0) if support else 0
+                connected = support_group_id == int(chat.id)
+            except Exception:
+                logger.exception("Failed to check support group for command guard owner=%s chat=%s", owner, chat.id)
+
+        if connected:
+            raise ApplicationHandlerStop
+
     def build_app(self,token,data_owner_id,seller_account_id,bot_id=None):
         request = HTTPXRequest(
             connection_pool_size=48,
@@ -64,6 +105,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(BusinessConnectionHandler(handle_business_connection), group=-51)
         app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message), group=-50)
         app.add_handler(BusinessMessagesDeletedHandler(handle_deleted_business_messages), group=-49)
+        app.add_handler(MessageHandler(filters.COMMAND, self.connected_group_command_guard), group=-100)
         app.add_handler(CommandHandler("start",self.child_start))
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
