@@ -155,8 +155,28 @@ async def handle_text(self,update,context):
         try: buttons=parse_group_buttons(text)
         except ValueError as e: await update.effective_message.reply_text(f'❌ {e}'); return True
         await update_welcome(owner,gid,buttons=buttons); back='gm_welcome'; msg='✅ Buttons saved.'
-    elif mode=='ar_keyword': await save_auto_reply(owner,gid,{'keyword':text,'enabled':True,'text':'','media':[],'buttons':[]}); back='gm_auto'; msg='✅ Auto Reply created.'
-    elif mode=='tpl_keyword': await save_template(owner,gid,{'keyword':text,'enabled':True,'text':'','media':[],'buttons':[]}); back='gm_templates'; msg='✅ Reply Template created.'
+    elif mode=='ar_keyword':
+        item = await save_auto_reply(owner,gid,{'keyword':text,'enabled':True,'text':'','media':[],'buttons':[]})
+        context.user_data.pop('gm_input',None)
+        rid = item['id']
+        await update.effective_message.reply_text(
+            '💬 Group Auto Reply\n\n'
+            'Keyword: '+item.get('keyword','')+'\n\n'+
+            editor_header('Current Setup',item,variables='{ID} {NAME} {SURNAME} {NAMESURNAME} {LANG} {DATE} {TIME} {WEEKDAY} {MENTION} {USERNAME} {GROUPNAME} {RULES}'),
+            reply_markup=editor_menu_keyboard(f'gm_ar_{rid}',item,back_callback='gm_auto',allow_toggle=True),
+        )
+        return True
+    elif mode=='tpl_keyword':
+        item = await save_template(owner,gid,{'keyword':text,'enabled':True,'text':'','media':[],'buttons':[]})
+        context.user_data.pop('gm_input',None)
+        tid = item['id']
+        await update.effective_message.reply_text(
+            '📝 Group Reply Template\n\n'
+            'Keyword: '+item.get('keyword','')+'\n\n'+
+            editor_header('Current Setup',item,variables='{ID} {NAME} {SURNAME} {NAMESURNAME} {LANG} {DATE} {TIME} {WEEKDAY} {MENTION} {USERNAME} {GROUPNAME} {RULES}'),
+            reply_markup=editor_menu_keyboard(f'gm_tpl_{tid}',item,back_callback='gm_templates',allow_toggle=True),
+        )
+        return True
     elif mode.startswith('ar_') or mode.startswith('tpl_'):
         kind,rid,field=mode.split('_',2); item=await (get_auto_reply(owner,gid,rid) if kind=='ar' else get_template(owner,gid,rid))
         if not item: context.user_data.pop('gm_input',None); return True
