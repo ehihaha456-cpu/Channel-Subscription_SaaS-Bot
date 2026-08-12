@@ -11,7 +11,21 @@ def now(): return datetime.now(timezone.utc)
 
 async def ensure_group(owner_id:int, chat_id:int, title:str='Group'):
     key={'owner_id':int(owner_id),'chat_id':int(chat_id)}
-    await c().update_one(key,{'$setOnInsert':{**key,'title':title,'welcome':{'enabled':False,'text':'','media':[],'buttons':[]},'auto_replies':[],'templates':[],'moderation':deepcopy(DEFAULT_SETTINGS),'created_at':now()},'$set':{'title':title,'updated_at':now()}},upsert=True)
+    await c().update_one(
+        key,
+        {
+            '$setOnInsert': {
+                **key,
+                'welcome': {'enabled': False, 'text': '', 'media': [], 'buttons': []},
+                'auto_replies': [],
+                'templates': [],
+                'moderation': deepcopy(DEFAULT_SETTINGS),
+                'created_at': now(),
+            },
+            '$set': {'title': title, 'updated_at': now()},
+        },
+        upsert=True,
+    )
     return await c().find_one(key)
 
 async def get_group(owner_id:int, chat_id:int, title:str='Group'):
