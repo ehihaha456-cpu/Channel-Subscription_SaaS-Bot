@@ -1,7 +1,8 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaDocument
-from handlers.common.editor_engine import build_editor_keyboard, editor_header, editor_menu_keyboard, editor_text_prompt, editor_media_prompt, business_url_buttons_header, parse_editor_buttons
+from handlers.common.editor_engine import editor_header, editor_menu_keyboard, editor_text_prompt, editor_media_prompt
 from handlers.common.feature_navigation import register_feature_origin
+from handlers.clone.group_manager_buttons import group_buttons_header, parse_group_buttons, build_group_keyboard
 from database.seller_data import get_channels
 from database.seller_bots import get_bot_by_data_owner_id
 from database.group_manager import get_group, update_welcome, list_auto_replies, save_auto_reply, list_templates, save_template, get_moderation, set_moderation_value, reset_moderation, get_auto_reply, get_template
@@ -88,8 +89,14 @@ def welcome_menu(item):
     return InlineKeyboardMarkup(rows)
 
 async def preview(q,context,owner,item,title='Preview'):
-    botrec=await get_bot_by_data_owner_id(owner) or {}; username=(botrec.get('bot_username') or '').lstrip('@')
-    markup=build_editor_keyboard(item.get('buttons'),clone_username=username)
+    gid=selected(context)
+    if title=='Group Welcome':
+        item_key='w'
+    elif title=='Auto Reply':
+        item_key='a'+str(item.get('id') or '')
+    else:
+        item_key='t'+str(item.get('id') or '')
+    markup=build_group_keyboard(item.get('buttons'),item_key=item_key,preview_group_id=gid)
     text=item.get('text') or f'{title}: no text added.'; media=item.get('media') or []
     if not media:
         m=await q.message.reply_text(text,reply_markup=markup); register_feature_origin(m,text=text,markup=markup); return
@@ -165,7 +172,7 @@ async def handle_text(self,update,context):
     text=(update.effective_message.text or '').strip()
     if mode=='welcome_text': await update_welcome(owner,gid,text=text); back='gm_welcome'; msg='✅ Welcome text saved.'
     elif mode=='welcome_buttons':
-        try: buttons=parse_editor_buttons(text)
+        try: buttons=parse_group_buttons(text)
         except ValueError as e: await update.effective_message.reply_text(f'❌ {e}'); return True
         await update_welcome(owner,gid,buttons=buttons); back='gm_welcome'; msg='✅ Buttons saved.'
     elif mode=='ar_keyword': await save_auto_reply(owner,gid,{'keyword':text,'enabled':True,'text':'','media':[],'buttons':[]}); back='gm_auto'; msg='✅ Auto Reply created.'
@@ -174,7 +181,7 @@ async def handle_text(self,update,context):
         kind,rid,field=mode.split('_',2); item=await (get_auto_reply(owner,gid,rid) if kind=='ar' else get_template(owner,gid,rid))
         if not item: context.user_data.pop('gm_input',None); return True
         if field=='buttons':
-            try: item['buttons']=parse_editor_buttons(text)
+            try: item['buttons']=parse_group_buttons(text)
             except ValueError as e: await update.effective_message.reply_text(f'❌ {e}'); return True
         else: item['text']=text
         if kind=='ar': await save_auto_reply(owner,gid,item); back=f'gm_ar_{rid}'
