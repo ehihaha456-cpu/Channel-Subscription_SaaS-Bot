@@ -120,6 +120,34 @@ def welcome_menu(item):
         [InlineKeyboardButton('⬅ Back',callback_data='gm_group')],
     ])
 
+
+def group_buttons_saved_text(rows):
+    lines = []
+    for row in rows or []:
+        chunks = []
+        for item in row or []:
+            title = str(item.get("text") or "Button")
+            typ = str(item.get("type") or "url")
+            value = str(item.get("value") or "")
+            if typ == "url":
+                target = value
+            elif typ == "popup":
+                target = f"popup: {value}"
+            elif typ == "alert":
+                target = f"alert: {value}"
+            elif typ == "rules":
+                target = "rules"
+            elif typ == "share":
+                target = f"share: {value}"
+            elif typ == "copy":
+                target = f"copy: {value}"
+            else:
+                target = value
+            chunks.append(f"{title} - {target}")
+        if chunks:
+            lines.append(" && ".join(chunks))
+    return "\n".join(lines)
+
 async def preview(q,context,owner,item,title='Preview'):
     gid=selected(context)
     if title=='Group Welcome':
@@ -169,7 +197,8 @@ async def handle(self,update,context,q,owner,staff,a,role):
     if a=='gm_welcome_seebuttons':
         if not item.get('buttons'): await q.answer('No buttons added.', show_alert=True); return True
         markup=build_group_keyboard(item.get('buttons'),item_key='w',preview_group_id=gid)
-        await q.message.reply_text('Choose an option:', reply_markup=markup)
+        saved=group_buttons_saved_text(item.get('buttons'))
+        await q.message.reply_text(saved or 'Choose an option:', reply_markup=markup, disable_web_page_preview=True)
         return True
     if a=='gm_welcome_preview': await preview(q,context,owner,item,'Group Welcome'); return True
     if a=='gm_auto':
@@ -196,7 +225,8 @@ async def handle(self,update,context,q,owner,staff,a,role):
         if action=='seebuttons':
             if not ar.get('buttons'): await q.answer('No buttons added.', show_alert=True); return True
             markup=build_group_keyboard(ar.get('buttons'),item_key='a'+str(ar.get('id') or ''),preview_group_id=gid)
-            await q.message.reply_text('Choose an option:', reply_markup=markup); return True
+            saved=group_buttons_saved_text(ar.get('buttons'))
+            await q.message.reply_text(saved or 'Choose an option:', reply_markup=markup, disable_web_page_preview=True); return True
         if action=='preview': await preview(q,context,owner,ar,'Auto Reply'); return True
     if a=='gm_templates':
         items=await list_templates(owner,gid); rows=[[InlineKeyboardButton(f"📝 {x.get('keyword','Template')}",callback_data=f"gm_tpl_{x['id']}")] for x in items]; rows += [[InlineKeyboardButton('➕ Add Reply Template',callback_data='gm_tpl_add')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('📝 Group Reply Templates\n\nTemplates are saved only for this selected group.',reply_markup=kb(rows)); return True
@@ -222,7 +252,8 @@ async def handle(self,update,context,q,owner,staff,a,role):
         if action=='seebuttons':
             if not it.get('buttons'): await q.answer('No buttons added.', show_alert=True); return True
             markup=build_group_keyboard(it.get('buttons'),item_key='t'+str(it.get('id') or ''),preview_group_id=gid)
-            await q.message.reply_text('Choose an option:', reply_markup=markup); return True
+            saved=group_buttons_saved_text(it.get('buttons'))
+            await q.message.reply_text(saved or 'Choose an option:', reply_markup=markup, disable_web_page_preview=True); return True
         if action=='preview': await preview(q,context,owner,it,'Reply Template'); return True
     if a=='gm_mod':
         s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'; rows=[[InlineKeyboardButton(f"{mark(s.get('enabled',True))} Moderation Master Switch",callback_data='gm_mod_master')],[InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands')],[InlineKeyboardButton('🔗 Link Protection',callback_data='gm_mod_links')],[InlineKeyboardButton('📦 Forwarded Media',callback_data='gm_mod_forwarded')],[InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],[InlineKeyboardButton('🛡 Safety Settings',callback_data='gm_mod_safety')],[InlineKeyboardButton('♻️ Reset Settings',callback_data='gm_mod_reset')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('🗑 Message Moderation\n\nThese deletion settings apply only to the selected group.',reply_markup=kb(rows)); return True
