@@ -2,7 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
-from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message
+from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message, group_manager_special_callback
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler
 from telegram.request import HTTPXRequest
@@ -81,6 +81,7 @@ class CloneRuntimeAppMixin:
         )
         app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
         app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
+        app.add_handler(CallbackQueryHandler(group_manager_special_callback, pattern=r"^gmsp"))
         app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
