@@ -1,7 +1,7 @@
 import re
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.group_manager import get_group
+from database.group_manager import get_group, update_welcome
 from handlers.common.editor_engine import build_editor_keyboard
 from database.seller_bots import get_bot_by_data_owner_id
 
@@ -33,7 +33,16 @@ async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_T
     markup=await _markup(owner,item)
     for user in m.new_chat_members or []:
         if user.is_bot: continue
-        await _send(context.bot,m.chat.id,item,vars_text(item.get('text') or '',user,m.chat),markup)
+        if item.get('delete_last_welcome') and item.get('last_message_id'):
+            try:
+                await context.bot.delete_message(chat_id=m.chat.id,message_id=int(item['last_message_id']))
+            except Exception:
+                # The old welcome may already be gone or no longer deletable; never block the new welcome.
+                pass
+        sent=await _send(context.bot,m.chat.id,item,vars_text(item.get('text') or '',user,m.chat),markup)
+        if sent:
+            item['last_message_id']=sent.message_id
+            await update_welcome(owner,m.chat.id,last_message_id=sent.message_id)
 
 async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
