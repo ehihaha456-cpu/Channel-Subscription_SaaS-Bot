@@ -1,4 +1,7 @@
 import re
+import html
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
 from database.group_manager import get_group, update_welcome
@@ -6,11 +9,41 @@ from handlers.common.editor_engine import build_editor_keyboard
 from database.seller_bots import get_bot_by_data_owner_id
 
 
-def vars_text(text,user,chat):
-    username=f"@{user.username}" if getattr(user,'username',None) else ''
-    mention=f'<a href="tg://user?id={user.id}">{user.first_name or "User"}</a>'
-    vals={'{NAME}':user.full_name or user.first_name or 'User','{ID}':str(user.id),'{USERNAME}':username,'{MENTION}':mention,'{GROUP}':chat.title or 'Group'}
-    for k,v in vals.items(): text=text.replace(k,v)
+async def vars_text(text, user, chat, bot):
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    first = html.escape(str(getattr(user, "first_name", "") or "User"))
+    surname = html.escape(str(getattr(user, "last_name", "") or ""))
+    full_name = html.escape(str(getattr(user, "full_name", "") or (first + (" " + surname if surname else ""))))
+    username_raw = str(getattr(user, "username", "") or "")
+    username = f"@{html.escape(username_raw)}" if username_raw else ""
+    lang = html.escape(str(getattr(user, "language_code", "") or ""))
+    group_name = html.escape(str(getattr(chat, "title", "") or "Group"))
+    mention = f'<a href="tg://user?id={user.id}">{first}</a>'
+
+    rules = ""
+    try:
+        full_chat = await bot.get_chat(chat.id)
+        rules = html.escape(str(getattr(full_chat, "description", "") or ""))
+    except Exception:
+        rules = html.escape(str(getattr(chat, "description", "") or ""))
+
+    vals = {
+        "{ID}": str(user.id),
+        "{NAME}": first,
+        "{SURNAME}": surname,
+        "{NAMESURNAME}": full_name,
+        "{LANG}": lang,
+        "{DATE}": now.strftime("%d-%m-%Y"),
+        "{TIME}": now.strftime("%I:%M %p"),
+        "{WEEKDAY}": now.strftime("%A"),
+        "{MENTION}": mention,
+        "{USERNAME}": username,
+        "{GROUPNAME}": group_name,
+        "{GROUP}": group_name,  # legacy alias
+        "{RULES}": rules,
+    }
+    for key, value in vals.items():
+        text = text.replace(key, value)
     return text
 
 async def _send(bot,chat_id,item,text,markup,reply_to=None):
@@ -39,7 +72,7 @@ async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_T
             except Exception:
                 # The old welcome may already be gone or no longer deletable; never block the new welcome.
                 pass
-        sent=await _send(context.bot,m.chat.id,item,vars_text(item.get('text') or '',user,m.chat),markup)
+        sent=await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', user, m.chat, context.bot),markup)
         if sent:
             item['last_message_id']=sent.message_id
             await update_welcome(owner,m.chat.id,last_message_id=sent.message_id)
@@ -53,7 +86,7 @@ async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE)
     low=text.casefold()
     for item in doc.get('auto_replies') or []:
         if item.get('enabled',True) and (item.get('keyword') or '').casefold() in low and (item.get('text') or item.get('media')):
-            await _send(context.bot,m.chat.id,item,vars_text(item.get('text') or '',m.from_user,m.chat),await _markup(owner,item),m.message_id); return
+            await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item),m.message_id); return
     for item in doc.get('templates') or []:
         if item.get('enabled',True) and low==(item.get('keyword') or '').casefold() and (item.get('text') or item.get('media')):
-            await _send(context.bot,m.chat.id,item,vars_text(item.get('text') or '',m.from_user,m.chat),await _markup(owner,item),m.message_id); return
+            await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item),m.message_id); return
