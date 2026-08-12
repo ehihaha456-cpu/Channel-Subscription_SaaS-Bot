@@ -36,27 +36,7 @@ def group_text_prompt(title: str) -> str:
     )
 
 def group_buttons_prompt() -> str:
-    return (
-        "👉 Set the buttons to be placed under the message\n"
-        "Send a message structured as follows:\n\n"
-        "• Add a single button:\n"
-        "Button title - https://example.com\n\n"
-        "• Add multiple buttons on a single line:\n"
-        "Button title - https://example.com && Button text - https://example.com\n\n"
-        "• Add multiple rows of buttons:\n"
-        "Button title - https://example.com\n"
-        "Button title - https://example.com\n\n"
-        "• Telegram username button:\n"
-        "Button title - @username\n\n"
-        "• Clone Bot feature buttons:\n"
-        "Plans - feature:plans\n"
-        "Plans - clone:plans\n"
-        "Profile - clone:profile\n\n"
-        "• Same row with Clone Bot features:\n"
-        "Plans - clone:plans && Profile - clone:profile\n\n"
-        "Available features:\n"
-        "plans, buy, renew, profile, referral, referral_unlock, support, home"
-    )
+    return group_buttons_header()
 
 def group_input_keyboard(back_callback: str, *, remove_callback: str, remove_label: str):
     return kb([
