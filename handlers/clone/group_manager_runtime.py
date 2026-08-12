@@ -83,9 +83,10 @@ async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE)
     text=(m.text or m.caption or '').strip()
     if not text: return
     owner=int(context.application.bot_data.get('seller_owner_id') or 0); doc=await get_group(owner,m.chat.id,m.chat.title or 'Group')
-    low=text.casefold()
+    low=' '.join(text.casefold().split())
     for item in doc.get('auto_replies') or []:
-        if item.get('enabled',True) and (item.get('keyword') or '').casefold() in low and (item.get('text') or item.get('media')):
+        keyword=' '.join(str(item.get('keyword') or '').casefold().split())
+        if item.get('enabled',True) and keyword and low == keyword and (item.get('text') or item.get('media')):
             await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', m.from_user, m.chat, context.bot),await _markup(owner,item,'a'+str(item.get('id') or '')),m.message_id); return
     for item in doc.get('templates') or []:
         if item.get('enabled',True) and low==(item.get('keyword') or '').casefold() and (item.get('text') or item.get('media')):
