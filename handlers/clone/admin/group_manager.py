@@ -101,7 +101,16 @@ async def group_home(q,context,owner):
     if not ch: return await groups_home(q,owner)
     await get_group(owner,gid,ch.get('title') or 'Group')
     text=f"🛡 GROUP MANAGER\n\n👥 Group: {ch.get('title') or 'Group'}\n🆔 ID: {gid}\n🟢 Bot: Connected\n\nAll settings below apply only to this group."
-    rows=[[InlineKeyboardButton('👋 Welcome Message',callback_data='gm_welcome')],[InlineKeyboardButton('💬 Auto Reply',callback_data='gm_auto'),InlineKeyboardButton('📝 Reply Templates',callback_data='gm_templates')],[InlineKeyboardButton('🗑 Message Moderation',callback_data='gm_mod')],[InlineKeyboardButton('⬅ Groups',callback_data='gm_home')]]
+    s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'
+    rows=[
+        [InlineKeyboardButton('👋 Welcome Message',callback_data='gm_welcome')],
+        [InlineKeyboardButton('💬 Auto Reply',callback_data='gm_auto')],
+        [InlineKeyboardButton(f"{mark(s.get('enabled',True))} Moderation Master Switch",callback_data='gm_mod_master')],
+        [InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands'),InlineKeyboardButton('🔗 Link Protection',callback_data='gm_mod_links')],
+        [InlineKeyboardButton('📦 Forwarded Media',callback_data='gm_mod_forwarded'),InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],
+        [InlineKeyboardButton('🛡 Safety Settings',callback_data='gm_mod_safety'),InlineKeyboardButton('♻️ Reset Settings',callback_data='gm_mod_reset')],
+        [InlineKeyboardButton('⬅ Groups',callback_data='gm_home')],
+    ]
     await q.edit_message_text(text,reply_markup=kb(rows))
 
 def welcome_text(item):
@@ -257,10 +266,29 @@ async def handle(self,update,context,q,owner,staff,a,role):
         if action=='preview': await preview(q,context,owner,it,'Reply Template'); return True
     if a=='gm_mod':
         s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'; rows=[[InlineKeyboardButton(f"{mark(s.get('enabled',True))} Moderation Master Switch",callback_data='gm_mod_master')],[InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands')],[InlineKeyboardButton('🔗 Link Protection',callback_data='gm_mod_links')],[InlineKeyboardButton('📦 Forwarded Media',callback_data='gm_mod_forwarded')],[InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],[InlineKeyboardButton('🛡 Safety Settings',callback_data='gm_mod_safety')],[InlineKeyboardButton('♻️ Reset Settings',callback_data='gm_mod_reset')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('🗑 Message Moderation\n\nThese deletion settings apply only to the selected group.',reply_markup=kb(rows)); return True
-    if a=='gm_mod_master': s=await get_moderation(owner,gid); await set_moderation_value(owner,gid,'enabled',not s.get('enabled',True)); q.data='gm_mod'; return await handle(self,update,context,q,owner,staff,'gm_mod',role)
-    if a=='gm_mod_reset': await reset_moderation(owner,gid); await q.answer('Group moderation settings reset.',show_alert=True); return await handle(self,update,context,q,owner,staff,'gm_mod',role)
+    if a=='gm_mod_master': s=await get_moderation(owner,gid); await set_moderation_value(owner,gid,'enabled',not s.get('enabled',True)); return await group_home(q,context,owner)
+    if a=='gm_mod_reset': await reset_moderation(owner,gid); await q.answer('Group moderation settings reset.',show_alert=True); return await group_home(q,context,owner)
     if a in {'gm_mod_commands','gm_mod_links','gm_mod_forwarded','gm_mod_service','gm_mod_safety'}:
-        await q.edit_message_text('This section is now scoped to the selected group. Detailed existing moderation controls are being preserved under Group Manager.',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_mod')]])); return True
+        s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'
+        if a=='gm_mod_commands':
+            d=s.get('delete_commands',{}); rows=[[InlineKeyboardButton(f"{mark(d.get('users'))} User Commands",callback_data='gm_set_delete_commands.users')],[InlineKeyboardButton(f"{mark(d.get('admins'))} Admin Commands",callback_data='gm_set_delete_commands.admins')]]; title='🗑 Delete Commands'
+        elif a=='gm_mod_links':
+            d=s.get('link_protection',{}); keys=[('enabled','Protection'),('all_links','All Links'),('telegram','Telegram'),('instagram','Instagram'),('youtube','YouTube'),('facebook','Facebook'),('x_twitter','X / Twitter'),('tiktok','TikTok'),('discord','Discord')]; rows=[[InlineKeyboardButton(f"{mark(d.get(k))} {label}",callback_data=f'gm_set_link_protection.{k}')] for k,label in keys]; title='🔗 Link Protection'
+        elif a=='gm_mod_forwarded':
+            d=s.get('forwarded_media',{}); keys=[('enabled','Protection'),('photo','Photo'),('video','Video'),('animation','Animation'),('document','Document'),('audio','Audio'),('voice','Voice'),('sticker','Sticker'),('video_note','Video Note')]; rows=[[InlineKeyboardButton(f"{mark(d.get(k))} {label}",callback_data=f'gm_set_forwarded_media.{k}')] for k,label in keys]; title='📦 Forwarded Media'
+        elif a=='gm_mod_service':
+            d=s.get('service_messages',{}); keys=[('join','Join'),('exit','Exit'),('photos','Group Photo'),('title','Group Title'),('pinned','Pinned'),('topic','Topic'),('boost','Boost'),('video_chats','Video Chats'),('checklist','Checklist'),('community','Community')]; rows=[[InlineKeyboardButton(f"{mark(d.get(k))} {label}",callback_data=f'gm_set_service_messages.{k}')] for k,label in keys]; title='💥 Service Messages'
+        else:
+            rows=[[InlineKeyboardButton(f"{mark(s.get('ignore_admins'))} Ignore Admins",callback_data='gm_set_ignore_admins')],[InlineKeyboardButton(f"{mark(s.get('ignore_owner'))} Ignore Owner",callback_data='gm_set_ignore_owner')]]; title='🛡 Safety Settings'
+        rows.append([InlineKeyboardButton('⬅ Back',callback_data='gm_group')]); await q.edit_message_text(title+'\n\nSettings apply only to this selected group.',reply_markup=kb(rows)); return True
+    if a.startswith('gm_set_'):
+        path=a[len('gm_set_'):]; s=await get_moderation(owner,gid)
+        cur=s
+        for part in path.split('.'):
+            cur=cur.get(part,{}) if isinstance(cur,dict) else False
+        await set_moderation_value(owner,gid,path,not bool(cur))
+        parent={'delete_commands':'gm_mod_commands','link_protection':'gm_mod_links','forwarded_media':'gm_mod_forwarded','service_messages':'gm_mod_service'}.get(path.split('.')[0],'gm_mod_safety')
+        return await handle(self,update,context,q,owner,staff,parent,role)
     return True
 
 async def handle_text(self,update,context):
