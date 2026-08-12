@@ -10,6 +10,59 @@ logger=logging.getLogger(__name__)
 def kb(rows): return InlineKeyboardMarkup(rows)
 def selected(context): return int(context.user_data.get('gm_group_id') or 0)
 
+
+GROUP_VARIABLES = (
+    "{ID} = user ID\n"
+    "{NAME} = first name\n"
+    "{SURNAME} = surname\n"
+    "{NAMESURNAME} = full name\n"
+    "{LANG} = user language\n"
+    "{DATE} = current date\n"
+    "{TIME} = current time\n"
+    "{WEEKDAY} = week day\n"
+    "{MENTION} = link to the user profile\n"
+    "{USERNAME} = username\n"
+    "{GROUPNAME} = group name\n"
+    "{RULES} = group rules/description"
+)
+
+def group_text_prompt(title: str) -> str:
+    return (
+        f"📝 {title}\n\n"
+        "Seller, send now the message you want to set!\n\n"
+        "You can use HTML and:\n"
+        f"• {GROUP_VARIABLES.replace(chr(10), chr(10) + '• ')}"
+    )
+
+def group_buttons_prompt() -> str:
+    return (
+        "👉 Set the buttons to be placed under the message\n"
+        "Send a message structured as follows:\n\n"
+        "• Add a single button:\n"
+        "Button title - https://example.com\n\n"
+        "• Add multiple buttons on a single line:\n"
+        "Button title - https://example.com && Button text - https://example.com\n\n"
+        "• Add multiple rows of buttons:\n"
+        "Button title - https://example.com\n"
+        "Button title - https://example.com\n\n"
+        "• Telegram username button:\n"
+        "Button title - @username\n\n"
+        "• Clone Bot feature buttons:\n"
+        "Plans - feature:plans\n"
+        "Plans - clone:plans\n"
+        "Profile - clone:profile\n\n"
+        "• Same row with Clone Bot features:\n"
+        "Plans - clone:plans && Profile - clone:profile\n\n"
+        "Available features:\n"
+        "plans, buy, renew, profile, referral, referral_unlock, support, home"
+    )
+
+def group_input_keyboard(back_callback: str, *, remove_callback: str, remove_label: str):
+    return kb([
+        [InlineKeyboardButton(f"🚫 {remove_label}", callback_data=remove_callback)],
+        [InlineKeyboardButton("❌ Cancel", callback_data=back_callback)],
+    ])
+
 async def groups_home(q,owner):
     groups=[x for x in await get_channels(owner) if int(x.get('chat_id',0))<0]
     rows=[[InlineKeyboardButton(f"👥 {str(x.get('title') or 'Group')[:35]}",callback_data=f"gm_select_{x['chat_id']}")] for x in groups]
@@ -24,7 +77,7 @@ async def group_home(q,context,owner):
     rows=[[InlineKeyboardButton('👋 Welcome Message',callback_data='gm_welcome')],[InlineKeyboardButton('💬 Auto Reply',callback_data='gm_auto'),InlineKeyboardButton('📝 Reply Templates',callback_data='gm_templates')],[InlineKeyboardButton('🗑 Message Moderation',callback_data='gm_mod')],[InlineKeyboardButton('⬅ Groups',callback_data='gm_home')]]
     await q.edit_message_text(text,reply_markup=kb(rows))
 
-def welcome_text(item): return '👋 Group Welcome Message\n\nSent when a new member joins the selected group.\n\n'+editor_header('Current Setup',item,variables='{NAME} {ID} {USERNAME} {MENTION} {GROUP}')
+def welcome_text(item): return '👋 Group Welcome Message\n\nSent when a new member joins the selected group.\n\n'+editor_header('Current Setup',item,variables='{ID} {NAME} {SURNAME} {NAMESURNAME} {LANG} {DATE} {TIME} {WEEKDAY} {MENTION} {USERNAME} {GROUPNAME} {RULES}')
 
 def welcome_menu(item):
     base=editor_menu_keyboard('gm_welcome',item,back_callback='gm_group',allow_toggle=True)
@@ -49,6 +102,7 @@ async def preview(q,context,owner,item,title='Preview'):
 async def handle(self,update,context,q,owner,staff,a,role):
     if not a.startswith('gm_'): return False
     if role!='seller': await q.answer('Only the seller can manage groups.',show_alert=True); return True
+    context.user_data.pop('gm_input', None)
     if a=='gm_home': await groups_home(q,owner); return True
     if a.startswith('gm_select_'):
         context.user_data['gm_group_id']=int(a[len('gm_select_'):]); await group_home(q,context,owner); return True
@@ -59,31 +113,41 @@ async def handle(self,update,context,q,owner,staff,a,role):
     if a=='gm_welcome': await q.edit_message_text(welcome_text(item),reply_markup=welcome_menu(item)); return True
     if a=='gm_welcome_toggle': await update_welcome(owner,gid,enabled=not item.get('enabled',False)); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
     if a=='gm_welcome_delete_last': await update_welcome(owner,gid,delete_last_welcome=not item.get('delete_last_welcome',False)); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
-    if a=='gm_welcome_text': context.user_data['gm_input']='welcome_text'; await q.edit_message_text(editor_text_prompt('Group Welcome Text',variables='{NAME} {ID} {USERNAME} {MENTION} {GROUP}'),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_welcome')]])); return True
+    if a=='gm_welcome_text': context.user_data['gm_input']='welcome_text'; await q.edit_message_text(group_text_prompt('Group Welcome Message'),reply_markup=group_input_keyboard('gm_welcome',remove_callback='gm_welcome_rmtext',remove_label='Remove message')); return True
     if a=='gm_welcome_media': context.user_data['gm_input']='welcome_media'; await q.edit_message_text(editor_media_prompt('Group Welcome Media'),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_welcome')]])); return True
-    if a=='gm_welcome_buttons': context.user_data['gm_input']='welcome_buttons'; await q.edit_message_text(business_url_buttons_header(),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_welcome')]])); return True
+    if a=='gm_welcome_buttons': context.user_data['gm_input']='welcome_buttons'; await q.edit_message_text(group_buttons_prompt(),reply_markup=group_input_keyboard('gm_welcome',remove_callback='gm_welcome_rmbuttons',remove_label='Remove Keyboard')); return True
+    if a=='gm_welcome_rmtext': await update_welcome(owner,gid,text=''); await q.answer('Welcome message removed.'); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
+    if a=='gm_welcome_rmbuttons': await update_welcome(owner,gid,buttons=[]); await q.answer('Welcome keyboard removed.'); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
     if a=='gm_welcome_preview': await preview(q,context,owner,item,'Group Welcome'); return True
     if a=='gm_auto':
         items=await list_auto_replies(owner,gid); rows=[[InlineKeyboardButton(f"💬 {x.get('keyword','Keyword')}",callback_data=f"gm_ar_{x['id']}")] for x in items]; rows += [[InlineKeyboardButton('➕ Add Keyword',callback_data='gm_ar_add')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('💬 Group Auto Reply\n\nKeyword replies are saved only for this selected group.',reply_markup=kb(rows)); return True
     if a=='gm_ar_add': context.user_data['gm_input']='ar_keyword'; await q.edit_message_text('➕ Add Auto Reply\n\nSend a keyword or phrase.',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_auto')]])); return True
     if a.startswith('gm_ar_') and a not in {'gm_ar_add'}:
-        rest=a[len('gm_ar_'):]; parts=rest.rsplit('_',1); rid=parts[0]; action=parts[1] if len(parts)>1 and parts[1] in {'text','media','buttons','preview','toggle'} else 'open'; rid=rest if action=='open' else rid
+        rest=a[len('gm_ar_'):]; parts=rest.rsplit('_',1); rid=parts[0]; action=parts[1] if len(parts)>1 and parts[1] in {'text','media','buttons','preview','toggle','rmtext','rmbuttons'} else 'open'; rid=rest if action=='open' else rid
         ar=await get_auto_reply(owner,gid,rid)
         if not ar: await q.answer('Auto Reply not found.',show_alert=True); return True
-        if action=='open': await q.edit_message_text('💬 Group Auto Reply\n\nKeyword: '+ar.get('keyword','')+'\n\n'+editor_header('Current Setup',ar,variables='{NAME} {ID} {USERNAME} {MENTION} {GROUP}'),reply_markup=editor_menu_keyboard(f'gm_ar_{rid}',ar,back_callback='gm_auto',allow_toggle=True)); return True
+        if action=='open': await q.edit_message_text('💬 Group Auto Reply\n\nKeyword: '+ar.get('keyword','')+'\n\n'+editor_header('Current Setup',ar,variables='{ID} {NAME} {SURNAME} {NAMESURNAME} {LANG} {DATE} {TIME} {WEEKDAY} {MENTION} {USERNAME} {GROUPNAME} {RULES}'),reply_markup=editor_menu_keyboard(f'gm_ar_{rid}',ar,back_callback='gm_auto',allow_toggle=True)); return True
         if action=='toggle': ar['enabled']=not ar.get('enabled',True); await save_auto_reply(owner,gid,ar); q.data=f'gm_ar_{rid}'; return await handle(self,update,context,q,owner,staff,q.data,role)
-        if action in {'text','media','buttons'}: context.user_data['gm_input']=f'ar_{rid}_{action}'; prompt=editor_text_prompt('Group Auto Reply Text',variables='{NAME} {ID} {USERNAME} {MENTION} {GROUP}') if action=='text' else (editor_media_prompt('Group Auto Reply Media') if action=='media' else business_url_buttons_header()); await q.edit_message_text(prompt,reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data=f'gm_ar_{rid}')]])); return True
+        if action=='text': context.user_data['gm_input']=f'ar_{rid}_text'; await q.edit_message_text(group_text_prompt('Group Auto Reply'),reply_markup=group_input_keyboard(f'gm_ar_{rid}',remove_callback=f'gm_ar_{rid}_rmtext',remove_label='Remove message')); return True
+        if action=='media': context.user_data['gm_input']=f'ar_{rid}_media'; await q.edit_message_text(editor_media_prompt('Group Auto Reply Media'),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data=f'gm_ar_{rid}')]])); return True
+        if action=='buttons': context.user_data['gm_input']=f'ar_{rid}_buttons'; await q.edit_message_text(group_buttons_prompt(),reply_markup=group_input_keyboard(f'gm_ar_{rid}',remove_callback=f'gm_ar_{rid}_rmbuttons',remove_label='Remove Keyboard')); return True
+        if action=='rmtext': ar['text']=''; await save_auto_reply(owner,gid,ar); await q.answer('Auto Reply message removed.'); q.data=f'gm_ar_{rid}'; return await handle(self,update,context,q,owner,staff,q.data,role)
+        if action=='rmbuttons': ar['buttons']=[]; await save_auto_reply(owner,gid,ar); await q.answer('Auto Reply keyboard removed.'); q.data=f'gm_ar_{rid}'; return await handle(self,update,context,q,owner,staff,q.data,role)
         if action=='preview': await preview(q,context,owner,ar,'Auto Reply'); return True
     if a=='gm_templates':
         items=await list_templates(owner,gid); rows=[[InlineKeyboardButton(f"📝 {x.get('keyword','Template')}",callback_data=f"gm_tpl_{x['id']}")] for x in items]; rows += [[InlineKeyboardButton('➕ Add Reply Template',callback_data='gm_tpl_add')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('📝 Group Reply Templates\n\nTemplates are saved only for this selected group.',reply_markup=kb(rows)); return True
     if a=='gm_tpl_add': context.user_data['gm_input']='tpl_keyword'; await q.edit_message_text('➕ Add Reply Template\n\nSend a unique keyword.',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_templates')]])); return True
     if a.startswith('gm_tpl_') and a not in {'gm_tpl_add'}:
-        rest=a[len('gm_tpl_'):]; parts=rest.rsplit('_',1); tid=parts[0]; action=parts[1] if len(parts)>1 and parts[1] in {'text','media','buttons','preview','toggle'} else 'open'; tid=rest if action=='open' else tid
+        rest=a[len('gm_tpl_'):]; parts=rest.rsplit('_',1); tid=parts[0]; action=parts[1] if len(parts)>1 and parts[1] in {'text','media','buttons','preview','toggle','rmtext','rmbuttons'} else 'open'; tid=rest if action=='open' else tid
         it=await get_template(owner,gid,tid)
         if not it: await q.answer('Template not found.',show_alert=True); return True
-        if action=='open': await q.edit_message_text('📝 Group Reply Template\n\nKeyword: '+it.get('keyword','')+'\n\n'+editor_header('Current Setup',it,variables='{NAME} {ID} {USERNAME} {MENTION} {GROUP}'),reply_markup=editor_menu_keyboard(f'gm_tpl_{tid}',it,back_callback='gm_templates',allow_toggle=True)); return True
+        if action=='open': await q.edit_message_text('📝 Group Reply Template\n\nKeyword: '+it.get('keyword','')+'\n\n'+editor_header('Current Setup',it,variables='{ID} {NAME} {SURNAME} {NAMESURNAME} {LANG} {DATE} {TIME} {WEEKDAY} {MENTION} {USERNAME} {GROUPNAME} {RULES}'),reply_markup=editor_menu_keyboard(f'gm_tpl_{tid}',it,back_callback='gm_templates',allow_toggle=True)); return True
         if action=='toggle': it['enabled']=not it.get('enabled',True); await save_template(owner,gid,it); q.data=f'gm_tpl_{tid}'; return await handle(self,update,context,q,owner,staff,q.data,role)
-        if action in {'text','media','buttons'}: context.user_data['gm_input']=f'tpl_{tid}_{action}'; prompt=editor_text_prompt('Group Reply Template Text',variables='{NAME} {ID} {USERNAME} {MENTION} {GROUP}') if action=='text' else (editor_media_prompt('Group Reply Template Media') if action=='media' else business_url_buttons_header()); await q.edit_message_text(prompt,reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data=f'gm_tpl_{tid}')]])); return True
+        if action=='text': context.user_data['gm_input']=f'tpl_{tid}_text'; await q.edit_message_text(group_text_prompt('Group Reply Template'),reply_markup=group_input_keyboard(f'gm_tpl_{tid}',remove_callback=f'gm_tpl_{tid}_rmtext',remove_label='Remove message')); return True
+        if action=='media': context.user_data['gm_input']=f'tpl_{tid}_media'; await q.edit_message_text(editor_media_prompt('Group Reply Template Media'),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data=f'gm_tpl_{tid}')]])); return True
+        if action=='buttons': context.user_data['gm_input']=f'tpl_{tid}_buttons'; await q.edit_message_text(group_buttons_prompt(),reply_markup=group_input_keyboard(f'gm_tpl_{tid}',remove_callback=f'gm_tpl_{tid}_rmbuttons',remove_label='Remove Keyboard')); return True
+        if action=='rmtext': it['text']=''; await save_template(owner,gid,it); await q.answer('Reply Template message removed.'); q.data=f'gm_tpl_{tid}'; return await handle(self,update,context,q,owner,staff,q.data,role)
+        if action=='rmbuttons': it['buttons']=[]; await save_template(owner,gid,it); await q.answer('Reply Template keyboard removed.'); q.data=f'gm_tpl_{tid}'; return await handle(self,update,context,q,owner,staff,q.data,role)
         if action=='preview': await preview(q,context,owner,it,'Reply Template'); return True
     if a=='gm_mod':
         s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'; rows=[[InlineKeyboardButton(f"{mark(s.get('enabled',True))} Moderation Master Switch",callback_data='gm_mod_master')],[InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands')],[InlineKeyboardButton('🔗 Link Protection',callback_data='gm_mod_links')],[InlineKeyboardButton('📦 Forwarded Media',callback_data='gm_mod_forwarded')],[InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],[InlineKeyboardButton('🛡 Safety Settings',callback_data='gm_mod_safety')],[InlineKeyboardButton('♻️ Reset Settings',callback_data='gm_mod_reset')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('🗑 Message Moderation\n\nThese deletion settings apply only to the selected group.',reply_markup=kb(rows)); return True
