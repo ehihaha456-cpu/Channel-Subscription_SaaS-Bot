@@ -275,13 +275,16 @@ class MessageModerationService:
                 return ModerationDecision(False)
             return ModerationDecision(True, "service_message", "service_messages_deleted")
 
-        if user_id is not None and settings.get("ignore_admins", True) and await is_admin():
-            return ModerationDecision(False)
-
+        # Command deletion has its own Admin/User controls. Evaluate it before
+        # the general ignore-admins rule so the Admin row actually works.
         command_settings = settings.get("delete_commands", {})
-        prefixes = command_settings.get("prefixes") or ["/"]
+        sender_is_admin = await is_admin() if user_id is not None else False
+        prefixes = (
+            command_settings.get("admin_prefixes")
+            if sender_is_admin
+            else command_settings.get("user_prefixes")
+        ) or command_settings.get("prefixes") or ["/"]
         if _looks_like_command(message, prefixes):
-            sender_is_admin = await is_admin()
             delete_command = (
                 command_settings.get("admins", False)
                 if sender_is_admin
@@ -289,6 +292,9 @@ class MessageModerationService:
             )
             if delete_command:
                 return ModerationDecision(True, "command", "commands_deleted")
+
+        if user_id is not None and settings.get("ignore_admins", True) and sender_is_admin:
+            return ModerationDecision(False)
 
         if _contains_blocked_link(message, settings.get("link_protection", {})):
             return ModerationDecision(True, "link", "links_deleted")
