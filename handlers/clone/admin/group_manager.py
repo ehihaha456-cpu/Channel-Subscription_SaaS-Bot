@@ -6,6 +6,7 @@ from handlers.clone.group_manager_buttons import group_buttons_header, parse_gro
 from database.seller_data import get_channels
 from database.seller_bots import get_bot_by_data_owner_id
 from database.group_manager import get_group, update_welcome, list_auto_replies, save_auto_reply, list_templates, save_template, get_moderation, set_moderation_value, reset_moderation, get_auto_reply, get_template
+from database.group_manager_protection import get_protection, set_protection, add_banned_word, remove_banned_word, warned_list
 
 logger=logging.getLogger(__name__)
 def kb(rows): return InlineKeyboardMarkup(rows)
@@ -101,14 +102,12 @@ async def group_home(q,context,owner):
     if not ch: return await groups_home(q,owner)
     await get_group(owner,gid,ch.get('title') or 'Group')
     text=f"🛡 GROUP MANAGER\n\n👥 Group: {ch.get('title') or 'Group'}\n🆔 ID: {gid}\n🟢 Bot: Connected\n\nAll settings below apply only to this group."
-    s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'
     rows=[
         [InlineKeyboardButton('👋 Welcome Message',callback_data='gm_welcome')],
         [InlineKeyboardButton('💬 Auto Reply',callback_data='gm_auto')],
-        [InlineKeyboardButton(f"{mark(s.get('enabled',True))} Moderation Master Switch",callback_data='gm_mod_master')],
-        [InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands'),InlineKeyboardButton('🔗 Link Protection',callback_data='gm_mod_links')],
-        [InlineKeyboardButton('📦 Forwarded Media',callback_data='gm_mod_forwarded'),InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],
-        [InlineKeyboardButton('🛡 Safety Settings',callback_data='gm_mod_safety'),InlineKeyboardButton('♻️ Reset Settings',callback_data='gm_mod_reset')],
+        [InlineKeyboardButton('🛡 Anti-Spam',callback_data='gm_as'),InlineKeyboardButton('🌊 Anti-Flood',callback_data='gm_af')],
+        [InlineKeyboardButton('🚫 Banned Words',callback_data='gm_bw'),InlineKeyboardButton('⚠️ Warns',callback_data='gm_warns')],
+        [InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands'),InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],
         [InlineKeyboardButton('⬅ Groups',callback_data='gm_home')],
     ]
     await q.edit_message_text(text,reply_markup=kb(rows))
@@ -175,6 +174,68 @@ async def preview(q,context,owner,item,title='Preview'):
     else: m=await q.message.reply_document(fid,caption=text,reply_markup=markup)
     register_feature_origin(m,text=text,markup=markup)
 
+
+ACTIONS=[("off","❌ Off"),("warn","❕ Warn"),("kick","❗ Kick"),("mute","🔇 Mute"),("ban","🚫 Ban")]
+
+def _action_rows(prefix,current):
+    return [
+        [InlineKeyboardButton(label+(" ✅" if current==value else ""),callback_data=f"{prefix}.{value}") for value,label in ACTIONS[:3]],
+        [InlineKeyboardButton(label+(" ✅" if current==value else ""),callback_data=f"{prefix}.{value}") for value,label in ACTIONS[3:]],
+    ]
+
+async def anti_spam_page(q,owner,gid):
+    p=await get_protection(owner,gid); a=p.get("anti_spam") or {}
+    rows=[
+        [InlineKeyboardButton("📘 Telegram Links",callback_data="gm_as_tg")],
+        [InlineKeyboardButton("📩 Forwarding",callback_data="gm_as_fw"),InlineKeyboardButton("💭 Quote",callback_data="gm_as_quote")],
+        [InlineKeyboardButton("🔗 Total Links Block",callback_data="gm_as_total")],
+        [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
+    ]
+    await q.edit_message_text("📩 Anti-Spam\nIn this menu you can decide whether to protect your group from unnecessary links, forwards, and quotes.",reply_markup=kb(rows))
+
+async def anti_flood_page(q,owner,gid):
+    p=await get_protection(owner,gid); d=p.get("anti_flood") or {}; act=d.get("action","off")
+    text=(f"🌊 Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\n"
+          f"Currently the antiflood is triggered when {d.get('messages',5)} messages are sent within {d.get('seconds',3)} seconds.\n\n"
+          f"Punishment: {act.title()}")
+    rows=[
+        [InlineKeyboardButton("📄 Messages",callback_data="gm_af_messages"),InlineKeyboardButton("🕘 Time",callback_data="gm_af_time")],
+        *_action_rows("gm_af_action",act),
+        [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete',True) else '❌'}",callback_data="gm_af_delete")],
+        [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
+    ]
+    await q.edit_message_text(text,reply_markup=kb(rows))
+
+async def banned_words_page(q,owner,gid):
+    p=await get_protection(owner,gid); d=p.get("banned_words") or {}; act=d.get("action","off"); words=d.get("words") or []
+    text=(f"🚫 Banned Words\nFrom this menu you can set a punishment for users who use the words you decide to ban.\n\n"
+          f"Penalty: {act.title()}\nDeletion: {'Yes ✅' if d.get('delete',True) else 'No ❌'}")
+    rows=[
+        *_action_rows("gm_bw_action",act),
+        [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete',True) else '❌'}",callback_data="gm_bw_delete")],
+        [InlineKeyboardButton("➕ Add",callback_data="gm_bw_add"),InlineKeyboardButton("➖ Remove",callback_data="gm_bw_remove")],
+        [InlineKeyboardButton("🔤 List",callback_data="gm_bw_list")],
+        [InlineKeyboardButton(f"{len(words)} Banned Words",callback_data="gm_bw_list")],
+        [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
+    ]
+    await q.edit_message_text(text,reply_markup=kb(rows))
+
+async def warns_page(q,owner,gid):
+    p=await get_protection(owner,gid); d=p.get("warns") or {}; act=d.get("action","mute"); mx=int(d.get("max_warns",3) or 3)
+    text=(f"⚠️ User warnings\nThe warning system allows you to give warnings to users for incorrect behavior in the group, before actually punishing them.\n\n"
+          f"Punishment: {act.title()}\nMax Warns allowed: {mx}")
+    rows=[
+        [InlineKeyboardButton("📄 Warned List",callback_data="gm_warns_list")],
+        [InlineKeyboardButton("❌ Off"+(" ✅" if act=="off" else ""),callback_data="gm_warns_action.off"),
+         InlineKeyboardButton("❗ Kick"+(" ✅" if act=="kick" else ""),callback_data="gm_warns_action.kick")],
+        [InlineKeyboardButton("🔇 Mute"+(" ✅" if act=="mute" else ""),callback_data="gm_warns_action.mute"),
+         InlineKeyboardButton("🚫 Ban"+(" ✅" if act=="ban" else ""),callback_data="gm_warns_action.ban")],
+        [InlineKeyboardButton(f"🔇🕘 Set mute duration ({d.get('mute_minutes',30)}m)",callback_data="gm_warns_mute")],
+        [InlineKeyboardButton(str(n)+(" ✅" if mx==n else ""),callback_data=f"gm_warns_max.{n}") for n in (2,3,4,5,6)],
+        [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
+    ]
+    await q.edit_message_text(text,reply_markup=kb(rows))
+
 async def handle(self,update,context,q,owner,staff,a,role):
     if not a.startswith('gm_'): return False
     if role!='seller': await q.answer('Only the seller can manage groups.',show_alert=True); return True
@@ -186,6 +247,107 @@ async def handle(self,update,context,q,owner,staff,a,role):
     gid=selected(context)
     if not gid: await groups_home(q,owner); return True
     doc=await get_group(owner,gid); item=doc.get('welcome') or {}
+    if a=='gm_as': await anti_spam_page(q,owner,gid); return True
+    if a=='gm_af': await anti_flood_page(q,owner,gid); return True
+    if a=='gm_bw': await banned_words_page(q,owner,gid); return True
+    if a=='gm_warns': await warns_page(q,owner,gid); return True
+
+    if a=='gm_as_tg':
+        p=await get_protection(owner,gid); d=p['anti_spam']['telegram_links']; act=d.get('action','off')
+        rows=_action_rows('gm_as_tg_action',act)+[
+            [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete') else '❌'}",callback_data='gm_as_tg_delete')],
+            [InlineKeyboardButton(f"🎯 Username Antispam {'✅' if d.get('username_antispam') else '❌'}",callback_data='gm_as_tg_usernames')],
+            [InlineKeyboardButton(f"🤖 Bots Antispam {'✅' if d.get('bots_antispam') else '❌'}",callback_data='gm_as_tg_bots')],
+            [InlineKeyboardButton('⬅ Back',callback_data='gm_as'),InlineKeyboardButton('☀️ Exceptions',callback_data='gm_exceptions')],
+        ]
+        await q.edit_message_text(f"📘 Telegram links\nFrom this menu you can set a punishment for users who send messages that contain Telegram links.\n\nPenalty: {act.title()}\nDeletion: {'Yes ✅' if d.get('delete') else 'No ❌'}",reply_markup=kb(rows)); return True
+
+    if a=='gm_as_fw':
+        p=await get_protection(owner,gid); d=p['anti_spam']['forwarding']
+        rows=[
+            [InlineKeyboardButton(f"📣 Channels {'✅' if d.get('channels') else '❌'}",callback_data='gm_as_fw_toggle.channels'),InlineKeyboardButton(f"👥 Groups {'✅' if d.get('groups') else '❌'}",callback_data='gm_as_fw_toggle.groups')],
+            [InlineKeyboardButton(f"👤 Users {'✅' if d.get('users') else '❌'}",callback_data='gm_as_fw_toggle.users'),InlineKeyboardButton(f"🤖 Bots {'✅' if d.get('bots') else '❌'}",callback_data='gm_as_fw_toggle.bots')],
+            *_action_rows('gm_as_fw_action',d.get('action','off')),
+            [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete') else '❌'}",callback_data='gm_as_fw_delete')],
+            [InlineKeyboardButton('⬅ Back',callback_data='gm_as'),InlineKeyboardButton('☀️ Exceptions',callback_data='gm_exceptions')],
+        ]
+        await q.edit_message_text("📩 Forwarding\nSelect punishment for users who forward messages in the group.",reply_markup=kb(rows)); return True
+
+    if a=='gm_as_quote':
+        p=await get_protection(owner,gid); d=p['anti_spam']['quote']
+        rows=_action_rows('gm_as_quote_action',d.get('action','off'))+[
+            [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete') else '❌'}",callback_data='gm_as_quote_delete')],
+            [InlineKeyboardButton('⬅ Back',callback_data='gm_as'),InlineKeyboardButton('☀️ Exceptions',callback_data='gm_exceptions')],
+        ]
+        await q.edit_message_text("💭 Quote\nChoose how quoted/forwarded quote messages should be handled.",reply_markup=kb(rows)); return True
+
+    if a=='gm_as_total':
+        p=await get_protection(owner,gid); d=p['anti_spam']['total_links']; act=d.get('action','off')
+        rows=_action_rows('gm_as_total_action',act)+[
+            [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete') else '❌'}",callback_data='gm_as_total_delete')],
+            [InlineKeyboardButton('⬅ Back',callback_data='gm_as'),InlineKeyboardButton('☀️ Exceptions',callback_data='gm_exceptions')],
+        ]
+        await q.edit_message_text(f"🔗 TOTAL LINKS BLOCK\nChoose the punishment for those who send any kind of link.\n\nPenalty: {act.title()}\nDeletion: {'Yes ✅' if d.get('delete') else 'No ❌'}",reply_markup=kb(rows)); return True
+
+    if a=='gm_exceptions':
+        await q.answer('Exceptions will be added in the next refinement.',show_alert=True); return True
+
+    if a.startswith('gm_as_tg_action.'):
+        await set_protection(owner,gid,'anti_spam.telegram_links.action',a.rsplit('.',1)[1]); return await handle(self,update,context,q,owner,staff,'gm_as_tg',role)
+    if a=='gm_as_tg_delete':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_spam.telegram_links.delete',not p['anti_spam']['telegram_links'].get('delete')); return await handle(self,update,context,q,owner,staff,'gm_as_tg',role)
+    if a=='gm_as_tg_usernames':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_spam.telegram_links.username_antispam',not p['anti_spam']['telegram_links'].get('username_antispam')); return await handle(self,update,context,q,owner,staff,'gm_as_tg',role)
+    if a=='gm_as_tg_bots':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_spam.telegram_links.bots_antispam',not p['anti_spam']['telegram_links'].get('bots_antispam')); return await handle(self,update,context,q,owner,staff,'gm_as_tg',role)
+
+    if a.startswith('gm_as_fw_toggle.'):
+        key=a.rsplit('.',1)[1]; p=await get_protection(owner,gid); await set_protection(owner,gid,f'anti_spam.forwarding.{key}',not p['anti_spam']['forwarding'].get(key)); return await handle(self,update,context,q,owner,staff,'gm_as_fw',role)
+    if a.startswith('gm_as_fw_action.'):
+        await set_protection(owner,gid,'anti_spam.forwarding.action',a.rsplit('.',1)[1]); return await handle(self,update,context,q,owner,staff,'gm_as_fw',role)
+    if a=='gm_as_fw_delete':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_spam.forwarding.delete',not p['anti_spam']['forwarding'].get('delete')); return await handle(self,update,context,q,owner,staff,'gm_as_fw',role)
+
+    if a.startswith('gm_as_quote_action.'):
+        await set_protection(owner,gid,'anti_spam.quote.action',a.rsplit('.',1)[1]); return await handle(self,update,context,q,owner,staff,'gm_as_quote',role)
+    if a=='gm_as_quote_delete':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_spam.quote.delete',not p['anti_spam']['quote'].get('delete')); return await handle(self,update,context,q,owner,staff,'gm_as_quote',role)
+
+    if a.startswith('gm_as_total_action.'):
+        await set_protection(owner,gid,'anti_spam.total_links.action',a.rsplit('.',1)[1]); return await handle(self,update,context,q,owner,staff,'gm_as_total',role)
+    if a=='gm_as_total_delete':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_spam.total_links.delete',not p['anti_spam']['total_links'].get('delete')); return await handle(self,update,context,q,owner,staff,'gm_as_total',role)
+
+    if a.startswith('gm_af_action.'):
+        await set_protection(owner,gid,'anti_flood.action',a.rsplit('.',1)[1]); return await anti_flood_page(q,owner,gid) or True
+    if a=='gm_af_delete':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_flood.delete',not p['anti_flood'].get('delete')); await anti_flood_page(q,owner,gid); return True
+    if a=='gm_af_messages':
+        context.user_data['gm_input']='af_messages'; await q.edit_message_text('🌊 Antiflood\n\nSend the maximum number of messages allowed before antiflood triggers.\nExample: 5',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_af')]])); return True
+    if a=='gm_af_time':
+        context.user_data['gm_input']='af_time'; await q.edit_message_text('🌊 Antiflood\n\nSend the time window in seconds.\nExample: 3',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_af')]])); return True
+
+    if a.startswith('gm_bw_action.'):
+        await set_protection(owner,gid,'banned_words.action',a.rsplit('.',1)[1]); await banned_words_page(q,owner,gid); return True
+    if a=='gm_bw_delete':
+        p=await get_protection(owner,gid); await set_protection(owner,gid,'banned_words.delete',not p['banned_words'].get('delete')); await banned_words_page(q,owner,gid); return True
+    if a=='gm_bw_add':
+        context.user_data['gm_input']='bw_add'; await q.edit_message_text('➕ Add Banned Word\n\nSend one word or phrase to add.',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_bw')]])); return True
+    if a=='gm_bw_remove':
+        context.user_data['gm_input']='bw_remove'; await q.edit_message_text('➖ Remove Banned Word\n\nSend the exact word or phrase to remove.',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_bw')]])); return True
+    if a=='gm_bw_list':
+        p=await get_protection(owner,gid); words=p['banned_words'].get('words') or []; body='\n'.join(f'• {w}' for w in words) if words else 'No banned words added.'
+        await q.edit_message_text('🔤 Banned Words List\n\n'+body,reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_bw')]])); return True
+
+    if a.startswith('gm_warns_action.'):
+        await set_protection(owner,gid,'warns.action',a.rsplit('.',1)[1]); await warns_page(q,owner,gid); return True
+    if a.startswith('gm_warns_max.'):
+        await set_protection(owner,gid,'warns.max_warns',int(a.rsplit('.',1)[1])); await warns_page(q,owner,gid); return True
+    if a=='gm_warns_mute':
+        context.user_data['gm_input']='warns_mute'; await q.edit_message_text('🔇 Set mute duration\n\nSend duration in minutes.\nExample: 30',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_warns')]])); return True
+    if a=='gm_warns_list':
+        data=await warned_list(owner,gid); body='\n'.join(f'• {uid}: {count} warn(s)' for uid,count in data.items()) if data else 'No warned users.'
+        await q.edit_message_text('📄 Warned List\n\n'+body,reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_warns')]])); return True
     if a=='gm_welcome': await q.edit_message_text(welcome_text(item),reply_markup=welcome_menu(item)); return True
     if a=='gm_welcome_toggle': await update_welcome(owner,gid,enabled=not item.get('enabled',False)); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
     if a=='gm_welcome_delete_last': await update_welcome(owner,gid,delete_last_welcome=not item.get('delete_last_welcome',False)); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
@@ -266,8 +428,6 @@ async def handle(self,update,context,q,owner,staff,a,role):
         if action=='preview': await preview(q,context,owner,it,'Reply Template'); return True
     if a=='gm_mod':
         s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'; rows=[[InlineKeyboardButton(f"{mark(s.get('enabled',True))} Moderation Master Switch",callback_data='gm_mod_master')],[InlineKeyboardButton('🗑 Delete Commands',callback_data='gm_mod_commands')],[InlineKeyboardButton('🔗 Link Protection',callback_data='gm_mod_links')],[InlineKeyboardButton('📦 Forwarded Media',callback_data='gm_mod_forwarded')],[InlineKeyboardButton('💥 Service Messages',callback_data='gm_mod_service')],[InlineKeyboardButton('🛡 Safety Settings',callback_data='gm_mod_safety')],[InlineKeyboardButton('♻️ Reset Settings',callback_data='gm_mod_reset')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('🗑 Message Moderation\n\nThese deletion settings apply only to the selected group.',reply_markup=kb(rows)); return True
-    if a=='gm_mod_master': s=await get_moderation(owner,gid); await set_moderation_value(owner,gid,'enabled',not s.get('enabled',True)); return await group_home(q,context,owner)
-    if a=='gm_mod_reset': await reset_moderation(owner,gid); await q.answer('Group moderation settings reset.',show_alert=True); return await group_home(q,context,owner)
     if a in {'gm_mod_commands','gm_mod_links','gm_mod_forwarded','gm_mod_service','gm_mod_safety'}:
         s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'
         if a=='gm_mod_commands':
@@ -297,6 +457,24 @@ async def handle_text(self,update,context):
     owner=self.owner(context)
     if update.effective_user.id!=self.seller_account(context): return False
     text=(update.effective_message.text or '').strip()
+    if mode=='af_messages':
+        try: value=max(2,min(50,int(text)))
+        except ValueError: await update.effective_message.reply_text('❌ Send a number from 2 to 50.'); return True
+        await set_protection(owner,gid,'anti_flood.messages',value); context.user_data.pop('gm_input',None)
+        await update.effective_message.reply_text('✅ Antiflood message limit saved.'); return True
+    if mode=='af_time':
+        try: value=max(1,min(60,int(text)))
+        except ValueError: await update.effective_message.reply_text('❌ Send seconds from 1 to 60.'); return True
+        await set_protection(owner,gid,'anti_flood.seconds',value); context.user_data.pop('gm_input',None)
+        await update.effective_message.reply_text('✅ Antiflood time saved.'); return True
+    if mode=='bw_add':
+        await add_banned_word(owner,gid,text); context.user_data.pop('gm_input',None); await update.effective_message.reply_text('✅ Banned word added.'); return True
+    if mode=='bw_remove':
+        await remove_banned_word(owner,gid,text); context.user_data.pop('gm_input',None); await update.effective_message.reply_text('✅ Banned word removed.'); return True
+    if mode=='warns_mute':
+        try: value=max(1,min(10080,int(text)))
+        except ValueError: await update.effective_message.reply_text('❌ Send mute duration in minutes.'); return True
+        await set_protection(owner,gid,'warns.mute_minutes',value); context.user_data.pop('gm_input',None); await update.effective_message.reply_text('✅ Mute duration saved.'); return True
     if mode=='welcome_text': await update_welcome(owner,gid,text=text); back='gm_welcome'; msg='✅ Welcome text saved.'
     elif mode=='welcome_buttons':
         try: buttons=parse_group_buttons(text)
