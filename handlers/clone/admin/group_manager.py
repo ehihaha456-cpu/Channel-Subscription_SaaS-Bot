@@ -431,7 +431,43 @@ async def handle(self,update,context,q,owner,staff,a,role):
     if a in {'gm_mod_commands','gm_mod_links','gm_mod_forwarded','gm_mod_service','gm_mod_safety'}:
         s=await get_moderation(owner,gid); mark=lambda v:'✅' if v else '❌'
         if a=='gm_mod_commands':
-            d=s.get('delete_commands',{}); rows=[[InlineKeyboardButton(f"{mark(d.get('users'))} User Commands",callback_data='gm_set_delete_commands.users')],[InlineKeyboardButton(f"{mark(d.get('admins'))} Admin Commands",callback_data='gm_set_delete_commands.admins')]]; title='🗑 Delete Commands'
+            d=s.get('delete_commands',{})
+            admin_prefixes=d.get('admin_prefixes') or d.get('prefixes') or ['/']
+            user_prefixes=d.get('user_prefixes') or d.get('prefixes') or ['/']
+            def pf(v):
+                return ''.join(v) if v else 'No'
+            text=(
+                "🤖 Delete commands\n"
+                "From this menu you can choose to delete messages containing a command, "
+                "also based on the symbol with which they begin.\n"
+                "    Example: /rules, !rules\n\n"
+                f"Admins: {pf(admin_prefixes) if d.get('admins') else 'no'}\n"
+                f"Users: {pf(user_prefixes) if d.get('users') else 'no'}"
+            )
+            rows=[
+                [
+                    InlineKeyboardButton('Admin',callback_data='gm_dc_admin_label'),
+                    InlineKeyboardButton('No' if not d.get('admins') else 'Yes ✅',callback_data='gm_dc_admin_toggle'),
+                    InlineKeyboardButton('/'+(' ✅' if d.get('admins') and admin_prefixes==['/'] else ''),callback_data='gm_dc_admin_prefix./'),
+                ],
+                [
+                    InlineKeyboardButton('↪',callback_data='gm_dc_admin_label'),
+                    InlineKeyboardButton('/!;.'+(' ✅' if d.get('admins') and set(admin_prefixes)==set(['/','!',';','.']) else ''),callback_data='gm_dc_admin_prefix.all'),
+                    InlineKeyboardButton('!;.'+(' ✅' if d.get('admins') and set(admin_prefixes)==set(['!',';','.']) else ''),callback_data='gm_dc_admin_prefix.no_slash'),
+                ],
+                [
+                    InlineKeyboardButton('Users',callback_data='gm_dc_user_label'),
+                    InlineKeyboardButton('No' if not d.get('users') else 'Yes ✅',callback_data='gm_dc_user_toggle'),
+                    InlineKeyboardButton('/'+(' ✅' if d.get('users') and user_prefixes==['/'] else ''),callback_data='gm_dc_user_prefix./'),
+                ],
+                [
+                    InlineKeyboardButton('↪',callback_data='gm_dc_user_label'),
+                    InlineKeyboardButton('/!;.'+(' ✅' if d.get('users') and set(user_prefixes)==set(['/','!',';','.']) else ''),callback_data='gm_dc_user_prefix.all'),
+                    InlineKeyboardButton('!;.'+(' ✅' if d.get('users') and set(user_prefixes)==set(['!',';','.']) else ''),callback_data='gm_dc_user_prefix.no_slash'),
+                ],
+                [InlineKeyboardButton('⬅ Back',callback_data='gm_group')],
+            ]
+            await q.edit_message_text(text,reply_markup=kb(rows)); return True
         elif a=='gm_mod_links':
             d=s.get('link_protection',{}); keys=[('enabled','Protection'),('all_links','All Links'),('telegram','Telegram'),('instagram','Instagram'),('youtube','YouTube'),('facebook','Facebook'),('x_twitter','X / Twitter'),('tiktok','TikTok'),('discord','Discord')]; rows=[[InlineKeyboardButton(f"{mark(d.get(k))} {label}",callback_data=f'gm_set_link_protection.{k}')] for k,label in keys]; title='🔗 Link Protection'
         elif a=='gm_mod_forwarded':
@@ -441,6 +477,28 @@ async def handle(self,update,context,q,owner,staff,a,role):
         else:
             rows=[[InlineKeyboardButton(f"{mark(s.get('ignore_admins'))} Ignore Admins",callback_data='gm_set_ignore_admins')],[InlineKeyboardButton(f"{mark(s.get('ignore_owner'))} Ignore Owner",callback_data='gm_set_ignore_owner')]]; title='🛡 Safety Settings'
         rows.append([InlineKeyboardButton('⬅ Back',callback_data='gm_group')]); await q.edit_message_text(title+'\n\nSettings apply only to this selected group.',reply_markup=kb(rows)); return True
+    if a in {'gm_dc_admin_label','gm_dc_user_label'}:
+        await q.answer(); return True
+    if a=='gm_dc_admin_toggle':
+        st=await get_moderation(owner,gid); cur=bool((st.get('delete_commands') or {}).get('admins'))
+        await set_moderation_value(owner,gid,'delete_commands.admins',not cur)
+        return await handle(self,update,context,q,owner,staff,'gm_mod_commands',role)
+    if a=='gm_dc_user_toggle':
+        st=await get_moderation(owner,gid); cur=bool((st.get('delete_commands') or {}).get('users'))
+        await set_moderation_value(owner,gid,'delete_commands.users',not cur)
+        return await handle(self,update,context,q,owner,staff,'gm_mod_commands',role)
+    if a.startswith('gm_dc_admin_prefix.'):
+        mode=a.rsplit('.',1)[1]
+        prefixes={'/':['/'],'all':['/','!',';','.'],'no_slash':['!',';','.']}[mode]
+        await set_moderation_value(owner,gid,'delete_commands.admins',True)
+        await set_moderation_value(owner,gid,'delete_commands.admin_prefixes',prefixes)
+        return await handle(self,update,context,q,owner,staff,'gm_mod_commands',role)
+    if a.startswith('gm_dc_user_prefix.'):
+        mode=a.rsplit('.',1)[1]
+        prefixes={'/':['/'],'all':['/','!',';','.'],'no_slash':['!',';','.']}[mode]
+        await set_moderation_value(owner,gid,'delete_commands.users',True)
+        await set_moderation_value(owner,gid,'delete_commands.user_prefixes',prefixes)
+        return await handle(self,update,context,q,owner,staff,'gm_mod_commands',role)
     if a.startswith('gm_set_'):
         path=a[len('gm_set_'):]; s=await get_moderation(owner,gid)
         cur=s
