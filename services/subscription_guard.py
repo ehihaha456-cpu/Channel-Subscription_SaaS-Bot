@@ -132,40 +132,82 @@ async def subscription_guard_chat_member(update: Update, context: ContextTypes.D
         await log_guard_event(owner_id, event.chat.id, user.id, "remove_failed", str(exc), attempts=attempts)
 
 
+def _welcome_guard_marker(context, chat_id: int, user_id: int):
+    store = context.application.bot_data.setdefault("welcome_guard_results", {})
+    return store.get((int(chat_id), int(user_id)))
+
+def _set_welcome_guard_marker(context, chat_id: int, user_id: int, allowed: bool):
+    store = context.application.bot_data.setdefault("welcome_guard_results", {})
+    store[(int(chat_id), int(user_id))] = bool(allowed)
+
 async def subscription_guard_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message, chat, actor = update.effective_message, update.effective_chat, update.effective_user
     if not message or not chat or not message.new_chat_members:
         return
+
     owner_id = int(context.application.bot_data.get("seller_owner_id") or 0)
-    if not owner_id or not await _connected_chat(owner_id, chat.id):
-        return
-    settings = await get_guard_settings(owner_id)
-    if not settings.get("enabled", True):
-        return
-    actor_is_admin = bool(actor and await _is_admin(context.bot, chat.id, actor.id))
+
+    # Default to allowed when Subscription Guard is not active for this chat.
+    # This is important: Welcome Message must not be blocked by an inactive guard.
     for user in message.new_chat_members:
         if user.is_bot:
             continue
+        _set_welcome_guard_marker(context, chat.id, user.id, True)
+
+    if not owner_id or not await _connected_chat(owner_id, chat.id):
+        return
+
+    settings = await get_guard_settings(owner_id)
+    if not settings.get("enabled", True):
+        return
+
+    actor_is_admin = bool(actor and await _is_admin(context.bot, chat.id, actor.id))
+
+    for user in message.new_chat_members:
+        if user.is_bot:
+            continue
+
         if int(user.id) in {int(value) for value in ADMIN_IDS}:
             await log_guard_event(owner_id, chat.id, user.id, "platform_owner_skipped", "Platform owner bypass")
+            _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
+
         if settings.get("whitelist_admin_added", True) and actor_is_admin and actor.id != user.id:
             await add_whitelist(owner_id, chat.id, user.id, actor.id)
             await log_guard_event(owner_id, chat.id, user.id, "whitelisted", "Added by chat admin/owner")
+            _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
+
         if await _is_admin(context.bot, chat.id, user.id) or await is_whitelisted(owner_id, chat.id, user.id):
+            _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
+
         if await _active(owner_id, user.id):
             await log_guard_event(owner_id, chat.id, user.id, "allowed", "Active subscription")
+            _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
+
         if not settings.get("unauthorized_join_protection", True):
+            _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
+
         attempts = await record_join_attempt(owner_id, chat.id, user.id)
         try:
             await _remove_member(context.bot, chat.id, user.id)
-            await log_guard_event(owner_id, chat.id, user.id, "removed", "No active subscription", attempts=attempts)
+            await log_guard_event(
+                owner_id, chat.id, user.id, "removed",
+                "No active subscription", attempts=attempts
+            )
+            # Welcome handler sees this exact marker and skips sending.
+            _set_welcome_guard_marker(context, chat.id, user.id, False)
         except TelegramError as exc:
-            logger.warning("Subscription guard fallback failed owner=%s chat=%s user=%s: %s", owner_id, chat.id, user.id, exc)
+            logger.warning(
+                "Subscription guard fallback failed owner=%s chat=%s user=%s: %s",
+                owner_id, chat.id, user.id, exc
+            )
+            # If removal failed, the user is still present, so Welcome may run.
+            _set_welcome_guard_marker(context, chat.id, user.id, True)
+
 
 
 async def revoke_user_invites(bot, owner_id: int, user_id: int) -> int:
