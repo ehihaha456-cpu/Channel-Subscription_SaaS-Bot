@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Iterable
+import re
 from urllib.parse import quote
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -37,24 +38,56 @@ def group_buttons_header() -> str:
 
 
 def parse_group_buttons(text: str) -> list[list[dict[str, str]]]:
+    """Parse group-manager button syntax with precise, user-friendly errors.
+
+    The separator is a hyphen, with optional spaces around it. Therefore all
+    of these are accepted:
+      Button - target
+      Button- target
+      Button -target
+      Button-target
+    """
     rows: list[list[dict[str, str]]] = []
 
-    for raw_line in (text or "").splitlines():
+    def fail(line_no: int, button_no: int, message: str, raw: str = "") -> None:
+        where = f"Line {line_no}, button {button_no}"
+        if raw:
+            where += f' ("{raw[:80]}")'
+        raise ValueError(f"{where}: {message}")
+
+    for line_no, raw_line in enumerate((text or "").splitlines(), 1):
         raw_line = raw_line.strip()
         if not raw_line:
             continue
 
         row: list[dict[str, str]] = []
-        for chunk in raw_line.split("&&"):
+        chunks = raw_line.split("&&")
+        for button_no, chunk in enumerate(chunks, 1):
             chunk = chunk.strip()
-            if " - " not in chunk:
-                raise ValueError("Use: Button title - target")
+            if not chunk:
+                fail(
+                    line_no, button_no,
+                    "Empty button. Remove the extra '&&' or add a button."
+                )
 
-            title, target = [part.strip() for part in chunk.split(" - ", 1)]
-            if not title or not target:
-                raise ValueError("Button title and target required")
+            # Spaces around '-' are optional. This fixes inputs such as
+            # "UNLOCK -share:" / "UNLOCK-share:" while still requiring a
+            # separator between title and target.
+            match = re.match(r"^(.*?)\s*-\s*(.+)$", chunk, flags=re.DOTALL)
+            if not match:
+                fail(
+                    line_no, button_no,
+                    "Missing '-' separator. Use: Button title - target"
+                )
 
-            lower = target.lower()
+            title = match.group(1).strip()
+            target = match.group(2).strip()
+            if not title:
+                fail(line_no, button_no, "Button title is missing. Use: Button title - target", chunk)
+            if not target:
+                fail(line_no, button_no, "Button target is missing after '-'.", chunk)
+
+            lower = target.casefold()
 
             if target.startswith(("http://", "https://", "tg://")) or lower.startswith("t.me/"):
                 if lower.startswith("t.me/"):
@@ -69,7 +102,11 @@ def parse_group_buttons(text: str) -> list[list[dict[str, str]]]:
                     or len(username) > 32
                     or not all(ch.isalnum() or ch == "_" for ch in username)
                 ):
-                    raise ValueError("Invalid Telegram username")
+                    fail(
+                        line_no, button_no,
+                        "Invalid Telegram username. Use: Button title - @username",
+                        chunk,
+                    )
                 row.append({
                     "text": title,
                     "type": "url",
@@ -80,14 +117,14 @@ def parse_group_buttons(text: str) -> list[list[dict[str, str]]]:
             if lower.startswith("popup:"):
                 value = target.split(":", 1)[1].strip()
                 if not value:
-                    raise ValueError("Popup text required")
+                    fail(line_no, button_no, "Popup text is missing. Use: Button title - popup: Popup text", chunk)
                 row.append({"text": title, "type": "popup", "value": value})
                 continue
 
             if lower.startswith("alert:"):
                 value = target.split(":", 1)[1].strip()
                 if not value:
-                    raise ValueError("Alert text required")
+                    fail(line_no, button_no, "Alert text is missing. Use: Button title - alert: Alert text", chunk)
                 row.append({"text": title, "type": "alert", "value": value})
                 continue
 
@@ -98,26 +135,28 @@ def parse_group_buttons(text: str) -> list[list[dict[str, str]]]:
             if lower.startswith("share:"):
                 value = target.split(":", 1)[1].strip()
                 if not value:
-                    raise ValueError("Share text required")
+                    fail(line_no, button_no, "Share text is missing. Use: Button title - share: Text to share", chunk)
                 row.append({"text": title, "type": "share", "value": value})
                 continue
 
             if lower.startswith("copy:"):
                 value = target.split(":", 1)[1].strip()
                 if not value:
-                    raise ValueError("Copy text required")
+                    fail(line_no, button_no, "Copy text is missing. Use: Button title - copy: Text to copy", chunk)
                 row.append({"text": title, "type": "copy", "value": value})
                 continue
 
-            raise ValueError(
-                "Target must be URL, @username, popup:, alert:, rules, share:, or copy:"
+            fail(
+                line_no, button_no,
+                "Unknown target. Use URL, @username, popup:, alert:, rules, share:, or copy:.",
+                chunk,
             )
 
         if row:
             rows.append(row)
 
     if not rows:
-        raise ValueError("No buttons found")
+        raise ValueError("No buttons found. Send at least one button using: Button title - target")
     return rows
 
 
