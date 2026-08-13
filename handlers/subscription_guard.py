@@ -9,6 +9,9 @@ from database.subscription_guard import (
     recent_guard_logs,
     reset_guard_settings,
     set_guard_setting,
+    get_guard_chat_states,
+    get_guard_chat_status,
+    set_guard_chat_status,
 )
 from services.subscription_guard import force_sync_known_users
 from utils.timezone import format_local_datetime
@@ -31,9 +34,9 @@ def _toggle(label: str, key: str, value: bool):
     )
 
 
-def guard_menu(settings):
+def guard_menu(settings, channels, states):
     return InlineKeyboardMarkup([
-        [_toggle("Subscription Guard", "enabled", settings["enabled"])],
+        [InlineKeyboardButton("👥 Connected Groups/Channels", callback_data="sg_chats")],
         [InlineKeyboardButton("🧰 Subscription Enforcement", callback_data="sg_enforcement")],
         [InlineKeyboardButton("🔄 Force Sync", callback_data="sg_sync_confirm")],
         [InlineKeyboardButton("📋 Guard Logs", callback_data="sg_logs"), InlineKeyboardButton("📊 Statistics", callback_data="sg_stats")],
@@ -41,6 +44,25 @@ def guard_menu(settings):
         [InlineKeyboardButton("🧹 Clear Logs", callback_data="sg_clear_confirm")],
         [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
     ])
+
+
+def _chat_label(item, enabled):
+    title = str(item.get("title") or item.get("chat_id") or "Unknown")
+    kind = str(item.get("chat_type") or "").lower()
+    icon = "📢" if "channel" in kind else "👥"
+    return f"{'🟢' if enabled else '🔴'} {icon} {title}"
+
+
+def chats_menu(channels, states):
+    rows=[]
+    for item in channels:
+        chat_id=int(item.get("chat_id"))
+        rows.append([InlineKeyboardButton(_chat_label(item, states.get(chat_id, False)), callback_data=f"sg_chat:{chat_id}")])
+    if not rows:
+        rows=[[InlineKeyboardButton("No connected groups/channels", callback_data="sg_home")]]
+    rows.append([InlineKeyboardButton("⬅ Subscription Guard", callback_data="sg_home")])
+    return InlineKeyboardMarkup(rows)
+
 
 
 def settings_menu(settings):
@@ -55,18 +77,28 @@ def settings_menu(settings):
     return InlineKeyboardMarkup(rows)
 
 
-def home_text(settings):
-    return (
-        "🛡 <b>Subscription Guard</b>\n\n"
-        f"Status: {'🟢 Enabled' if settings['enabled'] else '🔴 Disabled'}\n\n"
-        "Subscription Enforcement is included inside this page. It protects "
-        "connected groups by checking new joins and removing users whose access "
-        "is expired, inactive or banned.\n\n"
-        "• Active subscribers are allowed\n"
-        "• Admins/owner/whitelist are skipped\n"
-        "• Used personal invite links can be revoked\n"
-        "• Repeated unauthorized attempts are counted"
-    )
+def home_text(settings, channels, states):
+    lines=["🛡 <b>Subscription Guard</b>", "", "Status:"]
+    if channels:
+        for item in channels:
+            chat_id=int(item.get("chat_id"))
+            title=str(item.get("title") or chat_id)
+            kind=str(item.get("chat_type") or "").lower()
+            icon="📢" if "channel" in kind else "👥"
+            lines.append(f"{icon} {title} — {'🟢 Enabled' if states.get(chat_id, False) else '🔴 Disabled'}")
+    else:
+        lines.append("❌ No connected group/channel")
+    lines += [
+        "",
+        "Subscription Enforcement is included inside this page. It protects only the connected groups/channels enabled above.",
+        "",
+        "• Active subscribers are allowed",
+        "• Admins/owner/whitelist are skipped",
+        "• Used personal invite links can be revoked",
+        "• Repeated unauthorized attempts are counted",
+    ]
+    return "\n".join(lines)
+
 
 
 async def _edit(query, text, markup):
@@ -89,22 +121,43 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
     await query.answer()
     action = query.data or ""
     settings = await get_guard_settings(owner_id)
+    channels = await get_channels(owner_id)
+    states = await get_guard_chat_states(owner_id, channels)
 
     if action == "sg_home":
-        return await _edit(query, home_text(settings), guard_menu(settings))
+        return await _edit(query, home_text(settings, channels, states), guard_menu(settings, channels, states))
+    if action == "sg_chat":
+        try:
+            chat_id=int(action.split(":",1)[1])
+        except (ValueError, IndexError):
+            return
+        if not any(int(item.get("chat_id")) == chat_id for item in channels):
+            await query.answer("This group/channel is not connected.", show_alert=True)
+            return
+        current=await get_guard_chat_status(owner_id, chat_id)
+        enabled=await set_guard_chat_status(owner_id, chat_id, not current)
+        channels=await get_channels(owner_id)
+        states=await get_guard_chat_states(owner_id, channels)
+        return await _edit(query, home_text(settings, channels, states), chats_menu(channels, states))
+    if action == "sg_chats":
+        channels=await get_channels(owner_id)
+        states=await get_guard_chat_states(owner_id, channels)
+        return await _edit(query, "👥 <b>Connected Groups/Channels</b>\n\nTap a group/channel to enable or disable Subscription Guard.", chats_menu(channels, states))
+    if action == "sg_settings":
+        return await _edit(query, "⚙️ <b>Subscription Guard Settings</b>\n\nChoose which protections should be active.", settings_menu(settings))
     if action.startswith("sg_toggle:"):
         key = action.split(":", 1)[1]
-        settings = await set_guard_setting(owner_id, key, not bool(settings.get(key)))
         if key == "enabled":
-            return await _edit(query, home_text(settings), guard_menu(settings))
-        return await _edit(query, "⚙️ <b>Subscription Guard Settings</b>\n\nChoose which protections should be active.", settings_menu(settings))
-    if action == "sg_settings":
+            channels = await get_channels(owner_id)
+            states = await get_guard_chat_states(owner_id, channels)
+            return await _edit(query, home_text(settings, channels, states), guard_menu(settings, channels, states))
+        settings = await set_guard_setting(owner_id, key, not bool(settings.get(key)))
         return await _edit(query, "⚙️ <b>Subscription Guard Settings</b>\n\nChoose which protections should be active.", settings_menu(settings))
     if action == "sg_enforcement":
         channels = await get_channels(owner_id)
         text = (
             "🧰 <b>Subscription Enforcement</b>\n\n"
-            f"Connected chats: <b>{len(channels)}</b>\n\n"
+            f"Connected chats: <b>{len(channels)}</b>\nProtected chats: <b>{sum(1 for item in channels if states.get(int(item.get("chat_id")), False))}</b>\n\n"
             "Automatic enforcement:\n"
             "• Unauthorized join → remove\n"
             "• Expired/inactive subscription → remove\n"
@@ -178,7 +231,7 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
         return await _edit(query, "🧹 <b>Clear Guard Logs?</b>\n\nThis clears logs and join-attempt counters for this clone bot.", InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, Clear", callback_data="sg_clear")],[InlineKeyboardButton("❌ Cancel", callback_data="sg_home")]]))
     if action == "sg_clear":
         await clear_guard_logs(owner_id)
-        return await _edit(query, home_text(settings), guard_menu(settings))
+        return await _edit(query, home_text(settings, channels, states), guard_menu(settings, channels, states))
     if action == "sg_reset_confirm":
         return await _edit(query, "♻️ <b>Reset Subscription Guard settings?</b>", InlineKeyboardMarkup([[InlineKeyboardButton("✅ Reset", callback_data="sg_reset")],[InlineKeyboardButton("❌ Cancel", callback_data="sg_settings")]]))
     if action == "sg_reset":
@@ -189,5 +242,5 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
 def subscription_guard_handlers():
     return [CallbackQueryHandler(
         subscription_guard_callback,
-        pattern=r"^sg_(home|enforcement|sync|sync_confirm|logs|stats|settings|clear|clear_confirm|reset|reset_confirm|toggle:.+)$",
+        pattern=r"^sg_(home|chats|chat:-?\d+|enforcement|sync|sync_confirm|logs|stats|settings|clear|clear_confirm|reset|reset_confirm|toggle:.+)$",
     )]
