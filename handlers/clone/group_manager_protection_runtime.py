@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes, ApplicationHandlerStop
 
 from config import ADMIN_IDS
 from database.group_manager_protection import get_protection, increment_warn, clear_warn
+from database.group_manager import get_moderation
 from database.staff import active_staff
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,36 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     m=update.effective_message
     chat=update.effective_chat
     user=update.effective_user
+    if not m or not chat or chat.type not in {"group","supergroup"}:
+        return
+
+    # Service-message cleanup is independent of user/admin/anonymous checks.
+    # This guarantees Join/Exit messages are removed when enabled, including
+    # exits caused by an admin/bot, and it runs after Welcome (handler group -21
+    # vs Welcome group -28).
+    try:
+        owner=int(context.application.bot_data.get("seller_owner_id") or 0)
+        if owner:
+            moderation=await get_moderation(owner, chat.id)
+            service=moderation.get("service_messages") or {}
+            service_enabled=bool(moderation.get("enabled", True))
+            is_join=bool(getattr(m, "new_chat_members", None))
+            is_exit=bool(getattr(m, "left_chat_member", None))
+            if service_enabled and (
+                (is_join and service.get("join")) or
+                (is_exit and service.get("exit"))
+            ):
+                try:
+                    await m.delete()
+                except Exception:
+                    logger.debug(
+                        "Service message delete failed chat=%s message=%s",
+                        chat.id, m.message_id, exc_info=True
+                    )
+                return
+    except Exception:
+        logger.debug("Service-message cleanup check failed", exc_info=True)
+
     if not m or not chat or not user or user.is_bot or chat.type not in {"group","supergroup"}:
         return
 
