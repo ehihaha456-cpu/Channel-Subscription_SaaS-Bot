@@ -105,13 +105,15 @@ class CloneRuntimeAppMixin:
         app.add_handler(BusinessConnectionHandler(handle_business_connection), group=-51)
         app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message), group=-50)
         app.add_handler(BusinessMessagesDeletedHandler(handle_deleted_business_messages), group=-49)
-        # Delete-command moderation must run before every command handler/guard.
-        # This also ensures /start, /help, /version, /admin, /connectgroup and
-        # /connectsupport are deleted immediately when their sender's command
-        # deletion rule is enabled.
-        # Anti-flood must run before Delete Commands/moderation because those handlers
-        # may stop command updates before later handlers receive them.
+        # Anti-flood MUST run before any handler that can stop update propagation
+        # (especially the connected-group command guard and Delete Commands).
+        # Otherwise /start and other commands can be stopped before Anti-Flood
+        # ever sees them. It also counts messages before another moderation rule
+        # deletes the current message.
         app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-120)
+
+        # Delete-command moderation runs after Anti-Flood so command messages are
+        # still counted by Anti-Flood before this handler can stop propagation.
         app.add_handler(MessageHandler(filters.ALL, moderate_seller_message), group=-110)
         app.add_handler(MessageHandler(filters.COMMAND, self.connected_group_command_guard), group=-100)
         app.add_handler(CommandHandler("start",self.child_start))
