@@ -33,10 +33,19 @@ async def _punish(bot, owner, chat_id, user, action, *, warn_cfg, reason, reply_
     if action=="warn":
         count=await increment_warn(owner,chat_id,user.id)
         max_warns=int(warn_cfg.get("max_warns",3) or 3)
+        warning_text = f"⚠️ {user.mention_html()} warned: {reason}\nWarns: {count}/{max_warns}"
         try:
-            await bot.send_message(chat_id, f"⚠️ {user.mention_html()} warned: {reason}\nWarns: {count}/{max_warns}", parse_mode="HTML", reply_to_message_id=reply_to)
+            kwargs={"chat_id":chat_id,"text":warning_text,"parse_mode":"HTML"}
+            if reply_to:
+                kwargs["reply_to_message_id"]=reply_to
+            await bot.send_message(**kwargs)
         except Exception:
-            pass
+            # If the flood message was deleted first, Telegram can reject a reply
+            # to that deleted message. Send the warning normally instead.
+            try:
+                await bot.send_message(chat_id=chat_id,text=warning_text,parse_mode="HTML")
+            except Exception:
+                pass
         if count < max_warns:
             return
         action=str(warn_cfg.get("action") or "mute")
@@ -72,30 +81,51 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     if not owner:
         return
-    if await _is_admin(context.bot,m.chat.id,m.from_user.id):
-        return
 
+    sender_is_admin = await _is_admin(context.bot,m.chat.id,m.from_user.id)
     p=await get_protection(owner,m.chat.id)
     warns=p.get("warns") or {}
     text=(m.text or m.caption or "")
     low=" ".join(text.casefold().split())
 
     # Anti-flood
+    # Only normal group members are checked. Group admins, seller/bot admins,
+    # and anonymous group-admin messages are ignored.
     flood=p.get("anti_flood") or {}
     action=flood.get("action","off")
-    if action!="off":
+    if action!="off" and not sender_is_admin:
         limit=max(2,int(flood.get("messages",5) or 5))
         seconds=max(1,int(flood.get("seconds",3) or 3))
         key=(owner,m.chat.id,m.from_user.id)
         now=time.monotonic()
-        dq=FLOOD[key]; dq.append(now)
-        while dq and now-dq[0] > seconds:
+        dq=FLOOD[key]
+        dq.append((now,m.message_id))
+        while dq and now-dq[0][0] > seconds:
             dq.popleft()
+
         if len(dq)>=limit:
-            if flood.get("delete",True): await _delete(m)
+            burst=list(dq)
             dq.clear()
-            await _punish(context.bot,owner,m.chat.id,m.from_user,action,warn_cfg=warns,reason="Anti-flood",reply_to=m.message_id)
+
+            deleted=bool(flood.get("delete",True))
+            if deleted:
+                # Delete the whole detected burst, not only the last message.
+                for _,message_id in burst:
+                    try:
+                        await context.bot.delete_message(chat_id=m.chat.id,message_id=message_id)
+                    except Exception:
+                        pass
+
+            await _punish(
+                context.bot,owner,m.chat.id,m.from_user,action,
+                warn_cfg=warns,reason="Anti-flood",
+                reply_to=None if deleted else m.message_id,
+            )
             return
+
+    # Keep group admins exempt from the remaining anti-spam/banned-word rules.
+    if sender_is_admin:
+        return
 
     # Banned words/phrases
     bw=p.get("banned_words") or {}
