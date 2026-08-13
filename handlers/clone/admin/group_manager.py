@@ -1,4 +1,5 @@
 import logging
+import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from handlers.common.editor_engine import editor_header, editor_menu_keyboard, editor_text_prompt, editor_media_prompt
 from handlers.common.feature_navigation import register_feature_origin
@@ -10,6 +11,25 @@ from database.group_manager_protection import get_protection, set_protection, ad
 
 logger=logging.getLogger(__name__)
 def kb(rows): return InlineKeyboardMarkup(rows)
+def _duration_text(seconds):
+    seconds=max(0,int(seconds or 0))
+    if seconds<=0: return "No duration"
+    parts=[]
+    for size,name in ((86400,"day"),(3600,"hour"),(60,"minute"),(1,"second")):
+        n,seconds=divmod(seconds,size)
+        if n: parts.append(f"{n} {name}{'' if n==1 else 's'}")
+    return " ".join(parts) or "0 seconds"
+
+def _parse_duration(text):
+    text=" ".join(str(text or "").strip().casefold().split())
+    if text in {"0","remove","none","off"}: return 0
+    units={"second":1,"seconds":1,"sec":1,"secs":1,"minute":60,"minutes":60,"min":60,"mins":60,"hour":3600,"hours":3600,"hr":3600,"hrs":3600,"day":86400,"days":86400,"week":604800,"weeks":604800,"month":2592000,"months":2592000}
+    matches=re.findall(r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?)",text)
+    if not matches: raise ValueError
+    total=sum(int(n)*units[u] for n,u in matches)
+    if total<30 or total>365*86400: raise ValueError
+    return total
+
 def selected(context): return int(context.user_data.get('gm_group_id') or 0)
 
 
@@ -195,16 +215,20 @@ async def anti_spam_page(q,owner,gid):
 
 async def anti_flood_page(q,owner,gid):
     p=await get_protection(owner,gid); d=p.get("anti_flood") or {}; act=d.get("action","off")
+    duration_key={"warn":"warn_duration_seconds","mute":"mute_duration_seconds","ban":"ban_duration_seconds"}.get(act)
+    duration=_duration_text(d.get(duration_key,1800)) if duration_key else ""
     text=(f"🌊 Antiflood\nFrom this menu you can set a punishment for those who send many messages in a short time.\n\n"
-          f"Currently the antiflood is triggered when {d.get('messages',5)} messages are sent within {d.get('seconds',3)} seconds.\n\n"
-          f"Punishment: {act.title()}")
+          f"Currently, the antiflood is triggered when {d.get('messages',5)} messages are sent within {d.get('seconds',3)} seconds.\n\n"
+          f"Punishment: {act.title()}"+(f" {duration}" if duration else "")+f" + {'Deletion' if d.get('delete',True) else 'No Deletion'}")
     rows=[
         [InlineKeyboardButton("📄 Messages",callback_data="gm_af_messages"),InlineKeyboardButton("🕘 Time",callback_data="gm_af_time")],
         *_action_rows("gm_af_action",act),
-        [InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete',True) else '❌'}",callback_data="gm_af_delete")],
-        [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
     ]
-    await q.edit_message_text(text,reply_markup=kb(rows))
+    if act in {"warn","mute","ban"}:
+        label={"warn":"⚠️ ⏱ Set warn duration","mute":"📢 ⏱ Set mute duration","ban":"🚫 ⏱ Set ban duration"}[act]
+        rows.append([InlineKeyboardButton(f"{label} ({duration})",callback_data=f"gm_af_duration.{act}")])
+    rows += [[InlineKeyboardButton(f"🗑 Delete Messages {'✅' if d.get('delete',True) else '❌'}",callback_data="gm_af_delete")],[InlineKeyboardButton("⬅ Back",callback_data="gm_group")]]
+    await q.edit_message_text(text,reply_markup=kb(rows)); return True
 
 async def banned_words_page(q,owner,gid):
     p=await get_protection(owner,gid); d=p.get("banned_words") or {}; act=d.get("action","off"); words=d.get("words") or []
@@ -267,6 +291,8 @@ async def delete_commands_page(q, settings):
 async def handle(self,update,context,q,owner,staff,a,role):
     if not a.startswith('gm_'): return False
     if role!='seller': await q.answer('Only the seller can manage groups.',show_alert=True); return True
+    try: await q.answer()
+    except Exception: pass
     context.user_data.pop('gm_input', None)
     if a=='gm_home': await groups_home(q,owner); return True
     if a.startswith('gm_select_'):
@@ -350,6 +376,13 @@ async def handle(self,update,context,q,owner,staff,a,role):
         await set_protection(owner,gid,'anti_flood.action',a.rsplit('.',1)[1]); return await anti_flood_page(q,owner,gid) or True
     if a=='gm_af_delete':
         p=await get_protection(owner,gid); await set_protection(owner,gid,'anti_flood.delete',not p['anti_flood'].get('delete')); await anti_flood_page(q,owner,gid); return True
+    if a.startswith('gm_af_duration.'):
+        kind=a.rsplit('.',1)[1]; context.user_data['gm_input']=f'af_duration_{kind}'
+        p=await get_protection(owner,gid); d=p.get('anti_flood') or {}; key={'warn':'warn_duration_seconds','mute':'mute_duration_seconds','ban':'ban_duration_seconds'}[kind]
+        await q.edit_message_text(f"Send now the duration of the chosen punishment ({kind.title()})\n\nMinimum: 30 seconds\nMaximum: 365 days\n\nExample of format: 3 month 2 days 12 hours 4 minutes 34 seconds\n\nCurrent duration: {_duration_text(d.get(key,1800))}",reply_markup=kb([[InlineKeyboardButton('0 Remove duration',callback_data=f'gm_af_remove_duration.{kind}')],[InlineKeyboardButton('❌ Cancel',callback_data='gm_af')]])); return True
+    if a.startswith('gm_af_remove_duration.'):
+        kind=a.rsplit('.',1)[1]; key={'warn':'warn_duration_seconds','mute':'mute_duration_seconds','ban':'ban_duration_seconds'}[kind]
+        await set_protection(owner,gid,f'anti_flood.{key}',0); return await anti_flood_page(q,owner,gid)
     if a=='gm_af_messages':
         context.user_data['gm_input']='af_messages'; await q.edit_message_text('🌊 Antiflood\n\nSend the maximum number of messages allowed before antiflood triggers.\nExample: 5',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_af')]])); return True
     if a=='gm_af_time':
@@ -515,6 +548,12 @@ async def handle_text(self,update,context):
         except ValueError: await update.effective_message.reply_text('❌ Send seconds from 1 to 60.'); return True
         await set_protection(owner,gid,'anti_flood.seconds',value); context.user_data.pop('gm_input',None)
         await update.effective_message.reply_text('✅ Antiflood time saved.'); return True
+    if mode.startswith('af_duration_'):
+        kind=mode.rsplit('_',1)[1]; key={'warn':'warn_duration_seconds','mute':'mute_duration_seconds','ban':'ban_duration_seconds'}[kind]
+        try: value=_parse_duration(text)
+        except ValueError: await update.effective_message.reply_text('❌ Invalid duration. Use e.g. 30 minutes or 3 month 2 days 12 hours.'); return True
+        await set_protection(owner,gid,f'anti_flood.{key}',value); context.user_data.pop('gm_input',None)
+        await update.effective_message.reply_text(f'✅ {kind.title()} duration saved.'); return True
     if mode=='bw_add':
         await add_banned_word(owner,gid,text); context.user_data.pop('gm_input',None); await update.effective_message.reply_text('✅ Banned word added.'); return True
     if mode=='bw_remove':
