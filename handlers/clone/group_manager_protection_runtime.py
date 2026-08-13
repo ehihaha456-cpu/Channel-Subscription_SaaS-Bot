@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 FLOOD = defaultdict(lambda: deque(maxlen=50))
 ADMIN_CACHE = {}
 STAFF_CACHE = {}
-BOT_PERMISSION_CACHE = {}
 URL_RE = re.compile(r"(?i)(?:https?://|www\.|t\.me/|telegram\.me/|telegram\.dog/|@[A-Za-z0-9_]{5,})")
 
 async def _is_chat_admin(bot, chat_id, user_id):
@@ -35,38 +34,12 @@ async def _is_chat_admin(bot, chat_id, user_id):
     ADMIN_CACHE[key]=(now,value)
     return value
 
-async def _bot_can_moderate(bot, chat_id):
-    """Check bot permissions once per chat; moderation actions require admin rights."""
-    key=int(chat_id); now=time.monotonic()
-    cached=BOT_PERMISSION_CACHE.get(key)
-    if cached and now-cached[0] < 30:
-        return cached[1]
-    try:
-        me=await bot.get_me()
-        member=await bot.get_chat_member(chat_id, me.id)
-        ok=member.status in {"administrator", "creator"}
-        if ok and member.status == "administrator":
-            # can_delete_messages is not exposed on every PTB member shape;
-            # deletion failures are still handled independently below.
-            ok=True
-    except Exception:
-        ok=False
-    BOT_PERMISSION_CACHE[key]=(now,ok)
-    return ok
-
-
 async def _delete_ids(bot, chat_id, ids):
     if not ids:
-        return 0
-    unique=list(dict.fromkeys(int(x) for x in ids))
-    results=await asyncio.gather(*(
-        bot.delete_message(chat_id=chat_id,message_id=mid) for mid in unique
+        return
+    await asyncio.gather(*(
+        bot.delete_message(chat_id=chat_id,message_id=int(mid)) for mid in ids
     ), return_exceptions=True)
-    failed=[(mid,err) for mid,err in zip(unique,results) if isinstance(err,Exception)]
-    if failed:
-        logger.warning("Anti-flood deletion failed chat=%s count=%s first_error=%s", chat_id, len(failed), failed[0][1])
-    return len(unique)-len(failed)
-
 
 async def _punish(bot, owner, chat_id, user, action, *, warn_cfg, reason, reply_to=None, duration_seconds=None):
     action=str(action or "off").lower()
@@ -142,6 +115,7 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
 
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     if not owner:
+        logger.warning("Anti-flood skipped: seller_owner_id missing chat=%s", getattr(chat, "id", None))
         return
 
     # Anonymous group-admin messages have sender_chat set to the group itself.
@@ -169,32 +143,25 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     p=await get_protection(owner,chat.id)
     warns=p.get("warns") or {}
     flood=p.get("anti_flood") or {}
-    action=str(flood.get("action","off") or "off").strip().lower()
-
-    # Flood detection is intentionally done before all other group protections.
-    # This means /commands are counted even if Delete Commands stops their later handlers.
-    if action in {"warn","kick","mute","ban"}:
+    action=str(flood.get("action","off") or "off").lower()
+    if action!="off":
         try:
             limit=max(2,int(flood.get("messages",5) or 5))
             seconds=max(1,int(flood.get("seconds",3) or 3))
-        except (TypeError,ValueError):
+        except Exception:
             limit,seconds=5,3
-
         key=(owner,int(chat.id),int(user.id))
         now=time.monotonic()
         dq=FLOOD[key]
+        dq.append((now,int(m.message_id)))
         cutoff=now-seconds
         while dq and dq[0][0] < cutoff:
             dq.popleft()
-        dq.append((now,int(m.message_id)))
-
-        if len(dq) >= limit:
-            burst=[mid for _,mid in dq]
+        if len(dq)>=limit:
+            # Snapshot and clear immediately so another message cannot extend the
+            # same burst while deletion/punishment is in progress.
+            burst=list(dict.fromkeys(mid for _,mid in dq))
             dq.clear()
-            logger.info(
-                "ANTI_FLOOD_TRIGGER owner=%s chat=%s user=%s messages=%s window=%ss action=%s delete=%s",
-                owner, chat.id, user.id, len(burst), seconds, action, bool(flood.get("delete",True))
-            )
             if flood.get("delete",True):
                 await _delete_ids(context.bot,chat.id,burst)
             duration_key={"warn":"warn_duration_seconds","mute":"mute_duration_seconds","ban":"ban_duration_seconds"}.get(action)
