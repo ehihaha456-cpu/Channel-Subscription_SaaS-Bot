@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.group_manager import get_group, update_welcome, get_auto_reply, get_template, get_moderation
+from database.group_manager import get_group, update_welcome, get_auto_reply, get_template
 from handlers.clone.group_manager_buttons import build_group_keyboard, find_button
 from database.seller_bots import get_bot_by_data_owner_id
 
@@ -20,12 +20,15 @@ async def vars_text(text, user, chat, bot):
     group_name = html.escape(str(getattr(chat, "title", "") or "Group"))
     mention = f'<a href="tg://user?id={user.id}">{first}</a>'
 
+    # get_chat() is a Telegram API call. Do not make it for every Welcome;
+    # only fetch the group description when the Welcome actually uses {RULES}.
     rules = ""
-    try:
-        full_chat = await bot.get_chat(chat.id)
-        rules = html.escape(str(getattr(full_chat, "description", "") or ""))
-    except Exception:
-        rules = html.escape(str(getattr(chat, "description", "") or ""))
+    if "{RULES}" in text:
+        try:
+            full_chat = await bot.get_chat(chat.id)
+            rules = html.escape(str(getattr(full_chat, "description", "") or ""))
+        except Exception:
+            rules = html.escape(str(getattr(chat, "description", "") or ""))
 
     vals = {
         "{ID}": str(user.id),
@@ -76,16 +79,13 @@ async def _subscription_guard_allows_welcome(context, chat_id: int, user_id: int
 
 
 async def _delete_join_service_after_welcome(context, chat_id: int, message_id: int, owner: int):
-    """Delete the join service message after Welcome is sent."""
     try:
         settings = await get_moderation(owner, chat_id)
         service = settings.get("service_messages") or {}
-        if not service.get("join"):
-            return
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        if service.get("join"):
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
-        # Cleanup failure must never delay/break the Welcome Message.
-        return
+        pass
 
 
 async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
@@ -105,31 +105,23 @@ async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_T
         ):
             continue
 
-        if item.get('delete_last_welcome') and item.get('last_message_id'):
-            try:
-                await context.bot.delete_message(chat_id=m.chat.id,message_id=int(item['last_message_id']))
-            except Exception:
-                # The old welcome may already be gone or no longer deletable; never block the new welcome.
-                pass
+        old_welcome_id = int(item.get('last_message_id') or 0) if item.get('delete_last_welcome') else 0
         sent=await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', user, m.chat, context.bot),markup)
         if sent:
             item['last_message_id']=sent.message_id
             await update_welcome(owner,m.chat.id,last_message_id=sent.message_id)
-            # Welcome has now been sent. Delete the Telegram join service
-            # message immediately afterwards. Do not schedule this as a
-            # background task: the task can be delayed/cancelled while the
-            # update is being processed, leaving the service message visible.
-            try:
-                settings = await get_moderation(owner, m.chat.id)
-                service = settings.get("service_messages") or {}
-                if service.get("join"):
-                    await context.bot.delete_message(
-                        chat_id=m.chat.id,
-                        message_id=m.message_id,
-                    )
-            except Exception:
-                # Never let service-message cleanup break Welcome.
-                pass
+            await _delete_join_service_after_welcome(context, m.chat.id, m.message_id, owner)
+
+            # Cleanup of the previous Welcome must never delay the new one.
+            if old_welcome_id:
+                async def _delete_previous():
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=m.chat.id, message_id=old_welcome_id
+                        )
+                    except Exception:
+                        pass
+                context.application.create_task(_delete_previous())
 
 async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
