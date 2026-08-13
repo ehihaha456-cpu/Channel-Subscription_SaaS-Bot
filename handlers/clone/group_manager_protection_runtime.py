@@ -252,15 +252,40 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     warns=p.get("warns") or {}
 
     # Existing protections remain user-only below this point.
+    # Banned Words: run independently from the punishment selector.
+    # If a word is configured and Delete Messages is ON, the offending
+    # message is deleted even when the punishment is set to OFF.
+    # This also handles punctuation, repeated spaces and mixed case.
     text=(m.text or m.caption or "")
-    low=" ".join(text.casefold().split())
+    low=" ".join(str(text).casefold().split())
     bw=p.get("banned_words") or {}
-    if bw.get("action","off")!="off" and low:
-        hit=next((w for w in bw.get("words") or [] if w and re.search(r"(?<!\w)"+re.escape(w)+r"(?!\w)",low,re.I)),None)
+    words=bw.get("words") or []
+    if low and words:
+        hit=None
+        for raw_word in words:
+            word=" ".join(str(raw_word or "").casefold().split()).strip()
+            if not word:
+                continue
+            # Match a complete word/phrase, while allowing punctuation around it.
+            # For multi-word phrases, whitespace in the configured phrase can
+            # match any normalised whitespace in the incoming message.
+            pattern=r"(?<!\\w)"+r"\\s+".join(re.escape(part) for part in word.split())+r"(?!\\w)"
+            if re.search(pattern, low, re.IGNORECASE):
+                hit=word
+                break
+
         if hit:
             if bw.get("delete",True):
                 await _delete_ids(context.bot,chat.id,[m.message_id])
-            await _punish(context.bot,owner,chat.id,user,bw.get("action"),warn_cfg=warns,reason=f"Banned word: {hit}",reply_to=m.message_id)
+
+            action=str(bw.get("action","off") or "off").lower()
+            if action != "off":
+                await _punish(
+                    context.bot,owner,chat.id,user,action,
+                    warn_cfg=warns,
+                    reason=f"Banned word: {hit}",
+                    reply_to=None if bw.get("delete",True) else m.message_id,
+                )
             return
 
     spam=p.get("anti_spam") or {}
