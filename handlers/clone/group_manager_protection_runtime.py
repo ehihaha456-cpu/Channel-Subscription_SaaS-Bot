@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
 from telegram import ChatPermissions, Update
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ApplicationHandlerStop
 
 from config import ADMIN_IDS
 from database.group_manager_protection import get_protection, increment_warn, clear_warn
@@ -106,6 +106,84 @@ def _forward_type(m):
     if "user" in name: return "users"
     return "bots" if "bot" in name else "users"
 
+async def anti_flood_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Early, isolated anti-flood pass. Must run before command/deletion guards."""
+    m=update.effective_message
+    chat=update.effective_chat
+    user=update.effective_user
+    if not m or not chat or not user or user.is_bot or chat.type not in {"group","supergroup"}:
+        return
+
+    owner=int(context.application.bot_data.get("seller_owner_id") or 0)
+    if not owner:
+        logger.error("Anti-flood skipped: seller_owner_id missing chat=%s", getattr(chat,"id",None))
+        return
+
+    # Anonymous admins send on behalf of the group itself.
+    sender_chat=getattr(m,"sender_chat",None)
+    if sender_chat is not None and int(getattr(sender_chat,"id",0) or 0)==int(chat.id):
+        return
+
+    # Only regular users are subject to anti-flood.
+    if await _is_chat_admin(context.bot,chat.id,user.id):
+        return
+    if int(user.id)==owner or int(user.id) in {int(x) for x in (ADMIN_IDS or [])}:
+        return
+    cache_key=(owner,int(user.id)); now=time.monotonic(); cached=STAFF_CACHE.get(cache_key)
+    if cached and now-cached[0] < 30:
+        is_staff=cached[1]
+    else:
+        try:
+            is_staff=bool(await active_staff(owner,user.id))
+        except Exception:
+            is_staff=False
+        STAFF_CACHE[cache_key]=(now,is_staff)
+    if is_staff:
+        return
+
+    p=await get_protection(owner,chat.id)
+    flood=p.get("anti_flood") or {}
+    action=str(flood.get("action","off") or "off").lower()
+    if action=="off":
+        return
+
+    try:
+        limit=max(2,int(flood.get("messages",5) or 5))
+        seconds=max(1,int(flood.get("seconds",3) or 3))
+    except Exception:
+        limit,seconds=5,3
+
+    key=(owner,int(chat.id),int(user.id))
+    now=time.monotonic()
+    dq=FLOOD[key]
+    dq.append((now,int(m.message_id)))
+    cutoff=now-seconds
+    while dq and dq[0][0] < cutoff:
+        dq.popleft()
+
+    logger.info("Anti-flood check owner=%s chat=%s user=%s count=%s/%s window=%ss action=%s", owner,chat.id,user.id,len(dq),limit,seconds,action)
+    if len(dq)<limit:
+        return
+
+    burst=[mid for _,mid in dq]
+    dq.clear()
+    if flood.get("delete",True):
+        await _delete_ids(context.bot,chat.id,burst)
+
+    warns=p.get("warns") or {}
+    duration_key={"warn":"warn_duration_seconds","mute":"mute_duration_seconds","ban":"ban_duration_seconds"}.get(action)
+    duration_seconds=int(flood.get(duration_key,0) or 0) if duration_key else 0
+    await _punish(
+        context.bot,owner,chat.id,user,action,
+        warn_cfg=warns,reason="Anti-flood",
+        reply_to=None if flood.get("delete",True) else m.message_id,
+        duration_seconds=duration_seconds,
+    )
+    # Once a flood is detected, do not let the deleted burst reach other
+    # handlers (auto-reply, live support, business automation, etc.).
+    raise ApplicationHandlerStop
+
+
 async def group_manager_protection_message(update:Update, context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
     chat=update.effective_chat
@@ -115,7 +193,6 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
 
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     if not owner:
-        logger.warning("Anti-flood skipped: seller_owner_id missing chat=%s", getattr(chat, "id", None))
         return
 
     # Anonymous group-admin messages have sender_chat set to the group itself.
@@ -142,37 +219,6 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
 
     p=await get_protection(owner,chat.id)
     warns=p.get("warns") or {}
-    flood=p.get("anti_flood") or {}
-    action=str(flood.get("action","off") or "off").lower()
-    if action!="off":
-        try:
-            limit=max(2,int(flood.get("messages",5) or 5))
-            seconds=max(1,int(flood.get("seconds",3) or 3))
-        except Exception:
-            limit,seconds=5,3
-        key=(owner,int(chat.id),int(user.id))
-        now=time.monotonic()
-        dq=FLOOD[key]
-        dq.append((now,int(m.message_id)))
-        cutoff=now-seconds
-        while dq and dq[0][0] < cutoff:
-            dq.popleft()
-        if len(dq)>=limit:
-            # Snapshot and clear immediately so another message cannot extend the
-            # same burst while deletion/punishment is in progress.
-            burst=list(dict.fromkeys(mid for _,mid in dq))
-            dq.clear()
-            if flood.get("delete",True):
-                await _delete_ids(context.bot,chat.id,burst)
-            duration_key={"warn":"warn_duration_seconds","mute":"mute_duration_seconds","ban":"ban_duration_seconds"}.get(action)
-            duration_seconds=int(flood.get(duration_key,0) or 0) if duration_key else 0
-            await _punish(
-                context.bot,owner,chat.id,user,action,
-                warn_cfg=warns,reason="Anti-flood",
-                reply_to=None if flood.get("delete",True) else m.message_id,
-                duration_seconds=duration_seconds,
-            )
-            return
 
     # Existing protections remain user-only below this point.
     text=(m.text or m.caption or "")
