@@ -8,6 +8,7 @@ WHITELIST = "subscription_guard_whitelist"
 LOGS = "subscription_guard_logs"
 SETTINGS = "subscription_guard_settings"
 ATTEMPTS = "subscription_guard_attempts"
+GUARD_CHATS = "subscription_guard_chats"
 
 DEFAULT_SETTINGS = {
     "enabled": True,
@@ -54,6 +55,31 @@ async def reset_guard_settings(owner_id: int) -> dict[str, Any]:
     )
     return await get_guard_settings(owner_id)
 
+
+
+
+async def get_guard_chat_status(owner_id: int, chat_id: int) -> bool:
+    doc = await _c(GUARD_CHATS).find_one({"owner_id": int(owner_id), "chat_id": int(chat_id)})
+    return bool((doc or {}).get("enabled", True))
+
+
+async def set_guard_chat_status(owner_id: int, chat_id: int, enabled: bool) -> bool:
+    now = datetime.now(timezone.utc)
+    await _c(GUARD_CHATS).update_one(
+        {"owner_id": int(owner_id), "chat_id": int(chat_id)},
+        {"$set": {"enabled": bool(enabled), "updated_at": now}, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return bool(enabled)
+
+
+async def get_guard_chat_states(owner_id: int, chats) -> dict[int, bool]:
+    chat_ids = [int(item.get("chat_id")) for item in (chats or []) if item.get("chat_id") is not None]
+    if not chat_ids:
+        return {}
+    rows = await _c(GUARD_CHATS).find({"owner_id": int(owner_id), "chat_id": {"$in": chat_ids}}).to_list(length=len(chat_ids))
+    state = {int(row["chat_id"]): bool(row.get("enabled", False)) for row in rows}
+    return {chat_id: state.get(chat_id, False) for chat_id in chat_ids}
 
 async def save_invite(owner_id: int, user_id: int, chat_id: int, invite_link: str):
     now = datetime.now(timezone.utc)
