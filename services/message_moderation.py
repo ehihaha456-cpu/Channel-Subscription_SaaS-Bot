@@ -399,14 +399,11 @@ async def moderate_seller_message(
         logger.error("seller_owner_id is missing; moderation skipped")
         return False
 
-    # Join/leave service updates must continue to the Subscription Guard and
-    # Group Manager Welcome handlers. Delete Commands/service-message
-    # moderation must never stop a NEW_CHAT_MEMBERS update before Welcome runs.
+    # A new-member service update must reach Subscription Guard and Welcome.
+    # Exit updates intentionally remain in normal service-message moderation,
+    # so the configured Exit deletion also works when a member is removed.
     effective_message = update.effective_message
-    if effective_message is not None and (
-        getattr(effective_message, "new_chat_members", None)
-        or getattr(effective_message, "left_chat_member", None)
-    ):
+    if effective_message is not None and getattr(effective_message, "new_chat_members", None):
         return False
 
     deleted = await MessageModerationService(int(resolved_owner)).moderate(update, context)
