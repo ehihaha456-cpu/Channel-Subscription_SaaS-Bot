@@ -217,10 +217,24 @@ def _looks_like_command(message: Message, prefixes: Sequence[str]) -> bool:
 
 
 async def _is_chat_admin(context: ContextTypes.DEFAULT_TYPE, message: Message) -> bool:
-    user = message.from_user; chat = message.chat
-    if not user or not chat: return False
-    key=(int(chat.id),int(user.id)); now=time.monotonic(); cached=_ADMIN_CACHE.get(key)
-    if cached and now-cached[0] < _ADMIN_CACHE_TTL: return cached[1]
+    user = message.from_user
+    chat = message.chat
+    if not chat:
+        return False
+
+    # Anonymous group admins send as the group itself.
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat and int(getattr(sender_chat, "id", 0) or 0) == int(chat.id):
+        return True
+
+    if not user:
+        return False
+
+    key=(int(chat.id),int(user.id))
+    now=time.monotonic()
+    cached=_ADMIN_CACHE.get(key)
+    if cached and now-cached[0] < _ADMIN_CACHE_TTL:
+        return cached[1]
     try:
         member=await context.bot.get_chat_member(chat.id,user.id)
         result=member.status in {"administrator","creator","owner"}
@@ -247,7 +261,16 @@ class MessageModerationService:
         if not message or message.chat.type not in {"group", "supergroup"}:
             return ModerationDecision(False)
 
-        if message.from_user and message.from_user.is_bot:
+        # Telegram anonymous group admins are represented by sender_chat and
+        # often have GroupAnonymousBot as from_user. Treat them as admins,
+        # not as ordinary bot messages.
+        sender_chat = getattr(message, "sender_chat", None)
+        anonymous_group_admin = bool(
+            sender_chat
+            and message.chat
+            and int(getattr(sender_chat, "id", 0) or 0) == int(message.chat.id)
+        )
+        if message.from_user and message.from_user.is_bot and not anonymous_group_admin:
             return ModerationDecision(False)
 
         if settings is None:
@@ -273,20 +296,37 @@ class MessageModerationService:
                 return ModerationDecision(False)
             return ModerationDecision(True,"service_message","service_messages_deleted")
 
-        # Command deletion comes before every owner/admin exemption.
+        # Delete Commands is prefix based, not limited to Telegram's known
+        # commands. If / ! ; . are selected, ANY text beginning with one of
+        # those symbols is deleted for the corresponding sender type.
         command_settings=settings.get("delete_commands",{})
-        if user_id is not None:
+        if user_id is not None or anonymous_group_admin:
             all_prefixes=tuple(set(
                 (command_settings.get("admin_prefixes") or command_settings.get("prefixes") or ["/"])
                 +(command_settings.get("user_prefixes") or command_settings.get("prefixes") or ["/"])
             ))
             if _looks_like_command(message,all_prefixes):
                 seller_account_id=int(context.application.bot_data.get("seller_account_id") or -1)
-                sender_is_admin=(user_id==seller_account_id) or await is_group_admin()
-                prefixes=(command_settings.get("admin_prefixes") if sender_is_admin else command_settings.get("user_prefixes")) or command_settings.get("prefixes") or ["/"]
+                sender_is_admin = (
+                    anonymous_group_admin
+                    or (user_id is not None and user_id == int(self.owner_id))
+                    or (user_id is not None and user_id == seller_account_id)
+                    or await is_group_admin()
+                )
+                prefixes=(
+                    command_settings.get("admin_prefixes")
+                    if sender_is_admin
+                    else command_settings.get("user_prefixes")
+                ) or command_settings.get("prefixes") or ["/"]
+
                 if _looks_like_command(message,prefixes):
-                    enabled=command_settings.get("admins",False) if sender_is_admin else command_settings.get("users",False)
-                    if enabled: return ModerationDecision(True,"command","commands_deleted")
+                    enabled=(
+                        command_settings.get("admins",False)
+                        if sender_is_admin
+                        else command_settings.get("users",False)
+                    )
+                    if enabled:
+                        return ModerationDecision(True,"command","commands_deleted")
 
         if user_id is not None:
             if settings.get("ignore_owner",True) and user_id==self.owner_id: return ModerationDecision(False)
