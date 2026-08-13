@@ -10,13 +10,14 @@ from __future__ import annotations
 import inspect
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from telegram import Message, MessageEntity, Update
 from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes
 
 from database.deleting_messages import (
     get_deleting_message_settings,
@@ -87,6 +88,10 @@ SERVICE_FIELDS: Dict[str, Tuple[str, ...]] = {
         "direct_message_price_changed",
     ),
 }
+
+
+_ADMIN_CACHE: Dict[Tuple[int, int], Tuple[float, bool]] = {}
+_ADMIN_CACHE_TTL = 60.0
 
 
 @dataclass(frozen=True)
@@ -212,16 +217,17 @@ def _looks_like_command(message: Message, prefixes: Sequence[str]) -> bool:
 
 
 async def _is_chat_admin(context: ContextTypes.DEFAULT_TYPE, message: Message) -> bool:
-    user = message.from_user
-    chat = message.chat
-    if not user or not chat:
-        return False
-
+    user = message.from_user; chat = message.chat
+    if not user or not chat: return False
+    key=(int(chat.id),int(user.id)); now=time.monotonic(); cached=_ADMIN_CACHE.get(key)
+    if cached and now-cached[0] < _ADMIN_CACHE_TTL: return cached[1]
     try:
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        return member.status in {"administrator", "creator", "owner"}
+        member=await context.bot.get_chat_member(chat.id,user.id)
+        result=member.status in {"administrator","creator","owner"}
+        _ADMIN_CACHE[key]=(now,result)
+        return result
     except TelegramError:
-        logger.debug("Could not check admin status chat=%s user=%s", chat.id, user.id)
+        logger.debug("Could not check admin status chat=%s user=%s",chat.id,user.id)
         return False
 
 
@@ -254,47 +260,38 @@ class MessageModerationService:
             return ModerationDecision(False)
 
         user_id = message.from_user.id if message.from_user else None
-        if user_id is not None:
-            if settings.get("ignore_owner", True) and user_id == self.owner_id:
-                return ModerationDecision(False)
-            if user_id in {int(x) for x in settings.get("whitelisted_user_ids", [])}:
-                return ModerationDecision(False)
-
         admin_status: Optional[bool] = None
 
-        async def is_admin() -> bool:
+        async def is_group_admin() -> bool:
             nonlocal admin_status
-            if admin_status is None:
-                admin_status = await _is_chat_admin(context, message)
+            if admin_status is None: admin_status = await _is_chat_admin(context,message)
             return admin_status
 
-        # Service messages often have no normal sender and must be checked first.
-        service_settings = settings.get("service_messages", {})
-        if _is_service_message(message, service_settings):
-            if settings.get("ignore_admins", True) and message.from_user and await is_admin():
+        service_settings=settings.get("service_messages",{})
+        if _is_service_message(message,service_settings):
+            if settings.get("ignore_admins",True) and message.from_user and await is_group_admin():
                 return ModerationDecision(False)
-            return ModerationDecision(True, "service_message", "service_messages_deleted")
+            return ModerationDecision(True,"service_message","service_messages_deleted")
 
-        # Command deletion has its own Admin/User controls. Evaluate it before
-        # the general ignore-admins rule so the Admin row actually works.
-        command_settings = settings.get("delete_commands", {})
-        sender_is_admin = await is_admin() if user_id is not None else False
-        prefixes = (
-            command_settings.get("admin_prefixes")
-            if sender_is_admin
-            else command_settings.get("user_prefixes")
-        ) or command_settings.get("prefixes") or ["/"]
-        if _looks_like_command(message, prefixes):
-            delete_command = (
-                command_settings.get("admins", False)
-                if sender_is_admin
-                else command_settings.get("users", False)
-            )
-            if delete_command:
-                return ModerationDecision(True, "command", "commands_deleted")
+        # Command deletion comes before every owner/admin exemption.
+        command_settings=settings.get("delete_commands",{})
+        if user_id is not None:
+            all_prefixes=tuple(set(
+                (command_settings.get("admin_prefixes") or command_settings.get("prefixes") or ["/"])
+                +(command_settings.get("user_prefixes") or command_settings.get("prefixes") or ["/"])
+            ))
+            if _looks_like_command(message,all_prefixes):
+                seller_account_id=int(context.application.bot_data.get("seller_account_id") or -1)
+                sender_is_admin=(user_id==seller_account_id) or await is_group_admin()
+                prefixes=(command_settings.get("admin_prefixes") if sender_is_admin else command_settings.get("user_prefixes")) or command_settings.get("prefixes") or ["/"]
+                if _looks_like_command(message,prefixes):
+                    enabled=command_settings.get("admins",False) if sender_is_admin else command_settings.get("users",False)
+                    if enabled: return ModerationDecision(True,"command","commands_deleted")
 
-        if user_id is not None and settings.get("ignore_admins", True) and sender_is_admin:
-            return ModerationDecision(False)
+        if user_id is not None:
+            if settings.get("ignore_owner",True) and user_id==self.owner_id: return ModerationDecision(False)
+            if user_id in {int(x) for x in settings.get("whitelisted_user_ids",[])}: return ModerationDecision(False)
+            if settings.get("ignore_admins",True) and await is_group_admin(): return ModerationDecision(False)
 
         if _contains_blocked_link(message, settings.get("link_protection", {})):
             return ModerationDecision(True, "link", "links_deleted")
@@ -362,7 +359,10 @@ async def moderate_seller_message(
         logger.error("seller_owner_id is missing; moderation skipped")
         return False
 
-    return await MessageModerationService(int(resolved_owner)).moderate(update, context)
+    deleted = await MessageModerationService(int(resolved_owner)).moderate(update, context)
+    if deleted:
+        raise ApplicationHandlerStop
+    return False
 
 
 async def delete_message_range(
