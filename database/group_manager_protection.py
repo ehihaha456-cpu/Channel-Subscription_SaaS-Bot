@@ -17,9 +17,6 @@ DEFAULT_PROTECTION = {
         "seconds": 3,
         "action": "off",
         "delete": True,
-        "warn_duration_seconds": 1800,
-        "mute_duration_seconds": 1800,
-        "ban_duration_seconds": 1800,
     },
     "banned_words": {
         "words": [],
@@ -32,7 +29,6 @@ DEFAULT_PROTECTION = {
         "mute_minutes": 30,
     },
     "warned_users": {},
-    "warned_until": {},
 }
 
 def _c():
@@ -92,7 +88,7 @@ async def get_warns(owner_id:int, chat_id:int, user_id:int) -> int:
 async def set_warns(owner_id:int, chat_id:int, user_id:int, count:int):
     await set_protection(owner_id,chat_id,f"warned_users.{int(user_id)}",max(0,int(count)))
 
-async def increment_warn(owner_id:int, chat_id:int, user_id:int):
+async def increment_warn(owner_id:int, chat_id:int, user_id:int, expires_seconds=None):
     key=f"protection.warned_users.{int(user_id)}"
     await _c().update_one(
         {"owner_id":int(owner_id),"chat_id":int(chat_id)},
@@ -104,7 +100,7 @@ async def increment_warn(owner_id:int, chat_id:int, user_id:int):
 async def clear_warn(owner_id:int, chat_id:int, user_id:int):
     await _c().update_one(
         {"owner_id":int(owner_id),"chat_id":int(chat_id)},
-        {"$unset":{f"protection.warned_users.{int(user_id)}":"",f"protection.warned_until.{int(user_id)}":""},"$set":{"updated_at":_now()}},
+        {"$unset":{f"protection.warned_users.{int(user_id)}":""},"$set":{"updated_at":_now()}},
         upsert=True,
     )
 
