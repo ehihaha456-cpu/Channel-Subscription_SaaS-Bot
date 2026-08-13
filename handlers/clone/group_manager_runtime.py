@@ -58,6 +58,26 @@ async def _send(bot,chat_id,item,text,markup,reply_to=None):
 async def _markup(owner,item,item_key):
     return build_group_keyboard(item.get('buttons'),item_key=item_key)
 
+async def _subscription_guard_allows_welcome(bot, chat_id: int, user_id: int) -> bool:
+    """Return True only while the new member is still present in the group.
+
+    Subscription Guard runs before the welcome handler. If Guard removed the
+    user, Telegram reports the member as left/kicked and the welcome is skipped.
+    This avoids sending a welcome to users who were immediately rejected.
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        status = str(getattr(member, "status", "") or "")
+        if status in {"left", "kicked"}:
+            return False
+        if status == "restricted":
+            return bool(getattr(member, "is_member", False))
+        return status in {"member", "administrator", "creator", "owner"}
+    except Exception:
+        # If membership cannot be verified, fail closed for the welcome.
+        return False
+
+
 async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
     if not m or m.chat.type not in {'group','supergroup'}: return
@@ -66,6 +86,15 @@ async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_T
     markup=await _markup(owner,item,'w')
     for user in m.new_chat_members or []:
         if user.is_bot: continue
+
+        # Subscription Guard is intentionally executed before this handler.
+        # Send the welcome only if the user survived that guard and is still
+        # a member of the group.
+        if not await _subscription_guard_allows_welcome(
+            context.bot, m.chat.id, user.id
+        ):
+            continue
+
         if item.get('delete_last_welcome') and item.get('last_message_id'):
             try:
                 await context.bot.delete_message(chat_id=m.chat.id,message_id=int(item['last_message_id']))
