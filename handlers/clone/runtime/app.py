@@ -109,6 +109,9 @@ class CloneRuntimeAppMixin:
         # This also ensures /start, /help, /version, /admin, /connectgroup and
         # /connectsupport are deleted immediately when their sender's command
         # deletion rule is enabled.
+        # Anti-flood must run before Delete Commands/moderation because those handlers
+        # may stop command updates before later handlers receive them.
+        app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-120)
         app.add_handler(MessageHandler(filters.ALL, moderate_seller_message), group=-110)
         app.add_handler(MessageHandler(filters.COMMAND, self.connected_group_command_guard), group=-100)
         app.add_handler(CommandHandler("start",self.child_start))
@@ -141,7 +144,6 @@ class CloneRuntimeAppMixin:
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, subscription_guard_new_members), group=-29)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
-        app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-21)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_manager_message), group=-19)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
