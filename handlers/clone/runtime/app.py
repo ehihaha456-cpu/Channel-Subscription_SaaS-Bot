@@ -105,6 +105,11 @@ class CloneRuntimeAppMixin:
         app.add_handler(BusinessConnectionHandler(handle_business_connection), group=-51)
         app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message), group=-50)
         app.add_handler(BusinessMessagesDeletedHandler(handle_deleted_business_messages), group=-49)
+        # Delete-command moderation must run before every command handler/guard.
+        # This also ensures /start, /help, /version, /admin, /connectgroup and
+        # /connectsupport are deleted immediately when their sender's command
+        # deletion rule is enabled.
+        app.add_handler(MessageHandler(filters.ALL, moderate_seller_message), group=-110)
         app.add_handler(MessageHandler(filters.COMMAND, self.connected_group_command_guard), group=-100)
         app.add_handler(CommandHandler("start",self.child_start))
         app.add_handler(CommandHandler("help",self.help_command))
@@ -138,7 +143,6 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
         app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-21)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_manager_message), group=-19)
-        app.add_handler(MessageHandler(filters.ALL,moderate_seller_message),group=-20)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, self.business_automation_media_handler), group=-4)
