@@ -118,15 +118,15 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
     if query.from_user.id != owner_id:
         await query.answer("Only the clone bot seller/admin can use this panel.", show_alert=True)
         return
-    await query.answer()
     action = query.data or ""
     settings = await get_guard_settings(owner_id)
     channels = await get_channels(owner_id)
     states = await get_guard_chat_states(owner_id, channels)
 
     if action == "sg_home":
+        await query.answer()
         return await _edit(query, home_text(settings, channels, states), guard_menu(settings, channels, states))
-    if action == "sg_chat":
+    if action.startswith("sg_chat:"):
         try:
             chat_id=int(action.split(":",1)[1])
         except (ValueError, IndexError):
@@ -134,16 +134,20 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
         if not any(int(item.get("chat_id")) == chat_id for item in channels):
             await query.answer("This group/channel is not connected.", show_alert=True)
             return
-        current=await get_guard_chat_status(owner_id, chat_id)
-        enabled=await set_guard_chat_status(owner_id, chat_id, not current)
-        channels=await get_channels(owner_id)
-        states=await get_guard_chat_states(owner_id, channels)
+        current = await get_guard_chat_status(owner_id, chat_id)
+        enabled = not current
+        await set_guard_chat_status(owner_id, chat_id, enabled)
+        channels = await get_channels(owner_id)
+        states = await get_guard_chat_states(owner_id, channels)
+        await query.answer("🟢 Guard Enabled" if enabled else "🔴 Guard Disabled")
         return await _edit(query, home_text(settings, channels, states), chats_menu(channels, states))
     if action == "sg_chats":
+        await query.answer()
         channels=await get_channels(owner_id)
         states=await get_guard_chat_states(owner_id, channels)
         return await _edit(query, "👥 <b>Connected Groups/Channels</b>\n\nTap a group/channel to enable or disable Subscription Guard.", chats_menu(channels, states))
     if action == "sg_settings":
+        await query.answer()
         return await _edit(query, "⚙️ <b>Subscription Guard Settings</b>\n\nChoose which protections should be active.", settings_menu(settings))
     if action.startswith("sg_toggle:"):
         key = action.split(":", 1)[1]
@@ -242,5 +246,5 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
 def subscription_guard_handlers():
     return [CallbackQueryHandler(
         subscription_guard_callback,
-        pattern=r"^sg_(home|chats|chat:-?\d+|enforcement|sync|sync_confirm|logs|stats|settings|clear|clear_confirm|reset|reset_confirm|toggle:.+)$",
+        pattern=r"^sg_",
     )]
