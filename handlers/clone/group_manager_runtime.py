@@ -58,24 +58,21 @@ async def _send(bot,chat_id,item,text,markup,reply_to=None):
 async def _markup(owner,item,item_key):
     return build_group_keyboard(item.get('buttons'),item_key=item_key)
 
-async def _subscription_guard_allows_welcome(bot, chat_id: int, user_id: int) -> bool:
-    """Return True only while the new member is still present in the group.
+async def _subscription_guard_allows_welcome(context, chat_id: int, user_id: int) -> bool:
+    """Use the Subscription Guard result from the same join update.
 
-    Subscription Guard runs before the welcome handler. If Guard removed the
-    user, Telegram reports the member as left/kicked and the welcome is skipped.
-    This avoids sending a welcome to users who were immediately rejected.
+    The guard handler runs immediately before this Welcome handler. Reading its
+    result avoids a Telegram get_chat_member race immediately after a join.
     """
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        status = str(getattr(member, "status", "") or "")
-        if status in {"left", "kicked"}:
-            return False
-        if status == "restricted":
-            return bool(getattr(member, "is_member", False))
-        return status in {"member", "administrator", "creator", "owner"}
-    except Exception:
-        # If membership cannot be verified, fail closed for the welcome.
-        return False
+    results = context.application.bot_data.get("welcome_guard_results", {})
+    key = (int(chat_id), int(user_id))
+    if key in results:
+        allowed = bool(results.pop(key))
+        return allowed
+
+    # No guard result means the guard was not active for this chat/update.
+    # Do not block Welcome just because Telegram membership propagation is slow.
+    return True
 
 
 async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
@@ -91,7 +88,7 @@ async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_T
         # Send the welcome only if the user survived that guard and is still
         # a member of the group.
         if not await _subscription_guard_allows_welcome(
-            context.bot, m.chat.id, user.id
+            context, m.chat.id, user.id
         ):
             continue
 
