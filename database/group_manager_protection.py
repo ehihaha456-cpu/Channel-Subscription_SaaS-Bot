@@ -17,6 +17,9 @@ DEFAULT_PROTECTION = {
         "seconds": 3,
         "action": "off",
         "delete": True,
+        "warn_duration_seconds": 1800,
+        "mute_duration_seconds": 1800,
+        "ban_duration_seconds": 1800,
     },
     "banned_words": {
         "words": [],
