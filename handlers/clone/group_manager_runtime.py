@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.group_manager import get_group, update_welcome, get_auto_reply, get_template
+from database.group_manager import get_group, update_welcome, get_auto_reply, get_template, get_moderation
 from handlers.clone.group_manager_buttons import build_group_keyboard, find_button
 from database.seller_bots import get_bot_by_data_owner_id
 
@@ -75,6 +75,19 @@ async def _subscription_guard_allows_welcome(context, chat_id: int, user_id: int
     return True
 
 
+async def _delete_join_service_after_welcome(context, chat_id: int, message_id: int, owner: int):
+    """Delete the join service message after Welcome is sent."""
+    try:
+        settings = await get_moderation(owner, chat_id)
+        service = settings.get("service_messages") or {}
+        if not service.get("join"):
+            return
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        # Cleanup failure must never delay/break the Welcome Message.
+        return
+
+
 async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
     if not m or m.chat.type not in {'group','supergroup'}: return
@@ -102,6 +115,21 @@ async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_T
         if sent:
             item['last_message_id']=sent.message_id
             await update_welcome(owner,m.chat.id,last_message_id=sent.message_id)
+            # Welcome has now been sent. Delete the Telegram join service
+            # message immediately afterwards. Do not schedule this as a
+            # background task: the task can be delayed/cancelled while the
+            # update is being processed, leaving the service message visible.
+            try:
+                settings = await get_moderation(owner, m.chat.id)
+                service = settings.get("service_messages") or {}
+                if service.get("join"):
+                    await context.bot.delete_message(
+                        chat_id=m.chat.id,
+                        message_id=m.message_id,
+                    )
+            except Exception:
+                # Never let service-message cleanup break Welcome.
+                pass
 
 async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
