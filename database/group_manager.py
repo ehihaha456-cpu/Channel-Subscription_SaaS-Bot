@@ -45,6 +45,17 @@ async def set_moderation_value(owner_id,chat_id,path,value):
     await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{f'moderation.{path}':value,'updated_at':now()}})
     return await get_moderation(owner_id,chat_id)
 
+async def set_moderation_values(owner_id, chat_id, values):
+    await ensure_group(owner_id, chat_id)
+    update = {f"moderation.{path}": value for path, value in (values or {}).items()}
+    update["updated_at"] = now()
+    await c().update_one(
+        {"owner_id": int(owner_id), "chat_id": int(chat_id)},
+        {"$set": update},
+        upsert=True,
+    )
+    return await get_moderation(owner_id, chat_id)
+
 async def reset_moderation(owner_id,chat_id):
     await c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)},{'$set':{'moderation':deepcopy(DEFAULT_SETTINGS),'updated_at':now()}},upsert=True)
 
