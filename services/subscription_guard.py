@@ -10,6 +10,7 @@ from database.mongo import get_database
 from database.seller_data import get_channels, get_subscription
 from database.subscription_guard import (
     add_whitelist, get_guard_settings, is_whitelisted, log_guard_event,
+    get_guard_chat_status,
     active_invites_for_user, deactivate_invite, mark_invite_used, record_join_attempt,
 )
 
@@ -24,7 +25,7 @@ def _aware(value):
 
 async def _connected_chat(owner_id: int, chat_id: int) -> bool:
     channels = await get_channels(int(owner_id))
-    return any(int(item.get("chat_id")) == int(chat_id) for item in channels)
+    return any(int(item.get("chat_id")) == int(chat_id) for item in channels) and await get_guard_chat_status(int(owner_id), int(chat_id))
 
 
 async def _active(owner_id: int, user_id: int) -> bool:
@@ -192,6 +193,8 @@ async def enforce_user_access(bot, owner_id: int, user_id: int, reason: str) -> 
     report["invites_revoked"] = await revoke_user_invites(bot, owner_id, user_id)
     for channel in await get_channels(owner_id):
         chat_id = int(channel["chat_id"])
+        if not await get_guard_chat_status(owner_id, chat_id):
+            continue
         if await _is_admin(bot, chat_id, user_id) or await is_whitelisted(owner_id, chat_id, user_id):
             await log_guard_event(owner_id, chat_id, user_id, "admin_skipped", reason)
             continue
