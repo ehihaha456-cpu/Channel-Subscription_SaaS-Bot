@@ -87,6 +87,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_settings':
         s = await get_seller_settings(owner)
+        context.user_data['_bot_settings_cache'] = dict(s)
         await q.edit_message_text(f"⚙ Bot Settings\n\nBot Name: {s.get('bot_name')}\nSupport: {s.get('support_username') or 'Not Set'}\nCurrency: {s.get('currency')}\nTimezone: {s.get('timezone')}\nReminder: {s.get('reminder_days')}", reply_markup=self.settings_menu())
         return True
     if a == 'a_pending':
