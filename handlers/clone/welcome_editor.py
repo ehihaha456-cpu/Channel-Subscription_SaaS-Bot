@@ -9,9 +9,9 @@ class CloneWelcomeEditorMixin:
     @staticmethod
     def welcome_menu():
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📄 Text",callback_data="a_welcome_text")],
-            [InlineKeyboardButton("🖼 Media",callback_data="a_welcome_media")],
-            [InlineKeyboardButton("🔗 URL Buttons",callback_data="a_welcome_buttons")],
+            [InlineKeyboardButton("📝 Text",callback_data="a_welcome_text"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_text")],
+            [InlineKeyboardButton("🖼 Media",callback_data="a_welcome_media"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_media")],
+            [InlineKeyboardButton("🔗 Buttons",callback_data="a_welcome_buttons"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_buttons")],
             [InlineKeyboardButton("👀 Full Preview",callback_data="a_welcome_preview")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_settings")],
         ])
