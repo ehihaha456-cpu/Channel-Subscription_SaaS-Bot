@@ -2,47 +2,6 @@
 
 from handlers.common.clone_context import *
 from handlers.common.editor_engine import build_editor_keyboard, parse_editor_buttons
-
-WELCOME_VARIABLES = (
-    "{ID} = user ID\n"
-    "{NAME} = first name\n"
-    "{SURNAME} = surname\n"
-    "{NAMESURNAME} = full name\n"
-    "{LANG} = user language\n"
-    "{DATE} = current date\n"
-    "{TIME} = current time\n"
-    "{WEEKDAY} = week day\n"
-    "{MENTION} = link to the user profile\n"
-    "{USERNAME} = username\n"
-    "{RULES} = group rules/description"
-)
-
-WELCOME_BUTTONS_HEADER = (
-    "👉 Set the buttons to be placed under the message\n"
-    "Send a message structured as follows:\n\n"
-    "• Add a single button:\n"
-    "Button title - t.me/LinkExample\n\n"
-    "• Add multiple buttons on a single line:\n"
-    "Button title - t.me/LinkExample && Button text - t.me/LinkExample\n\n"
-    "• Add multiple rows of buttons:\n"
-    "Button title - t.me/LinkExample\n"
-    "Button title - t.me/LinkExample\n\n"
-    "Special buttons\n\n"
-    "• Add a button that shows a popup:\n"
-    "Button title - popup: Popup text\n"
-    "or\n"
-    "Button title - alert: Popup text\n\n"
-    "• Add a button with a link to the group rules:\n"
-    "Button title - rules\n\n"
-    "• Add a share button:\n"
-    "Button title - share: Text to be shared\n\n"
-    "• Add a button with copyable text:\n"
-    "Button title - copy: Text copied on click\n\n"
-    "Feature buttons\n"
-    "Button title - feature: feature_name\n\n"
-    "Available feature names:\n"
-    "plans, buy, profile, renew, referral, referral_unlock, support, home"
-)
 from utils.branding import append_branding
 
 
@@ -50,7 +9,7 @@ class CloneWelcomeEditorMixin:
     @staticmethod
     def welcome_menu():
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📄 Text",callback_data="a_welcome_text"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_text")],
+            [InlineKeyboardButton("📝 Text",callback_data="a_welcome_text"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_text")],
             [InlineKeyboardButton("🖼 Media",callback_data="a_welcome_media"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_media")],
             [InlineKeyboardButton("🔗 Buttons",callback_data="a_welcome_buttons"), InlineKeyboardButton("👀 See",callback_data="a_welcome_see_buttons")],
             [InlineKeyboardButton("👀 Full Preview",callback_data="a_welcome_preview")],
@@ -78,17 +37,8 @@ class CloneWelcomeEditorMixin:
         rows=[]
         if has_buttons:
             rows.append([InlineKeyboardButton("🚫 Remove Keyboard",callback_data="a_welcome_remove_buttons")])
-        rows.append([InlineKeyboardButton("⚡ Feature Buttons",callback_data="a_welcome_quick")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_welcome")])
         return InlineKeyboardMarkup(rows)
-
-    @staticmethod
-    def welcome_buttons_header():
-        return WELCOME_BUTTONS_HEADER
-
-    @staticmethod
-    def welcome_variables_header():
-        return WELCOME_VARIABLES
 
     @staticmethod
     def welcome_quick_menu():
@@ -101,7 +51,7 @@ class CloneWelcomeEditorMixin:
         ])
 
     @staticmethod
-    def personalize(text,user,bot_name="Subscription Bot"):
+    def personalize(text,user,bot_name="Subscription Bot",group_name=""):
         from datetime import datetime as _datetime
         now=_datetime.now()
         values={
@@ -138,6 +88,7 @@ class CloneWelcomeEditorMixin:
                 seller_text,
                 user,
                 settings.get("bot_name","Subscription Bot"),
+                settings.get("group_name") or settings.get("welcome_group_name") or "",
             )
         else:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
