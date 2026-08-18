@@ -298,6 +298,22 @@ async def handle(self,update,context,q,owner,staff,a,role):
     if a.startswith('gm_select_'):
         context.user_data['gm_group_id']=int(a[len('gm_select_'):]); await group_home(q,context,owner); return True
     if a=='gm_group': await group_home(q,context,owner); return True
+
+    # These three editor-entry callbacks do not need a database read. Handle them
+    # before get_group() so the editor opens immediately after the button tap.
+    if a=='gm_welcome_text':
+        context.user_data['gm_input']='welcome_text'
+        await q.edit_message_text(group_text_prompt('Group Welcome Message'),reply_markup=group_input_keyboard('gm_welcome',remove_callback='gm_welcome_rmtext',remove_label='Remove message'))
+        return True
+    if a=='gm_welcome_media':
+        context.user_data['gm_input']='welcome_media'
+        await q.edit_message_text(editor_media_prompt('Group Welcome Media'),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_welcome')]]))
+        return True
+    if a=='gm_welcome_buttons':
+        context.user_data['gm_input']='welcome_buttons'
+        await q.edit_message_text(group_buttons_prompt(),reply_markup=group_input_keyboard('gm_welcome',remove_callback='gm_welcome_rmbuttons',remove_label='Remove Keyboard'))
+        return True
+
     gid=selected(context)
     if not gid: await groups_home(q,owner); return True
     doc=await get_group(owner,gid); item=doc.get('welcome') or {}
@@ -409,30 +425,61 @@ async def handle(self,update,context,q,owner,staff,a,role):
     if a=='gm_warns_list':
         data=await warned_list(owner,gid); body='\n'.join(f'• {uid}: {count} warn(s)' for uid,count in data.items()) if data else 'No warned users.'
         await q.edit_message_text('📄 Warned List\n\n'+body,reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_warns')]])); return True
-    if a=='gm_welcome': await q.edit_message_text(welcome_text(item),reply_markup=welcome_menu(item)); return True
-    if a=='gm_welcome_toggle': await update_welcome(owner,gid,enabled=not item.get('enabled',False)); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
-    if a=='gm_welcome_delete_last': await update_welcome(owner,gid,delete_last_welcome=not item.get('delete_last_welcome',False)); doc=await get_group(owner,gid); await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome'])); return True
-    if a=='gm_welcome_text': context.user_data['gm_input']='welcome_text'; await q.edit_message_text(group_text_prompt('Group Welcome Message'),reply_markup=group_input_keyboard('gm_welcome',remove_callback='gm_welcome_rmtext',remove_label='Remove message')); return True
-    if a=='gm_welcome_media': context.user_data['gm_input']='welcome_media'; await q.edit_message_text(editor_media_prompt('Group Welcome Media'),reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_welcome')]])); return True
-    if a=='gm_welcome_buttons': context.user_data['gm_input']='welcome_buttons'; await q.edit_message_text(group_buttons_prompt(),reply_markup=group_input_keyboard('gm_welcome',remove_callback='gm_welcome_rmbuttons',remove_label='Remove Keyboard')); return True
-    if a=='gm_welcome_rmtext': await update_welcome(owner,gid,text=''); await q.answer('Welcome message removed.'); doc=await get_group(owner,gid); await q.edit_message_text(group_editor_header('👋 Group Welcome Message', None, doc['welcome']), reply_markup=group_editor_keyboard('gm_welcome', doc['welcome'], back_callback='gm_group')); return True
-    if a=='gm_welcome_rmbuttons': await update_welcome(owner,gid,buttons=[]); await q.answer('Welcome keyboard removed.'); doc=await get_group(owner,gid); await q.edit_message_text(group_editor_header('👋 Group Welcome Message', None, doc['welcome']), reply_markup=group_editor_keyboard('gm_welcome', doc['welcome'], back_callback='gm_group')); return True
+    # Welcome callbacks are answered immediately at the top of handle().
+    if a=='gm_welcome':
+        await q.edit_message_text(welcome_text(item),reply_markup=welcome_menu(item))
+        return True
+    if a=='gm_welcome_toggle':
+        await update_welcome(owner,gid,enabled=not item.get('enabled',False))
+        doc=await get_group(owner,gid)
+        await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome']))
+        return True
+    if a=='gm_welcome_delete_last':
+        await update_welcome(owner,gid,delete_last_welcome=not item.get('delete_last_welcome',False))
+        doc=await get_group(owner,gid)
+        await q.edit_message_text(welcome_text(doc['welcome']),reply_markup=welcome_menu(doc['welcome']))
+        return True
+    if a=='gm_welcome_rmtext':
+        await update_welcome(owner,gid,text='')
+        doc=await get_group(owner,gid)
+        await q.edit_message_text(group_editor_header('👋 Group Welcome Message', None, doc['welcome']), reply_markup=group_editor_keyboard('gm_welcome', doc['welcome'], back_callback='gm_group'))
+        return True
+    if a=='gm_welcome_rmbuttons':
+        await update_welcome(owner,gid,buttons=[])
+        doc=await get_group(owner,gid)
+        await q.edit_message_text(group_editor_header('👋 Group Welcome Message', None, doc['welcome']), reply_markup=group_editor_keyboard('gm_welcome', doc['welcome'], back_callback='gm_group'))
+        return True
     if a=='gm_welcome_seetext':
-        if not item.get('text'): await q.answer('No text added.', show_alert=True); return True
+        if not item.get('text'):
+            await q.answer('No text added.', show_alert=True)
+            return True
         await q.message.reply_text(item.get('text') or '', parse_mode='HTML')
         return True
     if a=='gm_welcome_seemedia':
         media=item.get('media') or []
-        if not media and not item.get('media_file_id'): await q.answer('No media added.', show_alert=True); return True
+        if not media and not item.get('media_file_id'):
+            await q.answer('No media added.', show_alert=True)
+            return True
         await preview(q,context,owner,{**item,'text':'','buttons':[]},'Group Welcome Media')
         return True
     if a=='gm_welcome_seebuttons':
-        if not item.get('buttons'): await q.answer('No buttons added.', show_alert=True); return True
+        if not item.get('buttons'):
+            await q.answer('No buttons added.', show_alert=True)
+            return True
+        # Header contains the exact configured title/target syntax. Under it,
+        # show only the real button preview; no Add More/Delete controls.
         markup=build_group_keyboard(item.get('buttons'),item_key='w',preview_group_id=gid)
         saved=group_buttons_saved_text(item.get('buttons'))
-        await q.message.reply_text(saved or 'Choose an option:', reply_markup=markup, disable_web_page_preview=True)
+        header='🔗 Current Buttons\n\n' + (saved or 'No buttons set.')
+        # Keep only the configured button preview plus Back to the Welcome main page.
+        preview_rows=[list(row) for row in (markup.inline_keyboard if markup else [])]
+        preview_rows.append([InlineKeyboardButton('⬅ Back',callback_data='gm_welcome')])
+        markup=InlineKeyboardMarkup(preview_rows)
+        await q.message.reply_text(header, reply_markup=markup, disable_web_page_preview=True)
         return True
-    if a=='gm_welcome_preview': await preview(q,context,owner,item,'Group Welcome'); return True
+    if a=='gm_welcome_preview':
+        await preview(q,context,owner,item,'Group Welcome')
+        return True
     if a=='gm_auto':
         items=await list_auto_replies(owner,gid); rows=[[InlineKeyboardButton(f"💬 {x.get('keyword','Keyword')}",callback_data=f"gm_ar_{x['id']}")] for x in items]; rows += [[InlineKeyboardButton('➕ Add Keyword',callback_data='gm_ar_add')],[InlineKeyboardButton('⬅ Back',callback_data='gm_group')]]; await q.edit_message_text('💬 Group Auto Reply\n\nKeyword replies are saved only for this selected group.',reply_markup=kb(rows)); return True
     if a=='gm_ar_add': context.user_data['gm_input']='ar_keyword'; await q.edit_message_text('➕ Add Auto Reply\n\nSend a keyword or phrase.',reply_markup=kb([[InlineKeyboardButton('⬅ Back',callback_data='gm_auto')]])); return True
