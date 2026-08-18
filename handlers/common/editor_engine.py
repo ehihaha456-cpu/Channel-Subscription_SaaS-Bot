@@ -51,6 +51,11 @@ def url_buttons_header() -> str:
     )
 
 
+
+
+# Backward-compatible name used by Business Automation.
+business_url_buttons_header = url_buttons_header
+
 def _parse_target(target: str, line_no: int, button_no: int) -> dict[str, str]:
     location = f"Line {line_no}, button {button_no}: "
     if target.startswith(("http://", "https://", "tg://")) or target.startswith("t.me/"):
