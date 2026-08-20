@@ -4,8 +4,9 @@ from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
 from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message, group_manager_special_callback
 from handlers.clone.group_manager_protection_runtime import group_manager_protection_message, anti_flood_message
+from handlers.clone.forced_join_runtime import forced_join_request, forced_join_callback, connect_forced_join_command
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
-from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler
+from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler
 from telegram.request import HTTPXRequest
 
 
@@ -45,12 +46,12 @@ class CloneRuntimeAppMixin:
             return
 
         command = (message.text or "").split()[0].split("@", 1)[0].lstrip("/").lower()
-        if command not in {"start", "version", "admin", "help", "connectgroup", "connectsupport", "connectforcedjoin"}:
+        if command not in {"start", "version", "admin", "help", "connectgroup", "connectsupport"}:
             return
 
         # /connectgroup and /connectsupport are silent for everyone except
         # Clone Bot seller/staff admins. Telegram group-admin status alone is not enough.
-        if command in {"connectgroup", "connectsupport", "connectforcedjoin"}:
+        if command in {"connectgroup", "connectsupport"}:
             if not await self.auth(update, context):
                 raise ApplicationHandlerStop
             return
@@ -118,7 +119,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
         app.add_handler(CommandHandler("connectgroup",self.connect_group_command))
-        app.add_handler(CommandHandler("connectforcedjoin",self.connect_forced_join_command))
+        app.add_handler(CommandHandler("connectforcedjoin",lambda update,context: connect_forced_join_command(self,update,context)))
         app.add_handler(CommandHandler("connectsupport",self.connect_support_command))
         app.add_handler(CommandHandler("confirm", self.seller_broadcast_confirm_command))
         app.add_handler(CommandHandler("cancel", self.seller_broadcast_cancel_command))
@@ -133,6 +134,7 @@ class CloneRuntimeAppMixin:
         )
         app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
         app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
+        app.add_handler(CallbackQueryHandler(forced_join_callback, pattern=r"^fj_check:"))
         app.add_handler(CallbackQueryHandler(group_manager_special_callback, pattern=r"^gmsp"))
         app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
@@ -142,6 +144,7 @@ class CloneRuntimeAppMixin:
             app.add_handler(handler,group=-7)
         for handler in subscription_guard_handlers():
             app.add_handler(handler,group=-7)
+        app.add_handler(ChatJoinRequestHandler(forced_join_request), group=-35)
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, subscription_guard_new_members), group=-29)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
