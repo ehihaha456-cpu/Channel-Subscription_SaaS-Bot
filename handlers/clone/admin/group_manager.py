@@ -8,6 +8,7 @@ from database.seller_data import get_channels
 from database.seller_bots import get_bot_by_data_owner_id
 from database.group_manager import get_group, update_welcome, list_auto_replies, save_auto_reply, list_templates, save_template, get_moderation, set_moderation_value, reset_moderation, get_auto_reply, get_template, set_moderation_values
 from database.group_manager_protection import get_protection, set_protection, add_banned_word, remove_banned_word, warned_list
+from database.group_manager import list_forced_join_chats, set_forced_join_enabled, get_forced_join_settings, set_forced_join_settings
 
 logger=logging.getLogger(__name__)
 def kb(rows): return InlineKeyboardMarkup(rows)
@@ -124,6 +125,7 @@ async def group_home(q,context,owner):
     text=f"🛡 GROUP MANAGER\n\n👥 Group: {ch.get('title') or 'Group'}\n🆔 ID: {gid}\n🟢 Bot: Connected\n\nAll settings below apply only to this group."
     rows=[
         [InlineKeyboardButton('👋 Welcome Message',callback_data='gm_welcome')],
+        [InlineKeyboardButton('🔗 Forced Join',callback_data='gm_forced')],
         [InlineKeyboardButton('💬 Auto Reply',callback_data='gm_auto')],
         [InlineKeyboardButton('🛡 Anti-Spam',callback_data='gm_as'),InlineKeyboardButton('🌊 Anti-Flood',callback_data='gm_af')],
         [InlineKeyboardButton('🚫 Banned Words',callback_data='gm_bw'),InlineKeyboardButton('⚠️ Warns',callback_data='gm_warns')],
@@ -288,6 +290,34 @@ async def delete_commands_page(q, settings):
     await q.edit_message_text(text,reply_markup=kb(rows))
     return True
 
+async def forced_join_page(q, owner, context):
+    gid=selected(context)
+    settings=await get_forced_join_settings(owner,gid)
+    chats=await list_forced_join_chats(owner)
+    required=set(int(x) for x in (settings.get("required_chat_ids") or []))
+    rows=[]
+    for ch in chats:
+        cid=int(ch.get("chat_id",0))
+        on=cid in required
+        rows.append([InlineKeyboardButton(("🟢 " if on else "⚪ ")+str(ch.get("title") or cid)[:32], callback_data=f"gm_forced_toggle_{cid}")])
+    rows.append([InlineKeyboardButton("➕ Connect Required Group/Channel",callback_data="gm_forced_help")])
+    rows.append([InlineKeyboardButton("⬅ Back",callback_data="gm_group")])
+    await q.edit_message_text(
+        "🔗 FORCED JOIN\n\nSelect the groups/channels users must join before their Join Request is approved.\n\n"
+        "Only chats connected with /connectforcedjoin appear here. Subscription /connectgroup connections are excluded.",
+        reply_markup=kb(rows)
+    )
+
+async def forced_join_help(q):
+    await q.edit_message_text(
+        "🔗 Connect a Required Group/Channel\n\n"
+        "1. Add the bot as admin to the required group/channel.\n"
+        "2. Send /connectforcedjoin there as the bot seller/admin.\n"
+        "3. Return here and enable it.\n\n"
+        "Chats connected with /connectgroup are never listed as Forced Join requirements.",
+        reply_markup=kb([[InlineKeyboardButton("⬅ Back",callback_data="gm_forced")]])
+    )
+
 async def handle(self,update,context,q,owner,staff,a,role):
     if not a.startswith('gm_'): return False
     if role!='seller': await q.answer('Only the seller can manage groups.',show_alert=True); return True
@@ -298,6 +328,16 @@ async def handle(self,update,context,q,owner,staff,a,role):
     if a.startswith('gm_select_'):
         context.user_data['gm_group_id']=int(a[len('gm_select_'):]); await group_home(q,context,owner); return True
     if a=='gm_group': await group_home(q,context,owner); return True
+    if a=='gm_forced': await forced_join_page(q,owner,context); return True
+    if a=='gm_forced_help': await forced_join_help(q); return True
+    if a.startswith('gm_forced_toggle_'):
+        cid=int(a[len('gm_forced_toggle_'):])
+        settings=await get_forced_join_settings(owner,gid)
+        ids=set(int(x) for x in (settings.get('required_chat_ids') or []))
+        if cid in ids: ids.remove(cid)
+        else: ids.add(cid)
+        await set_forced_join_settings(owner,gid,enabled=bool(ids),required_chat_ids=sorted(ids))
+        await forced_join_page(q,owner,context); return True
 
     # These three editor-entry callbacks do not need a database read. Handle them
     # before get_group() so the editor opens immediately after the button tap.
