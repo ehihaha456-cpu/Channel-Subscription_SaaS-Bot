@@ -80,3 +80,30 @@ async def get_auto_reply(owner_id,chat_id,rid):
     return next((x for x in await list_auto_replies(owner_id,chat_id) if x.get("id")==rid),None)
 async def get_template(owner_id,chat_id,tid):
     return next((x for x in await list_templates(owner_id,chat_id) if x.get("id")==tid),None)
+
+
+FORCED_JOIN_COLLECTION = 'seller_forced_join'
+
+def forced_join_c():
+    return get_database()[FORCED_JOIN_COLLECTION]
+
+async def list_forced_join_chats(owner_id:int):
+    cur=forced_join_c().find({'owner_id':int(owner_id)}).sort('title',1)
+    return await cur.to_list(length=200)
+
+async def add_forced_join_chat(owner_id:int, chat_id:int, title:str='Group/Channel', chat_type:str='supergroup'):
+    doc={'owner_id':int(owner_id),'chat_id':int(chat_id)}
+    await forced_join_c().update_one(doc, {'$set':{**doc,'title':title,'chat_type':chat_type,'updated_at':now()},'$setOnInsert':{'enabled':True,'created_at':now()}}, upsert=True)
+    return await forced_join_c().find_one(doc)
+
+async def set_forced_join_enabled(owner_id:int, chat_id:int, enabled:bool):
+    await forced_join_c().update_one({'owner_id':int(owner_id),'chat_id':int(chat_id)}, {'$set':{'enabled':bool(enabled),'updated_at':now()}}, upsert=True)
+
+async def get_forced_join_settings(owner_id:int, access_chat_id:int):
+    doc=await forced_join_c().find_one({'owner_id':int(owner_id),'access_chat_id':int(access_chat_id)})
+    return doc or {'enabled':False,'required_chat_ids':[]}
+
+async def set_forced_join_settings(owner_id:int, access_chat_id:int, **values):
+    key={'owner_id':int(owner_id),'access_chat_id':int(access_chat_id)}
+    await forced_join_c().update_one(key, {'$set':{**values,'updated_at':now()},'$setOnInsert':{'created_at':now()}}, upsert=True)
+    return await forced_join_c().find_one(key)
