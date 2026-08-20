@@ -45,12 +45,12 @@ class CloneRuntimeAppMixin:
             return
 
         command = (message.text or "").split()[0].split("@", 1)[0].lstrip("/").lower()
-        if command not in {"start", "version", "admin", "help", "connectgroup", "connectsupport"}:
+        if command not in {"start", "version", "admin", "help", "connectgroup", "connectsupport", "connectforcedjoin"}:
             return
 
         # /connectgroup and /connectsupport are silent for everyone except
         # Clone Bot seller/staff admins. Telegram group-admin status alone is not enough.
-        if command in {"connectgroup", "connectsupport"}:
+        if command in {"connectgroup", "connectsupport", "connectforcedjoin"}:
             if not await self.auth(update, context):
                 raise ApplicationHandlerStop
             return
@@ -118,6 +118,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
         app.add_handler(CommandHandler("connectgroup",self.connect_group_command))
+        app.add_handler(CommandHandler("connectforcedjoin",self.connect_forced_join_command))
         app.add_handler(CommandHandler("connectsupport",self.connect_support_command))
         app.add_handler(CommandHandler("confirm", self.seller_broadcast_confirm_command))
         app.add_handler(CommandHandler("cancel", self.seller_broadcast_cancel_command))
