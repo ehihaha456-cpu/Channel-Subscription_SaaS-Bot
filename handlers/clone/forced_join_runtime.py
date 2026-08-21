@@ -25,6 +25,8 @@ async def _required_status(bot, user_id, required):
 
 
 async def _send_forced_join_approval_message(bot, owner, user_id):
+    if not await get_forced_join_editor_enabled(owner):
+        return
     item=await get_forced_join_editor(owner)
     if not item:
         return
@@ -352,11 +354,13 @@ def _approval_button_lines(rows):
 async def forced_join_message_editor(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     item=await get_forced_join_editor(owner)
+    enabled=await get_forced_join_editor_enabled(owner)
     text=item.get("text") or ""
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     button_count=sum(1 for row in buttons for b in row if b.get("type") in {"url","callback"})
     rows=[
+        [InlineKeyboardButton(("🟢 Disable" if enabled else "🔴 Enable") + " Approval Message", callback_data="fj_editor_toggle")],
         [InlineKeyboardButton("📝 Text",callback_data="fj_editor_text"), InlineKeyboardButton("👀 See",callback_data="fj_editor_text_see")],
         [InlineKeyboardButton("🖼 Media",callback_data="fj_editor_media"), InlineKeyboardButton("👀 See",callback_data="fj_editor_media_see")],
         [InlineKeyboardButton("🔗 Buttons",callback_data="fj_editor_buttons"), InlineKeyboardButton("👀 See",callback_data="fj_editor_buttons_see")],
@@ -384,6 +388,12 @@ async def forced_join_editor_callback(update, context):
 
     if a=="fj_editor":
         await forced_join_message_editor(q,context); return True
+    if a=="fj_editor_toggle":
+        current=await get_forced_join_editor_enabled(owner)
+        enabled=await set_forced_join_editor_enabled(owner, not current)
+        await q.answer("✅ Approval Message enabled." if enabled else "⛔ Approval Message disabled.", show_alert=True)
+        await forced_join_message_editor(q,context)
+        return True
 
     if a=="fj_editor_text":
         context.user_data["fj_editor_input"]="text"
