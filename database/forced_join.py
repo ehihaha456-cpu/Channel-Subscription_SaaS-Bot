@@ -49,15 +49,16 @@ async def update_invite(owner_id, chat_id, invite_link):
     )
 
 
-async def save_pending_request(owner_id, user_id, access_chat_id):
+async def save_pending_request(owner_id, user_id, access_chat_id, user_chat_id=None):
     key={
         "owner_id":int(owner_id),
         "user_id":int(user_id),
         "access_chat_id":int(access_chat_id),
     }
+    chat_id=int(user_chat_id or user_id)
     await pending_c().update_one(
         key,
-        {"$set":{**key, "updated_at":now()},"$setOnInsert":{"created_at":now()}},
+        {"$set":{**key, "user_chat_id":chat_id, "updated_at":now()},"$setOnInsert":{"created_at":now()}},
         upsert=True,
     )
 
