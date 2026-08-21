@@ -1,6 +1,6 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite
+from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
 
 logger=logging.getLogger(__name__)
@@ -31,37 +31,36 @@ async def forced_join_request(update, context):
         return
 
     access_chat_id=int(req.chat.id)
-    user_chat_id=int(req.user_chat_id)
+    user_id=int(req.user_chat_id)
 
     required=[
         x for x in await list_required(owner)
-        if x.get("enabled", True) and int(x.get("chat_id", 0) or 0) != access_chat_id
+        if x.get("enabled", True)
+        and int(x.get("chat_id", 0) or 0) != access_chat_id
     ]
 
-    # Nothing is required for this access chat: approve immediately.
     if not required:
         try:
-            await context.bot.approve_chat_join_request(access_chat_id, int(req.user_chat_id))
+            await context.bot.approve_chat_join_request(access_chat_id, user_id)
         except Exception:
             logger.exception(
                 "Automatic approval failed access=%s user=%s",
-                access_chat_id, user_chat_id
+                access_chat_id, user_id
             )
         return
 
+    # Store the pending private-channel request. From this point the bot
+    # watches ChatMember updates in the required chats and approves the
+    # original request automatically as soon as all requirements are joined.
+    await save_pending_request(owner, user_id, access_chat_id)
+
     rows=[]
-    repaired=[]
     for item in required:
         link=str(item.get("invite_link") or "").strip()
-
-        # Older Forced Join connections may have been saved without an
-        # invite_link. Repair them automatically before sending the DM.
         if not link:
             try:
                 invite=await context.bot.create_chat_invite_link(
-                    int(item["chat_id"]),
-                    name="Forced Join",
-                    member_limit=0,
+                    int(item["chat_id"]), name="Forced Join", member_limit=0
                 )
                 link=invite.invite_link
                 await update_invite(owner, int(item["chat_id"]), link)
@@ -70,7 +69,6 @@ async def forced_join_request(update, context):
                     "Could not create Forced Join invite owner=%s chat=%s",
                     owner, item.get("chat_id")
                 )
-
         if link:
             rows.append([
                 InlineKeyboardButton(
@@ -78,103 +76,86 @@ async def forced_join_request(update, context):
                     url=link,
                 )
             ])
-            repaired.append(item)
 
-    # Always keep the verification button. If Telegram could not create an
-    # invite, the user still gets a clear error when checking.
-    rows.append([
-        InlineKeyboardButton(
-            "✅ I've Joined",
-            callback_data=f"fj_check:{access_chat_id}",
-        )
-    ])
-
-    if repaired:
-        text=(
-            "🔐 Join Required\n\n"
-            "To access this channel, first join the required group/channel(s) below.\n\n"
-            "After joining all of them, tap “✅ I've Joined”."
-        )
-    else:
-        text=(
-            "🔐 Join Required\n\n"
-            "The required group/channel invite link could not be generated right now.\n"
-            "Please contact the administrator."
-        )
+    text=(
+        "🔐 Join Required\n\n"
+        "To access this private channel, first join the required "
+        "group/channel(s) below.\n\n"
+        "✅ After you join all required group/channel(s), your original "
+        "access request will be approved automatically.\n\n"
+        "You do not need to press any verification button."
+    )
 
     try:
         await context.bot.send_message(
-            chat_id=user_chat_id,
+            chat_id=user_id,
             text=text,
-            reply_markup=_kb(rows),
+            reply_markup=_kb(rows) if rows else None,
         )
     except Exception:
         logger.exception(
             "Forced Join DM failed owner=%s user=%s access=%s",
-            owner, user_chat_id, access_chat_id
+            owner, user_id, access_chat_id
         )
 
-async def forced_join_callback(update, context):
-    q=update.callback_query
-    if not q:
+
+async def forced_join_auto_approve(update, context):
+    """Approve pending private-channel requests after required membership changes."""
+    cm=update.chat_member
+    if not cm:
         return
 
-    data=q.data or ""
-    if not data.startswith("fj_check:"):
-        return
-
-    try:
-        access_chat_id=int(data.split(":",1)[1])
-    except (ValueError, TypeError):
-        await q.answer("Invalid request.", show_alert=True)
+    new=cm.new_chat_member
+    status=str(getattr(new, "status", "") or "")
+    is_member=bool(getattr(new, "is_member", False))
+    if status in {"left", "kicked"} or (status == "restricted" and not is_member):
         return
 
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    user=q.from_user
+    user_id=int(getattr(new.user, "id", 0) or 0)
+    if not owner or not user_id:
+        return
 
     required=[
         x for x in await list_required(owner)
-        if x.get("enabled", True) and int(x.get("chat_id",0) or 0) != access_chat_id
+        if x.get("enabled", True)
     ]
+    if not required:
+        return
 
-    ok, missing=await _required_status(context.bot, user.id, required)
+    pending=await list_pending_requests(owner, user_id)
+    if not pending:
+        return
+
+    # Check every required chat. This makes approval independent of which
+    # required group/channel generated the latest ChatMember update.
+    ok, missing=await _required_status(context.bot, user_id, required)
     if not ok:
-        name=str((missing or {}).get("title") or "required group/channel")
-        await q.answer(f"❌ Please join {name} first.", show_alert=True)
+        return
+
+    for request in pending:
+        access_chat_id=int(request.get("access_chat_id", 0) or 0)
+        if not access_chat_id:
+            continue
         try:
-            await q.edit_message_text(
-                "🔐 Join Required\n\n"
-                f"❌ You still need to join: {name}\n\n"
-                "Join the required group/channel above, then tap "
-                "“✅ I've Joined” again.",
-                reply_markup=q.message.reply_markup,
-            )
+            await context.bot.approve_chat_join_request(access_chat_id, user_id)
+            await remove_pending_request(owner, user_id, access_chat_id)
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "✅ All required groups/channels are joined.\n\n"
+                        "Your private-channel access request has been "
+                        "approved automatically."
+                    ),
+                )
+            except Exception:
+                pass
         except Exception:
-            pass
-        return
-
-    # All requirements are satisfied. Approve the original pending request.
-    try:
-        await context.bot.approve_chat_join_request(access_chat_id, user.id)
-    except Exception:
-        logger.exception(
-            "Forced Join approval failed access=%s user=%s",
-            access_chat_id, user.id
-        )
-        await q.answer(
-            "❌ Approval failed. The join request may have expired; send a new request.",
-            show_alert=True,
-        )
-        return
-
-    await q.answer("✅ Approved!", show_alert=False)
-    try:
-        await q.edit_message_text(
-            "✅ All required groups/channels are joined.\n\n"
-            "Your access request has been approved."
-        )
-    except Exception:
-        pass
+            logger.exception(
+                "Forced Join automatic approval failed access=%s user=%s",
+                access_chat_id, user_id
+            )
 
 async def forced_join_page(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
