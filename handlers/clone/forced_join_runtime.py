@@ -43,15 +43,32 @@ async def forced_join_request(update, context):
         try:
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
         except Exception:
-            logger.exception(
-                "Automatic approval failed access=%s user=%s",
-                access_chat_id, user_id
-            )
+            logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
         return
 
-    # Store the pending private-channel request. From this point the bot
-    # watches ChatMember updates in the required chats and approves the
-    # original request automatically as soon as all requirements are joined.
+    # Check all required chats immediately. If the user is already a member
+    # everywhere, approve without sending a Forced Join message.
+    ok, missing=await _required_status(context.bot, user_id, required)
+    if ok:
+        try:
+            await context.bot.approve_chat_join_request(access_chat_id, user_id)
+            await remove_pending_request(owner, user_id, access_chat_id)
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "✅ All required groups/channels are joined.\n"
+                        "Your access request has been approved."
+                    ),
+                )
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
+        return
+
+    # Save the original request so later ChatMember updates can approve it
+    # automatically after every required chat has been joined.
     await save_pending_request(owner, user_id, access_chat_id)
 
     rows=[]
@@ -69,21 +86,38 @@ async def forced_join_request(update, context):
                     "Could not create Forced Join invite owner=%s chat=%s",
                     owner, item.get("chat_id")
                 )
-        if link:
+
+        # Per-item status: already joined = disabled/info button;
+        # missing = clickable Join button.
+        try:
+            member=await context.bot.get_chat_member(int(item["chat_id"]), user_id)
+            status=str(getattr(member, "status", "") or "")
+            joined=status in {"creator", "administrator", "member"} or (
+                status == "restricted" and bool(getattr(member, "is_member", False))
+            )
+        except Exception:
+            joined=False
+
+        title=str(item.get("title") or "Required Group/Channel")[:35]
+        if joined:
             rows.append([
-                InlineKeyboardButton(
-                    f"🔗 Join {str(item.get('title') or 'Required Group/Channel')[:35]}",
-                    url=link,
-                )
+                InlineKeyboardButton(f"📎 Joined {title} ✅", callback_data="fj_info:joined")
+            ])
+        elif link:
+            rows.append([
+                InlineKeyboardButton(f"📎 Join {title} ❌", url=link)
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(f"📎 Join {title} ❌", callback_data="fj_info:missing")
             ])
 
     text=(
         "🔐 Join Required\n\n"
         "To access this private channel, first join the required "
         "group/channel(s) below.\n\n"
-        "✅ After you join all required group/channel(s), your original "
-        "access request will be approved automatically.\n\n"
-        "You do not need to press any verification button."
+        "After all required groups/channels are joined, your original "
+        "access request will be approved automatically."
     )
 
     try:
@@ -93,11 +127,7 @@ async def forced_join_request(update, context):
             reply_markup=_kb(rows) if rows else None,
         )
     except Exception:
-        logger.exception(
-            "Forced Join DM failed owner=%s user=%s access=%s",
-            owner, user_id, access_chat_id
-        )
-
+        logger.exception("Forced Join DM failed owner=%s user=%s access=%s", owner, user_id, access_chat_id)
 
 async def forced_join_auto_approve(update, context):
     """Approve pending private-channel requests after required membership changes."""
@@ -156,6 +186,16 @@ async def forced_join_auto_approve(update, context):
                 "Forced Join automatic approval failed access=%s user=%s",
                 access_chat_id, user_id
             )
+
+async def forced_join_info_callback(update, context):
+    q=update.callback_query
+    if not q:
+        return
+    if (q.data or "").startswith("fj_info:"):
+        if q.data.endswith(":joined"):
+            await q.answer("✅ You have already joined this required group/channel.")
+        else:
+            await q.answer("Please use the Join button for this required group/channel.")
 
 async def forced_join_page(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
