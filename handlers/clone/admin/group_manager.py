@@ -578,6 +578,10 @@ async def handle(self,update,context,q,owner,staff,a,role):
         await set_moderation_value(owner,gid,path,not bool(cur))
         parent={'delete_commands':'gm_mod_commands','link_protection':'gm_mod_links','forwarded_media':'gm_mod_forwarded','service_messages':'gm_mod_service'}.get(path.split('.')[0],'gm_mod_safety')
         return await handle(self,update,context,q,owner,staff,parent,role)
+    if a=='fj_editor':
+        from handlers.clone.forced_join_runtime import forced_join_message_editor
+        await forced_join_message_editor(q,context)
+        return True
     if a=='gm_forced_join':
         from handlers.clone.forced_join_runtime import forced_join_page
         await forced_join_page(q,context)
