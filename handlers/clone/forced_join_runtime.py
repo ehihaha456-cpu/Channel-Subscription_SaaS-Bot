@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
 from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
-from database.forced_join import get_forced_join_editor, set_forced_join_editor, get_forced_join_enabled, set_forced_join_enabled
+from database.forced_join import get_forced_join_editor, set_forced_join_editor, get_forced_join_enabled, set_forced_join_enabled, get_forced_join_editor_enabled, set_forced_join_editor_enabled
 
 logger=logging.getLogger(__name__)
 
