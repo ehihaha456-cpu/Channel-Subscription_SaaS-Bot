@@ -109,14 +109,20 @@ async def set_forced_join_enabled(owner_id, enabled):
 
 
 async def get_forced_join_editor_enabled(owner_id):
+    """Whether the post-approval custom message is enabled."""
     doc=await settings_c().find_one({"owner_id":int(owner_id)})
-    return bool((doc or {}).get("enabled", True))
+    return bool((doc or {}).get("approval_enabled", True))
+
 
 async def set_forced_join_editor_enabled(owner_id, enabled):
     await settings_c().update_one(
         {"owner_id":int(owner_id)},
-        {"$set":{"owner_id":int(owner_id),"enabled":bool(enabled),"updated_at":now()},
-         "$setOnInsert":{"created_at":now()}},
+        {"$set":{
+            "owner_id":int(owner_id),
+            "approval_enabled":bool(enabled),
+            "updated_at":now(),
+        },
+        "$setOnInsert":{"created_at":now()}},
         upsert=True,
     )
     return bool(enabled)
