@@ -73,3 +73,22 @@ async def remove_pending_request(owner_id, user_id, access_chat_id):
         "user_id":int(user_id),
         "access_chat_id":int(access_chat_id),
     })
+
+
+SETTINGS_COLLECTION = "seller_forced_join_settings"
+
+def settings_c():
+    return get_database()[SETTINGS_COLLECTION]
+
+async def get_forced_join_editor(owner_id):
+    doc=await settings_c().find_one({"owner_id":int(owner_id)})
+    return (doc or {}).get("message") or {}
+
+async def set_forced_join_editor(owner_id, message):
+    await settings_c().update_one(
+        {"owner_id":int(owner_id)},
+        {"$set":{"owner_id":int(owner_id),"message":message,"updated_at":now()},
+         "$setOnInsert":{"created_at":now()}},
+        upsert=True,
+    )
+    return message
