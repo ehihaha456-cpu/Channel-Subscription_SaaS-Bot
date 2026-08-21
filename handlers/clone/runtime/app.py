@@ -4,9 +4,9 @@ from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
 from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message, group_manager_special_callback
 from handlers.clone.group_manager_protection_runtime import group_manager_protection_message, anti_flood_message
-from handlers.clone.forced_join_runtime import forced_join_request, forced_join_callback, connect_forced_join_command
+from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, connect_forced_join_command
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
-from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler
+from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler, ChatMemberHandler
 from telegram.request import HTTPXRequest
 
 
@@ -134,7 +134,6 @@ class CloneRuntimeAppMixin:
         )
         app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
         app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
-        app.add_handler(CallbackQueryHandler(forced_join_callback, pattern=r"^fj_check:"))
         app.add_handler(CallbackQueryHandler(group_manager_special_callback, pattern=r"^gmsp"))
         app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
@@ -145,6 +144,7 @@ class CloneRuntimeAppMixin:
         for handler in subscription_guard_handlers():
             app.add_handler(handler,group=-7)
         app.add_handler(ChatJoinRequestHandler(forced_join_request), group=-35)
+        app.add_handler(ChatMemberHandler(forced_join_auto_approve, ChatMemberHandler.CHAT_MEMBER), group=-34)
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, subscription_guard_new_members), group=-29)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
