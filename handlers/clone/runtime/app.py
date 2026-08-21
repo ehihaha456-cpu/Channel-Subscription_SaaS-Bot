@@ -4,7 +4,7 @@ from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
 from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message, group_manager_special_callback
 from handlers.clone.group_manager_protection_runtime import group_manager_protection_message, anti_flood_message
-from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_info_callback, connect_forced_join_command
+from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_info_callback, forced_join_message_editor, forced_join_editor_callback, forced_join_editor_text_input, forced_join_editor_media_input, connect_forced_join_command
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler, ChatMemberHandler
 from telegram.request import HTTPXRequest
@@ -115,6 +115,8 @@ class CloneRuntimeAppMixin:
         # deletion rule is enabled.
         app.add_handler(MessageHandler(filters.ALL, moderate_seller_message), group=-110)
         app.add_handler(MessageHandler(filters.COMMAND, self.connected_group_command_guard), group=-100)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forced_join_editor_text_input), group=-99)
+        app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, forced_join_editor_media_input), group=-98)
         app.add_handler(CommandHandler("start",self.child_start))
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
@@ -135,6 +137,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(PreCheckoutQueryHandler(self.stars_precheckout), group=-40)
         app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.stars_success), group=-39)
         app.add_handler(CallbackQueryHandler(forced_join_info_callback, pattern=r"^fj_info:"))
+        app.add_handler(CallbackQueryHandler(forced_join_editor_callback, pattern=r"^fj_editor"))
         app.add_handler(CallbackQueryHandler(group_manager_special_callback, pattern=r"^gmsp"))
         app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
