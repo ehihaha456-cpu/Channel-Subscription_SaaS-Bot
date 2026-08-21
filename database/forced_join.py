@@ -2,9 +2,13 @@ from datetime import datetime, timezone
 from database.mongo import get_database
 
 COLLECTION = "seller_forced_join"
+PENDING_COLLECTION = "seller_forced_join_pending"
 
 def c():
     return get_database()[COLLECTION]
+
+def pending_c():
+    return get_database()[PENDING_COLLECTION]
 
 def now():
     return datetime.now(timezone.utc)
@@ -43,3 +47,29 @@ async def update_invite(owner_id, chat_id, invite_link):
         {"owner_id":int(owner_id),"chat_id":int(chat_id)},
         {"$set":{"invite_link":invite_link or "","updated_at":now()}},
     )
+
+
+async def save_pending_request(owner_id, user_id, access_chat_id):
+    key={
+        "owner_id":int(owner_id),
+        "user_id":int(user_id),
+        "access_chat_id":int(access_chat_id),
+    }
+    await pending_c().update_one(
+        key,
+        {"$set":{**key, "updated_at":now()},"$setOnInsert":{"created_at":now()}},
+        upsert=True,
+    )
+
+async def list_pending_requests(owner_id, user_id):
+    return await pending_c().find({
+        "owner_id":int(owner_id),
+        "user_id":int(user_id),
+    }).to_list(length=50)
+
+async def remove_pending_request(owner_id, user_id, access_chat_id):
+    await pending_c().delete_one({
+        "owner_id":int(owner_id),
+        "user_id":int(user_id),
+        "access_chat_id":int(access_chat_id),
+    })
