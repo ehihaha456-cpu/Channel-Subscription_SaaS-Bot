@@ -146,27 +146,34 @@ async def forced_join_auto_approve(update, context):
     if not owner or not user_id:
         return
 
-    required=[
+    all_required=[
         x for x in await list_required(owner)
         if x.get("enabled", True)
     ]
-    if not required:
+    if not all_required:
         return
 
     pending=await list_pending_requests(owner, user_id)
     if not pending:
         return
 
-    # Check every required chat. This makes approval independent of which
-    # required group/channel generated the latest ChatMember update.
-    ok, missing=await _required_status(context.bot, user_id, required)
-    if not ok:
-        return
-
     for request in pending:
         access_chat_id=int(request.get("access_chat_id", 0) or 0)
         if not access_chat_id:
             continue
+
+        # Do not check the private access chat itself. The user is still
+        # waiting for approval there, so it cannot be a required membership.
+        required=[
+            x for x in all_required
+            if int(x.get("chat_id", 0) or 0) != access_chat_id
+        ]
+
+        if required:
+            ok, missing=await _required_status(context.bot, user_id, required)
+            if not ok:
+                continue
+
         try:
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
             await remove_pending_request(owner, user_id, access_chat_id)
@@ -174,9 +181,8 @@ async def forced_join_auto_approve(update, context):
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=(
-                        "✅ All required groups/channels are joined.\n\n"
-                        "Your private-channel access request has been "
-                        "approved automatically."
+                        "✅ All required groups/channels are joined.\n"
+                        "Your access request has been approved."
                     ),
                 )
             except Exception:
