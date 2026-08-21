@@ -1,6 +1,6 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_text_prompt, editor_media_prompt
+from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
 from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
 from database.forced_join import get_forced_join_editor, set_forced_join_editor, get_forced_join_enabled, set_forced_join_enabled
@@ -31,7 +31,7 @@ async def _send_forced_join_approval_message(bot, owner, user_id):
     text=item.get("text") or ""
     media=item.get("media") or []
     buttons=item.get("buttons") or []
-    markup=build_editor_keyboard(buttons)
+    markup=_approval_markup(buttons)
     try:
         if not media:
             if text or markup:
@@ -244,61 +244,218 @@ async def forced_join_info_callback(update, context):
             await q.answer("Please use the Join button for this required group/channel.")
     return True
 
+
+FORCED_JOIN_APPROVAL_VARIABLES = (
+    "{ID} = user ID\n"
+    "{NAME} = first name\n"
+    "{SURNAME} = surname\n"
+    "{NAMESURNAME} = full name\n"
+    "{DATE} = current date\n"
+    "{TIME} = current time\n"
+    "{WEEKDAY} = week day\n"
+    "{MENTION} = Link to the user profile\n"
+    "{USERNAME} = username"
+)
+
+
+def _approval_buttons_header() -> str:
+    return (
+        "👉 Set the buttons to be placed under the message\n\n"
+        "Send a message structured as follows:\n\n"
+        "• Add a single button:\n"
+        "Button title - t.me/LinkExample\n\n"
+        "• Add multiple buttons on a single line:\n"
+        "Button title - t.me/LinkExample && Button text - t.me/LinkExample\n\n"
+        "• Add multiple rows of buttons:\n"
+        "Button title - t.me/LinkExample\n"
+        "Button title - t.me/LinkExample\n\n"
+        "⚡ Feature Buttons\n\n"
+        "• Add a feature button:\n"
+        "Button title - feature: feature_name\n\n"
+        "Available feature names:\n"
+        "plans, buy, profile, renew, referral, referral_unlock, support, home"
+    )
+
+
+def _parse_approval_buttons(text: str):
+    """Approval-message buttons support only URL/@username and feature targets."""
+    rows=[]
+    for line_no, raw_line in enumerate((text or "").splitlines(), 1):
+        raw_line=raw_line.strip()
+        if not raw_line:
+            continue
+        row=[]
+        for button_no, item in enumerate(raw_line.split("&&"), 1):
+            item=item.strip()
+            if " - " not in item:
+                raise ValueError(f"Line {line_no}, button {button_no}: missing ' - '. Example: Button title - t.me/LinkExample")
+            title,target=[part.strip() for part in item.split(" - ",1)]
+            if not title or not target:
+                raise ValueError(f"Line {line_no}, button {button_no}: button title and target are required.")
+            if target.startswith("feature:"):
+                feature=target.split(":",1)[1].strip().lower()
+                callback=FEATURE_CALLBACKS.get(feature)
+                if not callback:
+                    raise ValueError(f"Line {line_no}, button {button_no}: unknown feature '{feature}'. Available: {', '.join(FEATURE_CALLBACKS)}")
+                row.append({"text":title,"type":"callback","value":callback,"target":f"feature: {feature}"})
+                continue
+            if target.startswith("t.me/"):
+                target="https://"+target
+            elif target.startswith("http://") or target.startswith("https://"):
+                pass
+            elif target.startswith("@"):
+                target="https://t.me/"+target[1:]
+            else:
+                raise ValueError(
+                    f"Line {line_no}, button {button_no}: only URL/@username or feature:<name> is supported."
+                )
+            row.append({"text":title,"type":"url","value":target,"target":target})
+        rows.append(row)
+    if not rows:
+        raise ValueError("No buttons found. Add at least one button.")
+    return rows
+
+
+def _approval_markup(rows):
+    """Build only URL/feature buttons; old special-button types are ignored."""
+    clean=[]
+    for row in rows or []:
+        clean_row=[]
+        for item in row:
+            kind=item.get("type")
+            if kind in {"url","callback"} and item.get("value"):
+                clean_row.append(item)
+        if clean_row:
+            clean.append(clean_row)
+    return build_editor_keyboard(clean)
+
+
+def _approval_button_lines(rows):
+    lines=[]
+    for row in rows or []:
+        parts=[]
+        for item in row:
+            text=str(item.get("text") or "Button")
+            target=str(item.get("target") or "")
+            if not target:
+                if item.get("type")=="callback":
+                    target="feature: " + next((k for k,v in FEATURE_CALLBACKS.items() if v==item.get("value")), "home")
+                else:
+                    target=str(item.get("value") or "")
+            if target.startswith("https://t.me/"):
+                target=target[len("https://"):]
+            parts.append(f"{text} - {target}")
+        if parts:
+            lines.append(" && ".join(parts))
+    return "\n".join(lines) or "❌ No buttons configured."
+
 async def forced_join_message_editor(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     item=await get_forced_join_editor(owner)
     text=item.get("text") or ""
     media=item.get("media") or []
     buttons=item.get("buttons") or []
+    button_count=sum(1 for row in buttons for b in row if b.get("type") in {"url","callback"})
     rows=[
-        [InlineKeyboardButton("📝 Text",callback_data="fj_editor_text"),
-         InlineKeyboardButton("🖼 Media",callback_data="fj_editor_media")],
-        [InlineKeyboardButton("🔗 Buttons",callback_data="fj_editor_buttons"),
-         InlineKeyboardButton("👀 Preview",callback_data="fj_editor_preview")],
+        [InlineKeyboardButton("📝 Text",callback_data="fj_editor_text"), InlineKeyboardButton("👀 See",callback_data="fj_editor_text_see")],
+        [InlineKeyboardButton("🖼 Media",callback_data="fj_editor_media"), InlineKeyboardButton("👀 See",callback_data="fj_editor_media_see")],
+        [InlineKeyboardButton("🔗 Buttons",callback_data="fj_editor_buttons"), InlineKeyboardButton("👀 See",callback_data="fj_editor_buttons_see")],
+        [InlineKeyboardButton("👀 Full Preview",callback_data="fj_editor_preview")],
         [InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")],
     ]
+    media_line = f"🖼 Media: {len(media)}/10" if media else "🖼 Media: ❌ Not added"
     await q.edit_message_text(
         "📝 Forced Join Approval Message\n\n"
-        "This editor message is sent after all required groups/channels are "
-        "joined and the private access request is approved.\n\n"
-        f"📄 Text: {'✅ Added' if text else '❌ Not added'}\n"
-        f"🖼 Media: {len(media)}/10" if media else
-        "📝 Forced Join Approval Message\n\n"
-        "This editor message is sent after all required groups/channels are "
-        "joined and the private access request is approved.\n\n"
-        f"📄 Text: {'✅ Added' if text else '❌ Not added'}\n"
-        "🖼 Media: ❌ Not added",
+        "Sent after all required groups/channels are joined and the original access request is approved.\n\n"
+        "Current Setup\n\n"
+        f"📝 Text: {'✅ Added' if text else '❌ Not added'}\n"
+        f"{media_line}\n"
+        f"🔗 Buttons: {button_count}",
         reply_markup=_kb(rows),
     )
+
 
 async def forced_join_editor_callback(update, context):
     q=update.callback_query
     await q.answer()
     a=q.data or ""
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
+    item=await get_forced_join_editor(owner)
+
     if a=="fj_editor":
         await forced_join_message_editor(q,context); return True
+
     if a=="fj_editor_text":
         context.user_data["fj_editor_input"]="text"
-        await q.edit_message_text(editor_text_prompt("Forced Join Approval Message"))
+        await q.edit_message_text(
+            "📝 Forced Join Approval Message\n\n"
+            "Send the message you want to set.\n\n"
+            "You can use HTML and:\n"
+            + FORCED_JOIN_APPROVAL_VARIABLES,
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
+        )
         return True
+
+    if a=="fj_editor_text_see":
+        text=item.get("text") or "❌ No text added."
+        await q.edit_message_text(
+            "📝 Current Text\n\n" + text,
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
+        )
+        return True
+
     if a=="fj_editor_media":
         context.user_data["fj_editor_input"]="media"
-        await q.edit_message_text(editor_media_prompt("Forced Join Approval Message"))
+        await q.edit_message_text(
+            editor_media_prompt("Forced Join Approval Message"),
+            reply_markup=_kb([
+                [InlineKeyboardButton("🗑 Delete Media",callback_data="fj_editor_media_delete")],
+                [InlineKeyboardButton("⬅ Back",callback_data="fj_editor")],
+            ]),
+        )
         return True
+
+    if a=="fj_editor_media_see":
+        media=item.get("media") or []
+        if not media:
+            await q.answer("❌ No media configured.",show_alert=True)
+            return True
+        e=media[0]; typ=e.get("type"); fid=e.get("file_id")
+        text=item.get("text") or ""
+        markup=_approval_markup(item.get("buttons") or [])
+        if typ=="photo": await q.message.reply_photo(fid,caption=text or None,reply_markup=markup)
+        elif typ=="video": await q.message.reply_video(fid,caption=text or None,reply_markup=markup)
+        else: await q.message.reply_document(fid,caption=text or None,reply_markup=markup)
+        return True
+
+    if a=="fj_editor_media_delete":
+        item["media"]=[]
+        await set_forced_join_editor(owner,item)
+        await q.answer("🗑 Media deleted.")
+        await forced_join_message_editor(q,context)
+        return True
+
     if a=="fj_editor_buttons":
         context.user_data["fj_editor_input"]="buttons"
         await q.edit_message_text(
-            "🔗 Forced Join Approval Message Buttons\n\n"
-            "Send button rows using:\n"
-            "Button title - https://t.me/example\n\n"
-            "Multiple buttons in one row:\n"
-            "Button 1 - https://t.me/a && Button 2 - https://t.me/b"
+            "🔗 Forced Join Approval Message Buttons\n\n" + _approval_buttons_header(),
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
         )
         return True
+
+    if a=="fj_editor_buttons_see":
+        await q.edit_message_text(
+            "🔗 Current Buttons\n\n" + _approval_button_lines(item.get("buttons") or []),
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
+        )
+        # Also show the actual configured keyboard below the textual header.
+        markup=_approval_markup(item.get("buttons") or [])
+        if markup:
+            await q.message.reply_text("👀 Button Preview",reply_markup=markup)
+        return True
+
     if a=="fj_editor_preview":
-        item=await get_forced_join_editor(owner)
-        markup=build_editor_keyboard(item.get("buttons") or [])
+        markup=_approval_markup(item.get("buttons") or [])
         text=item.get("text") or "❌ No text added."
         media=item.get("media") or []
         if not media:
@@ -309,7 +466,11 @@ async def forced_join_editor_callback(update, context):
             elif typ=="video": await q.message.reply_video(fid,caption=text,reply_markup=markup)
             else: await q.message.reply_document(fid,caption=text,reply_markup=markup)
         return True
+
+    if a=="fj_editor_media_back" or a=="fj_editor_buttons_back":
+        await forced_join_message_editor(q,context); return True
     return False
+
 
 async def forced_join_editor_text_input(update, context):
     mode=context.user_data.get("fj_editor_input")
@@ -325,7 +486,7 @@ async def forced_join_editor_text_input(update, context):
         item["text"]=text
     else:
         try:
-            item["buttons"]=parse_editor_buttons(text)
+            item["buttons"]=_parse_approval_buttons(text)
         except ValueError as e:
             await update.effective_message.reply_text(f"❌ {e}")
             return True
