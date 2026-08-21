@@ -24,7 +24,7 @@ async def _required_status(bot, user_id, required):
     return True, None
 
 
-async def _send_forced_join_approval_message(bot, owner, user_id):
+async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=None):
     if not await get_forced_join_editor_enabled(owner):
         return
     item=await get_forced_join_editor(owner)
@@ -34,21 +34,32 @@ async def _send_forced_join_approval_message(bot, owner, user_id):
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     markup=_approval_markup(buttons)
+    # IMPORTANT: use the exact same private-chat target as the Forced Join
+    # DM: ChatJoinRequest.user_chat_id. This is what Telegram temporarily
+    # allows the bot to message even when the user never started the bot.
+    # Do NOT fall back to user_id here for never-started users.
+    if not user_chat_id:
+        logger.warning(
+            "No join-request user_chat_id available for approval message owner=%s user=%s",
+            owner, user_id,
+        )
+        return
+    target_chat_id=int(user_chat_id)
     try:
         if not media:
             if text or markup:
-                await bot.send_message(chat_id=user_id, text=text or " ", reply_markup=markup)
+                await bot.send_message(chat_id=target_chat_id, text=text or " ", reply_markup=markup)
             return
         for idx,entry in enumerate(media):
             fid=entry.get("file_id")
             typ=entry.get("type")
             caption=text if idx == 0 else None
             if typ=="photo":
-                await bot.send_photo(chat_id=user_id, photo=fid, caption=caption, reply_markup=markup if idx==0 else None)
+                await bot.send_photo(chat_id=target_chat_id, photo=fid, caption=caption, reply_markup=markup if idx==0 else None)
             elif typ=="video":
-                await bot.send_video(chat_id=user_id, video=fid, caption=caption, reply_markup=markup if idx==0 else None)
+                await bot.send_video(chat_id=target_chat_id, video=fid, caption=caption, reply_markup=markup if idx==0 else None)
             elif typ=="document":
-                await bot.send_document(chat_id=user_id, document=fid, caption=caption, reply_markup=markup if idx==0 else None)
+                await bot.send_document(chat_id=target_chat_id, document=fid, caption=caption, reply_markup=markup if idx==0 else None)
     except Exception:
         logger.exception("Forced Join approval editor message failed owner=%s user=%s", owner, user_id)
 
@@ -74,10 +85,10 @@ async def forced_join_request(update, context):
 
     if not required:
         try:
+            # Send while the join-request private chat is available, then approve.
+            # This works even if the user has never pressed /start.
+            await _send_forced_join_approval_message(context.bot, owner, user_id, req.user_chat_id)
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
-            # No Forced Join groups/channels configured: approve immediately
-            # and send the configured custom Approval Message if enabled.
-            await _send_forced_join_approval_message(context.bot, owner, user_id)
         except Exception:
             logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
         return
@@ -87,6 +98,7 @@ async def forced_join_request(update, context):
     ok, missing=await _required_status(context.bot, user_id, required)
     if ok:
         try:
+            await _send_forced_join_approval_message(context.bot, owner, user_id, req.user_chat_id)
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
             await remove_pending_request(owner, user_id, access_chat_id)
             try:
@@ -99,14 +111,13 @@ async def forced_join_request(update, context):
                 )
             except Exception:
                 logger.exception("Forced Join approval status message failed owner=%s user=%s", owner, user_id)
-            await _send_forced_join_approval_message(context.bot, owner, user_id)
         except Exception:
             logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
         return
 
     # Save the original request so later ChatMember updates can approve it
     # automatically after every required chat has been joined.
-    await save_pending_request(owner, user_id, access_chat_id)
+    await save_pending_request(owner, user_id, access_chat_id, req.user_chat_id)
 
     rows=[]
     for item in required:
@@ -158,8 +169,10 @@ async def forced_join_request(update, context):
     )
 
     try:
+        # Same target/method as the custom approval message: the temporary
+        # join-request private chat. This works even when /start was never used.
         await context.bot.send_message(
-            chat_id=user_id,
+            chat_id=int(req.user_chat_id),
             text=text,
             reply_markup=_kb(rows) if rows else None,
         )
@@ -207,6 +220,8 @@ async def forced_join_auto_approve(update, context):
         if not access_chat_id:
             continue
         try:
+            request_chat_id=int(request.get("user_chat_id", user_id) or user_id)
+            await _send_forced_join_approval_message(context.bot, owner, user_id, request_chat_id)
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
             await remove_pending_request(owner, user_id, access_chat_id)
             try:
@@ -220,7 +235,6 @@ async def forced_join_auto_approve(update, context):
                 )
             except Exception:
                 logger.exception("Forced Join approval status message failed owner=%s user=%s", owner, user_id)
-            await _send_forced_join_approval_message(context.bot, owner, user_id)
         except Exception:
             logger.exception(
                 "Forced Join automatic approval failed access=%s user=%s",
