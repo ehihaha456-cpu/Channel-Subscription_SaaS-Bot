@@ -527,21 +527,58 @@ async def delete_plan(owner_id,plan_id): return (await c(PLANS).delete_one({"own
 
 
 async def add_channel(owner_id,chat_id,title,chat_type):
+    """Connect a subscription chat without implicitly activating new features.
+
+    Existing connected chats keep their current settings. A genuinely new chat:
+    - gets Subscription Guard disabled by default (admin must enable it);
+    - gets Auto Invite enabled only when it is the first connected chat;
+    - gets Auto Invite disabled for every subsequent connected chat.
+    """
+    owner_id = int(owner_id)
+    chat_id = int(chat_id)
     now=datetime.now(timezone.utc)
-    await c(CHANNELS).update_one(
-        {"owner_id":owner_id,"chat_id":int(chat_id)},
+
+    # Count only currently active connections. This decides the default for a
+    # genuinely new connection; existing documents are never reset.
+    existing_active = await c(CHANNELS).count_documents({
+        "owner_id": owner_id,
+        "active": True,
+    })
+
+    result = await c(CHANNELS).update_one(
+        {"owner_id":owner_id,"chat_id":chat_id},
         {
             "$set":{"title":title,"chat_type":chat_type,"active":True,"updated_at":now},
             "$setOnInsert":{
                 "owner_id":owner_id,
-                "chat_id":int(chat_id),
-                "auto_invite_enabled":True,
+                "chat_id":chat_id,
+                # Only the first connected subscription destination receives
+                # automatic invite delivery by default.
+                "auto_invite_enabled": existing_active == 0,
                 "created_at":now,
             },
         },
         upsert=True,
     )
-    return await c(CHANNELS).find_one({"owner_id":owner_id,"chat_id":int(chat_id)})
+
+    # New connections must not silently become Subscription Guard targets.
+    # We create an explicit disabled state so the legacy/default behaviour for
+    # older connections remains untouched.
+    if result.upserted_id is not None:
+        await c("subscription_guard_chats").update_one(
+            {"owner_id": owner_id, "chat_id": chat_id},
+            {
+                "$setOnInsert": {
+                    "owner_id": owner_id,
+                    "chat_id": chat_id,
+                    "enabled": False,
+                    "created_at": now,
+                }
+            },
+            upsert=True,
+        )
+
+    return await c(CHANNELS).find_one({"owner_id":owner_id,"chat_id":chat_id})
 
 
 async def get_channels(owner_id):

@@ -79,7 +79,10 @@ async def get_guard_chat_states(owner_id: int, chats) -> dict[int, bool]:
         return {}
     rows = await _c(GUARD_CHATS).find({"owner_id": int(owner_id), "chat_id": {"$in": chat_ids}}).to_list(length=len(chat_ids))
     state = {int(row["chat_id"]): bool(row.get("enabled", False)) for row in rows}
-    return {chat_id: state.get(chat_id, False) for chat_id in chat_ids}
+    # Legacy connected chats without an explicit per-chat document retain the
+    # previous enabled behaviour. New connections are always written with an
+    # explicit False state by database.seller_data.add_channel().
+    return {chat_id: state.get(chat_id, True) for chat_id in chat_ids}
 
 async def save_invite(owner_id: int, user_id: int, chat_id: int, invite_link: str):
     now = datetime.now(timezone.utc)
