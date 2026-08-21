@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_text_prompt, editor_media_prompt
 from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
-from database.forced_join import get_forced_join_editor, set_forced_join_editor
+from database.forced_join import get_forced_join_editor, set_forced_join_editor, get_forced_join_enabled, set_forced_join_enabled
 
 logger=logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ async def forced_join_request(update, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     if not owner:
         return
+    if not await get_forced_join_enabled(owner):
+        return
 
     access_chat_id=int(req.chat.id)
     user_id=int(req.user_chat_id)
@@ -91,7 +93,8 @@ async def forced_join_request(update, context):
                     ),
                 )
             except Exception:
-                pass
+                logger.exception("Forced Join approval status message failed owner=%s user=%s", owner, user_id)
+            await _send_forced_join_approval_message(context.bot, owner, user_id)
         except Exception:
             logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
         return
@@ -171,6 +174,8 @@ async def forced_join_auto_approve(update, context):
         return
 
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
+    if not owner or not await get_forced_join_enabled(owner):
+        return
     user_id=int(getattr(new.user, "id", 0) or 0)
     if not owner or not user_id:
         return
@@ -209,7 +214,8 @@ async def forced_join_auto_approve(update, context):
                     ),
                 )
             except Exception:
-                pass
+                logger.exception("Forced Join approval status message failed owner=%s user=%s", owner, user_id)
+            await _send_forced_join_approval_message(context.bot, owner, user_id)
         except Exception:
             logger.exception(
                 "Forced Join automatic approval failed access=%s user=%s",
@@ -219,18 +225,24 @@ async def forced_join_auto_approve(update, context):
 async def forced_join_info_callback(update, context):
     q=update.callback_query
     if not q:
-        return
-    if (q.data or "")=="fj_forced_groups":
+        return True
+    await q.answer()
+    a=q.data or ""
+    owner=int(context.application.bot_data.get("seller_owner_id") or 0)
+    if a=="fj_forced_groups":
         await forced_join_groups_page(q, context)
-        return
-    if (q.data or "")=="fj_editor":
-        await forced_join_message_editor(q, context)
-        return
-    if (q.data or "").startswith("fj_info:"):
-        if q.data.endswith(":joined"):
+        return True
+    if a=="fj_toggle_feature":
+        enabled=await get_forced_join_enabled(owner)
+        await set_forced_join_enabled(owner, not enabled)
+        await forced_join_page(q, context)
+        return True
+    if a.startswith("fj_info:"):
+        if a.endswith(":joined"):
             await q.answer("✅ You have already joined this required group/channel.")
         else:
             await q.answer("Please use the Join button for this required group/channel.")
+    return True
 
 async def forced_join_message_editor(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
@@ -350,13 +362,16 @@ async def forced_join_editor_media_input(update, context):
 
 async def forced_join_page(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
+    enabled=await get_forced_join_enabled(owner)
     rows=[
+        [InlineKeyboardButton(("🔴 Disable Forced Join" if enabled else "🟢 Enable Forced Join"), callback_data="fj_toggle_feature")],
         [InlineKeyboardButton("🔗 Forced Group/Channel",callback_data="fj_forced_groups")],
         [InlineKeyboardButton("📝 Approval Message",callback_data="fj_editor")],
         [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
     ]
     await q.edit_message_text(
         "🔗 Forced Join\n\n"
+        f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n\n"
         "Manage the groups/channels used for Forced Join and the "
         "message sent after automatic approval.",
         reply_markup=_kb(rows)
