@@ -75,6 +75,9 @@ async def forced_join_request(update, context):
     if not required:
         try:
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
+            # No Forced Join groups/channels configured: approve immediately
+            # and send the configured custom Approval Message if enabled.
+            await _send_forced_join_approval_message(context.bot, owner, user_id)
         except Exception:
             logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
         return
@@ -372,6 +375,7 @@ async def forced_join_message_editor(q, context):
         "📝 Forced Join Approval Message\n\n"
         "Sent after all required groups/channels are joined and the original access request is approved.\n\n"
         "Current Setup\n\n"
+        f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
         f"📝 Text: {'✅ Added' if text else '❌ Not added'}\n"
         f"{media_line}\n"
         f"🔗 Buttons: {button_count}",
@@ -391,8 +395,8 @@ async def forced_join_editor_callback(update, context):
     if a=="fj_editor_toggle":
         current=await get_forced_join_editor_enabled(owner)
         enabled=await set_forced_join_editor_enabled(owner, not current)
-        await q.answer("✅ Approval Message enabled." if enabled else "⛔ Approval Message disabled.", show_alert=True)
         await forced_join_message_editor(q,context)
+        await q.answer("✅ Approval Message enabled." if enabled else "⛔ Approval Message disabled.", show_alert=True)
         return True
 
     if a=="fj_editor_text":
