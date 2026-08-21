@@ -62,7 +62,10 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_channel_resend_yes':
         await q.edit_message_text('⏳ Invite links resend ho rahe hain...')
-        channels = await get_channels(owner)
+        channels = [
+            channel for channel in await get_channels(owner)
+            if channel.get('auto_invite_enabled', True) is not False
+        ]
         subscriptions = await active_subscriptions(owner)
         sent = failed = invite_failed = 0
         now = datetime.now(timezone.utc)
@@ -102,7 +105,10 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_retry_failed':
         failed_docs = await get_failed_deliveries(owner, 'invite_resend')
         sent = still_failed = skipped = 0
-        channels = await get_channels(owner)
+        channels = [
+            channel for channel in await get_channels(owner)
+            if channel.get('auto_invite_enabled', True) is not False
+        ]
         for item in failed_docs:
             claimed = await claim_failed_delivery(item['_id'], owner, stale_after_seconds=600)
             if not claimed:
