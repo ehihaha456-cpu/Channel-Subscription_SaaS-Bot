@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes, ApplicationHandlerStop
 from config import ADMIN_IDS
 from database.group_manager_protection import get_protection, increment_warn, clear_warn
 from database.group_manager import get_moderation
+from database.seller_data import get_channels
 from database.staff import active_staff
 
 logger = logging.getLogger(__name__)
@@ -97,15 +98,63 @@ async def _punish(bot, owner, chat_id, user, action, *, warn_cfg, reason, reply_
         logger.exception("Anti-flood punishment failed action=%s chat=%s user=%s",action,chat_id,user.id)
 
 
+def _forward_origin(m):
+    return getattr(m, "forward_origin", None)
+
 def _forward_type(m):
-    origin=getattr(m,"forward_origin",None)
+    """Return the configured forwarding category from Telegram's forward_origin.
+
+    Telegram's modern API exposes the original sender as MessageOrigin* rather
+    than through effective_user.  In particular, a bot-origin forward is a
+    MessageOriginUser whose sender_user.is_bot is True, so it must be classified
+    before the generic user case.
+    """
+    origin=_forward_origin(m)
     if not origin:
         return None
     name=origin.__class__.__name__.casefold()
-    if "channel" in name: return "channels"
-    if "chat" in name: return "groups"
-    if "user" in name: return "users"
-    return "bots" if "bot" in name else "users"
+    if "channel" in name:
+        return "channels"
+    if "chat" in name:
+        return "groups"
+    if "user" in name:
+        sender=getattr(origin, "sender_user", None)
+        return "bots" if bool(getattr(sender, "is_bot", False)) else "users"
+    return None
+
+async def _forward_is_connected_channel(owner, m):
+    """Skip forwarding punishment for a configured subscription channel.
+
+    A channel-origin forward can come from a channel connected with /connectgroup.
+    Those connected channels are trusted content sources and are not treated as
+    user/channel spam in the destination group.
+    """
+    origin=_forward_origin(m)
+    if not origin or "channel" not in origin.__class__.__name__.casefold():
+        return False
+    source_chat=getattr(origin, "chat", None)
+    source_id=getattr(source_chat, "id", None)
+    if source_id is None:
+        return False
+    try:
+        connected=await get_channels(int(owner))
+    except Exception:
+        logger.debug("Connected-channel lookup failed for forwarded message", exc_info=True)
+        return False
+    return any(int(item.get("chat_id", 0) or 0)==int(source_id) for item in (connected or []))
+
+async def _forward_source_bot_is_destination_admin(bot, chat_id, m):
+    """Return True when a forwarded bot is itself an admin of the destination.
+
+    The person forwarding the message is not the original bot.  We therefore
+    inspect MessageOriginUser.sender_user and exempt that bot when it is an
+    administrator/creator of the protected group.
+    """
+    origin=_forward_origin(m)
+    sender=getattr(origin, "sender_user", None) if origin else None
+    if not sender or not bool(getattr(sender, "is_bot", False)):
+        return False
+    return await _is_chat_admin(bot, chat_id, int(sender.id))
 
 async def anti_flood_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Early, isolated anti-flood pass. Must run before command/deletion guards."""
@@ -291,10 +340,32 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     spam=p.get("anti_spam") or {}
     fw=spam.get("forwarding") or {}
     ftype=_forward_type(m)
-    if ftype and fw.get(ftype) and fw.get("action","off")!="off":
-        if fw.get("delete",False): await _delete_ids(context.bot,chat.id,[m.message_id])
-        await _punish(context.bot,owner,chat.id,user,fw.get("action"),warn_cfg=warns,reason="Forwarded message",reply_to=m.message_id)
-        return
+    if ftype:
+        # Trusted/configured subscription channels are never punished by the
+        # forwarding anti-spam rule.
+        if ftype=="channels" and await _forward_is_connected_channel(owner, m):
+            return
+
+        # If the original sender is a bot and that bot is an administrator of
+        # this destination group, treat it as an admin exemption rather than a
+        # normal bot forward.
+        if ftype=="bots" and await _forward_source_bot_is_destination_admin(context.bot, chat.id, m):
+            return
+
+        # Telegram represents anonymous/"send as chat" forwards as
+        # MessageOriginChat.  Keep the category available for explicit Groups
+        # protection, but never confuse the current anonymous admin with the
+        # human user who performed the forwarding.  The normal destination admin
+        # exemption above already handles admins forwarding regular user-origin
+        # messages.
+        if fw.get(ftype) and fw.get("action","off")!="off":
+            if fw.get("delete",False):
+                await _delete_ids(context.bot,chat.id,[m.message_id])
+            await _punish(
+                context.bot,owner,chat.id,user,fw.get("action"),
+                warn_cfg=warns,reason="Forwarded message",reply_to=m.message_id
+            )
+            return
 
     tg=spam.get("telegram_links") or {}
     if tg.get("action","off")!="off" and text:
