@@ -420,12 +420,14 @@ async def forced_join_editor_callback(update, context):
         if not media:
             await q.answer("❌ No media configured.",show_alert=True)
             return True
+        # See = media only. Do not attach approval text or configured buttons.
         e=media[0]; typ=e.get("type"); fid=e.get("file_id")
-        text=item.get("text") or ""
-        markup=_approval_markup(item.get("buttons") or [])
-        if typ=="photo": await q.message.reply_photo(fid,caption=text or None,reply_markup=markup)
-        elif typ=="video": await q.message.reply_video(fid,caption=text or None,reply_markup=markup)
-        else: await q.message.reply_document(fid,caption=text or None,reply_markup=markup)
+        if typ=="photo":
+            await q.message.reply_photo(fid)
+        elif typ=="video":
+            await q.message.reply_video(fid)
+        else:
+            await q.message.reply_document(fid)
         return True
 
     if a=="fj_editor_media_delete":
@@ -444,14 +446,16 @@ async def forced_join_editor_callback(update, context):
         return True
 
     if a=="fj_editor_buttons_see":
-        await q.edit_message_text(
-            "🔗 Current Buttons\n\n" + _approval_button_lines(item.get("buttons") or []),
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
-        )
-        # Also show the actual configured keyboard below the textual header.
+        # See = one message only: exact configured button definitions in the
+        # header, followed by the actual configured keyboard preview.
+        rows=_approval_button_lines(item.get("buttons") or [])
+        text="🔗 Current Buttons\n\n" + rows
         markup=_approval_markup(item.get("buttons") or [])
         if markup:
-            await q.message.reply_text("👀 Button Preview",reply_markup=markup)
+            markup.append([InlineKeyboardButton("⬅ Back",callback_data="fj_editor")])
+        else:
+            markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]])
+        await q.edit_message_text(text,reply_markup=markup)
         return True
 
     if a=="fj_editor_preview":
