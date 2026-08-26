@@ -81,6 +81,13 @@ class CloneRuntimeLifecycleMixin:
                         bot_id,
                         data_owner_id,
                     )
+                try:
+                    await self.restore_scheduled_campaigns(app, data_owner_id)
+                except Exception:
+                    logger.exception(
+                        "Scheduled campaign restoration failed bot_id=%s owner_id=%s",
+                        bot_id, data_owner_id,
+                    )
 
                 logger.info(
                     "Clone bot started bot_id=%s owner_id=%s",
