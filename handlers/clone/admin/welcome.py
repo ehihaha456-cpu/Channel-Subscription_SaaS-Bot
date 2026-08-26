@@ -10,9 +10,14 @@ def _welcome_cache(context):
 
 
 async def _get_welcome_settings(owner, context):
-    cached = _welcome_cache(context)
-    if cached is not None:
-        return cached
+    """Return the latest saved Welcome Message settings.
+
+    The editor previously preferred a chat_data cache. That cache could become
+    stale after Text/Media/Buttons were saved by the message handlers, causing
+    👀 See and 👀 Full Preview to display an older saved state. Always refresh
+    from MongoDB here, then refresh the local cache for compatibility with the
+    existing editor flow.
+    """
     settings = await get_seller_settings(owner)
     cached = dict(settings)
     context.chat_data["_welcome_settings_cache"] = cached
