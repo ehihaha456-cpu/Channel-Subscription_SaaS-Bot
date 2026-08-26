@@ -204,20 +204,19 @@ def _build_business_buttons(rows, clone_username: str = ""):
     return InlineKeyboardMarkup(keyboard) if keyboard else None
 
 
-def __editor_header(title: str, item: dict) -> str:
+def _editor_header(title: str, item: dict) -> str:
     buttons = sum(len(row) for row in (item.get("buttons") or []))
     media = len(item.get("media") or [])
     if not media and item.get("media_file_id"):
         media = 1
+    media_line = f"🖼 Media: {media}/10" if media else "🖼 Media: ❌ Not added"
     return (
         f"{title}\n\n"
         f"Status: {'🟢 Enabled' if item.get('enabled', True) else '🔴 Disabled'}\n"
         f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
-        f"🖼 Media: {media}/10" if media else
-        f"{title}\n\n"
-        f"Status: {'🟢 Enabled' if item.get('enabled', True) else '🔴 Disabled'}\n"
-        f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
-        "🖼 Media: ❌ Not added"
+        f"{media_line}\n"
+        f"🔗 Buttons: {buttons}\n\n"
+        "Use the options below to add, replace, preview, or remove each part."
     )
 
 
