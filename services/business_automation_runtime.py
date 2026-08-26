@@ -557,7 +557,14 @@ class BusinessAutomationRuntime:
             if not raw or any(ch.isspace() for ch in raw):
                 return
             templates = await list_business_reply_templates(owner_id)
-            item = next((x for x in templates if raw.casefold() == str(x.get("shortcut") or "").strip().casefold()), None)
+            item = next(
+                (
+                    x for x in templates
+                    if x.get("enabled", True)
+                    and raw.casefold() == str(x.get("shortcut") or "").strip().casefold()
+                ),
+                None,
+            )
             if not item:
                 return
             peer_id = int(event.chat_id or 0)
