@@ -313,17 +313,41 @@ async def _send_business_component_preview(message, item: dict, component: str):
         if not items:
             await message.reply_text("❌ No media has been saved.")
             return
-        for x in items:
+
+        # See Media must show the saved Telegram album as one media group,
+        # not as a sequence of unrelated one-by-one messages. Telegram media
+        # groups support photos, videos and documents. If the saved set contains
+        # an animation, show that item separately because Telegram does not
+        # support GIF/animation objects inside sendMediaGroup.
+        album_items = [x for x in items if str(x.get("type") or "").lower() in {"photo", "video", "document"}]
+        other_items = [x for x in items if str(x.get("type") or "").lower() not in {"photo", "video", "document"}]
+        if len(album_items) >= 2:
+            album = []
+            for x in album_items:
+                kind = str(x.get("type") or "document").lower()
+                fid = x.get("file_id")
+                if kind == "photo":
+                    album.append(InputMediaPhoto(fid))
+                elif kind == "video":
+                    album.append(InputMediaVideo(fid))
+                else:
+                    album.append(InputMediaDocument(fid))
+            await message.reply_media_group(album)
+        elif len(album_items) == 1:
+            x = album_items[0]
             kind = str(x.get("type") or "document").lower()
             fid = x.get("file_id")
             if kind == "photo":
                 await message.reply_photo(fid)
             elif kind == "video":
                 await message.reply_video(fid)
-            elif kind == "animation":
-                await message.reply_animation(fid)
             else:
                 await message.reply_document(fid)
+        for x in other_items:
+            kind = str(x.get("type") or "document").lower()
+            fid = x.get("file_id")
+            if kind == "animation":
+                await message.reply_animation(fid)
         return
     if component == "buttons":
         buttons = item.get("buttons") or []
@@ -331,7 +355,7 @@ async def _send_business_component_preview(message, item: dict, component: str):
         if not markup:
             await message.reply_text("❌ No buttons have been saved.")
             return
-        input_text = _buttons_input_text(buttons)
+        input_text = str(item.get("buttons_input") or "").strip() or _buttons_input_text(buttons)
         await message.reply_text(
             f"🔗 Current Buttons\n\n{input_text}",
             reply_markup=markup,
@@ -977,11 +1001,11 @@ async def handle_text(self, update, context):
         elif field == "auto_item_text":
             await update_business_auto_reply_item(owner, str(editor.get("reply_id") or ""), text=text)
         elif field == "welcome_buttons":
-            await update_business_welcome(owner, buttons=_parse_business_buttons(text))
+            await update_business_welcome(owner, buttons=_parse_business_buttons(text), buttons_input=text)
         elif field == "auto_item_buttons":
-            await update_business_auto_reply_item(owner, str(editor.get("reply_id") or ""), buttons=_parse_business_buttons(text))
+            await update_business_auto_reply_item(owner, str(editor.get("reply_id") or ""), buttons=_parse_business_buttons(text), buttons_input=text)
         elif field == "template_buttons":
-            await update_business_reply_template(owner, template_id, buttons=_parse_business_buttons(text))
+            await update_business_reply_template(owner, template_id, buttons=_parse_business_buttons(text), buttons_input=text)
         elif field == "template_add":
             keyword = text.strip()
             if not keyword or any(ch.isspace() for ch in keyword):
