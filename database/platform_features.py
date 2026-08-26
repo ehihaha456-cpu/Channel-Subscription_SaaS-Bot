@@ -563,6 +563,8 @@ async def create_scheduled_campaign(owner_id: int, name: str) -> dict:
         "buttons": [],
         "schedule_at": None,
         "repeat_interval": "",
+        "next_run_at": None,
+        "last_run_at": None,
         "status": "paused",
         "created_at": now,
         "updated_at": now,
@@ -588,8 +590,8 @@ async def get_scheduled_campaign(owner_id: int, job_id: str) -> dict | None:
 
 async def update_scheduled_campaign(owner_id: int, job_id: str, **fields) -> dict | None:
     allowed = {
-        "name", "text", "media", "buttons", "schedule_at", "repeat_interval", "status",
-        "media_type", "media_file_id",
+        "name", "text", "media", "buttons", "schedule_at", "repeat_interval",
+        "next_run_at", "last_run_at", "status", "media_type", "media_file_id",
     }
     clean = {key: value for key, value in fields.items() if key in allowed}
     clean["updated_at"] = datetime.now(timezone.utc)
