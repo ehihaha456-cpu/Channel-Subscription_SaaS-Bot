@@ -9,6 +9,55 @@ from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument, Input
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
 
 
+def _broadcast_text_editor_header(title):
+    return (
+        f"📝 {title}\n\n"
+        "Seller, send now the message you want to set!\n\n"
+        "You can use HTML and:\n"
+        "• {ID} = user ID\n"
+        "• {NAME} = first name\n"
+        "• {SURNAME} = surname\n"
+        "• {NAMESURNAME} = full name\n"
+        "• {LANG} = user language\n"
+        "• {DATE} = current date\n"
+        "• {TIME} = current time\n"
+        "• {WEEKDAY} = week day\n"
+        "• {MENTION} = link to the user profile\n"
+        "• {USERNAME} = username"
+    )
+
+
+def _broadcast_media_editor_header(title):
+    return (
+        f"🖼 {title}\n\n"
+        "Send one photo/video/document, or select and send one Telegram album together.\n"
+        "The complete media selection will replace the current media (maximum 10 files)."
+    )
+
+
+def _broadcast_buttons_editor_header():
+    return (
+        "🔗 Buttons\n\n"
+        "Set the buttons to be placed under the message.\n\n"
+        "Send a message structured as follows:\n\n"
+        "• Add a Single button:\n"
+        "Button title - t.me/LinkExample\n\n"
+        "• Add multiple buttons on a single line:\n"
+        "Button 1 - t.me/LinkExample && Button 2 - t.me/LinkExample\n\n"
+        "• Add multiple rows of buttons:\n"
+        "Button 1 - t.me/LinkExample\n"
+        "Button 2 - t.me/LinkExample\n\n"
+        "⭐ Special Button:\n"
+        "• Add a share button:\n"
+        "Button title - share: Text\n\n"
+        "⚡ Feature Buttons:\n"
+        "• Add a feature button:\n"
+        "Button title - feature: feature_name\n\n"
+        "Features:\n"
+        "plans, buy, profile, renew, referral, referral_unlock, support, home"
+    )
+
+
 def _broadcast_text(item):
     return (
         "📣 Seller Broadcast\n\n"
@@ -78,13 +127,12 @@ def _scheduled_editor_keyboard(item):
     job_id = item["job_id"]
     pause_label = "⏸ Pause" if item.get("status") == "active" else "▶️ Resume"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(pause_label, callback_data=f"a_sb_toggle_{job_id}")],
+        [InlineKeyboardButton(pause_label, callback_data=f"a_sb_toggle_{job_id}"), InlineKeyboardButton("🗑 Remove", callback_data=f"a_sb_delete_{job_id}")],
         [InlineKeyboardButton("📝 Text", callback_data=f"a_sb_text_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_text_{job_id}")],
         [InlineKeyboardButton("🖼 Media", callback_data=f"a_sb_media_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_media_{job_id}")],
         [InlineKeyboardButton("🔗 Buttons", callback_data=f"a_sb_buttons_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_buttons_{job_id}")],
         [InlineKeyboardButton("👀 Full Preview", callback_data=f"a_sb_preview_{job_id}")],
         [InlineKeyboardButton("📅 Schedule Settings", callback_data=f"a_sb_settings_{job_id}")],
-        [InlineKeyboardButton("🗑 Delete", callback_data=f"a_sb_delete_{job_id}")],
         [InlineKeyboardButton("⬅ Back", callback_data="a_broadcast_schedule")],
     ])
 
@@ -234,13 +282,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 'menu_chat_id': q.message.chat_id, 'menu_message_id': q.message.message_id,
             }
             if field == 'text':
-                prompt = editor_text_prompt('Scheduled Broadcast Text', variables='{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}')
+                prompt = _broadcast_text_editor_header('Scheduled Broadcast Text')
                 remove = 'rmtext' if item.get('text') else None
             elif field == 'media':
-                prompt = editor_media_prompt('Scheduled Broadcast Media')
+                prompt = _broadcast_media_editor_header('Scheduled Broadcast Media')
                 remove = 'rmmedia' if item.get('media') else None
             else:
-                prompt = url_buttons_header()
+                prompt = _broadcast_buttons_editor_header()
                 remove = 'rmbuttons' if item.get('buttons') else None
             await q.edit_message_text(prompt, reply_markup=_scheduled_input_keyboard(job_id, remove))
             return True
@@ -293,12 +341,19 @@ async def handle(self, update, context, q, owner, staff, a, role):
         job_id = a.removeprefix('a_sb_toggle_')
         item = await get_scheduled_campaign(owner, job_id)
         if item:
-            status = 'paused' if item.get('status') == 'active' else 'active'
-            item = await update_scheduled_campaign(owner, job_id, status=status)
+            if item.get('status') == 'active':
+                await self._campaign_job_remove(context.application, job_id)
+                item = await update_scheduled_campaign(owner, job_id, status='paused')
+            else:
+                item = await update_scheduled_campaign(owner, job_id, status='active')
+                item = await self.schedule_campaign_from_item(
+                    context.application, owner, item, prefer_now_for_repeat=not bool(item.get("schedule_at"))
+                )
             await q.edit_message_text(_scheduled_editor_text(item), reply_markup=_scheduled_editor_keyboard(item))
         return True
     if a.startswith('a_sb_delete_'):
         job_id = a.removeprefix('a_sb_delete_')
+        await self._campaign_job_remove(context.application, job_id)
         await delete_scheduled_campaign(owner, job_id)
         items = await list_scheduled_campaigns(owner)
         await q.edit_message_text(_scheduled_home_text(items), reply_markup=_scheduled_home_keyboard(items))
@@ -338,7 +393,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         item = await get_seller_broadcast_draft(owner)
         context.user_data['seller_broadcast_editor'] = {'field': 'text'}
         await q.edit_message_text(
-            editor_text_prompt('Seller Broadcast Text', variables='{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}'),
+            _broadcast_text_editor_header('Seller Broadcast Text'),
             reply_markup=_input_keyboard('a_broadcast', 'a_bc_rmtext' if item.get('text') else None, 'Remove Text'),
         )
         return True
@@ -354,7 +409,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         item = await get_seller_broadcast_draft(owner)
         context.user_data['seller_broadcast_editor'] = {'field': 'buttons'}
         await q.edit_message_text(
-            url_buttons_header(),
+            _broadcast_buttons_editor_header(),
             reply_markup=_input_keyboard('a_broadcast', 'a_bc_rmbuttons' if item.get('buttons') else None, 'Remove Buttons'),
         )
         return True
