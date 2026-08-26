@@ -454,6 +454,8 @@ async def save_support_template(owner_id: int, command: str, **values):
         "media_type",
         "media_file_id",
         "buttons",
+        "buttons_input",
+        "enabled",
         "auto_delete_minutes",
         "auto_delete_seconds",
     }
@@ -481,6 +483,8 @@ async def save_support_template(owner_id: int, command: str, **values):
         "media_type": "",
         "media_file_id": "",
         "buttons": [],
+        "buttons_input": "",
+        "enabled": True,
         "auto_delete_minutes": 0,
         "auto_delete_seconds": 0,
         "created_at": now,
@@ -525,7 +529,7 @@ async def save_support_auto_reply(owner_id: int, keyword: str, **values):
     ):
         raise ValueError("Use only letters, numbers, spaces or underscore (max 20 characters)")
 
-    allowed = {"text", "media_type", "media_file_id", "buttons"}
+    allowed = {"text", "media_type", "media_file_id", "buttons", "buttons_input", "enabled"}
     clean = {key: value for key, value in values.items() if key in allowed}
     now = datetime.now(timezone.utc)
     clean["updated_at"] = now
@@ -536,6 +540,8 @@ async def save_support_auto_reply(owner_id: int, keyword: str, **values):
         "media_type": "",
         "media_file_id": "",
         "buttons": [],
+        "buttons_input": "",
+        "enabled": True,
         "created_at": now,
     }
     for key in clean:
@@ -564,6 +570,8 @@ async def match_support_auto_reply(owner_id: int, message_text: str):
     items.sort(key=lambda item: len(item.get("keyword", "")), reverse=True)
     padded = f" {normalized} "
     for item in items:
+        if item.get("enabled", True) is False:
+            continue
         keyword = " ".join(str(item.get("keyword") or "").split())
         if keyword and f" {keyword} " in padded:
             return item
