@@ -1,139 +1,8 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
-from handlers.common.editor_engine import editor_header, editor_menu_keyboard, editor_media_prompt, editor_text_prompt, url_buttons_header, build_editor_keyboard
-from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from handlers.common.editor_engine import editor_header, editor_menu_keyboard, editor_media_prompt, editor_text_prompt, url_buttons_header
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
-
-
-# Broadcast editors are intentionally local/separate from Business Automation and
-# Live Support storage/runtime. These helpers only reproduce the requested editor UI.
-_BROADCAST_TEXT_PROMPT = (
-    "Seller, send now the message you want to set!\n\n"
-    "You can use HTML and:\n"
-    "• {ID} = user ID\n• {NAME} = first name\n• {SURNAME} = surname\n"
-    "• {NAMESURNAME} = full name\n• {LANG} = user language\n"
-    "• {DATE} = current date\n• {TIME} = current time\n"
-    "• {WEEKDAY} = week day\n• {MENTION} = link to the user profile\n"
-    "• {USERNAME} = username\n• {PLAN} = current plan\n• {EXPIRY} = subscription expiry"
-)
-
-_BROADCAST_BUTTONS_HEADER = """🔗 Buttons
-
-Set the buttons to be placed under the message.
-
-Send a message structured as follows:
-
-• Add a Single button:
-Button title - t.me/LinkExample
-
-• Add multiple buttons on a single line:
-Button 1 - t.me/LinkExample && Button 2 - t.me/LinkExample
-
-• Add multiple rows of buttons:
-Button 1 - t.me/LinkExample
-Button 2 - t.me/LinkExample
-
-⭐ Special Button:
-• Add a share button:
-Button title - share: Text
-
-⚡ Feature Buttons:
-• Add a feature button:
-Button title - feature: feature_name
-
-Features:
-plans, buy, profile, renew, referral, referral_unlock, support, home"""
-
-
-def _broadcast_text_prompt(title):
-    return f"📝 {title}\n\n{_BROADCAST_TEXT_PROMPT}"
-
-
-def _broadcast_media_prompt(title):
-    return f"🖼 {title}\n\nSend one photo, video, GIF or document, or select and send one Telegram album together.\nThe complete media selection will replace the current media (maximum 10 files)."
-
-
-def _broadcast_input_keyboard(back_callback, remove_callback=None, remove_label="Remove"):
-    rows = []
-    if remove_callback:
-        rows.append([InlineKeyboardButton(f"🗑 {remove_label}", callback_data=remove_callback)])
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_callback)])
-    return InlineKeyboardMarkup(rows)
-
-
-def _broadcast_media_items(item):
-    media = list(item.get("media") or [])
-    if not media and item.get("media_file_id"):
-        media = [{"type": item.get("media_type"), "file_id": item.get("media_file_id")}]
-    return media[:10]
-
-
-async def _show_broadcast_media(message, item):
-    media = _broadcast_media_items(item)
-    if not media:
-        await message.reply_text("❌ No media has been saved.")
-        return
-    if len(media) == 1:
-        entry = media[0]
-        kind = str(entry.get("type") or entry.get("media_type") or "")
-        fid = str(entry.get("file_id") or entry.get("media_file_id") or "")
-        if kind == "photo":
-            await message.reply_photo(fid)
-        elif kind == "video":
-            await message.reply_video(fid)
-        elif kind == "animation":
-            await message.reply_animation(fid)
-        else:
-            await message.reply_document(fid)
-        return
-    album = []
-    for entry in media:
-        kind = str(entry.get("type") or entry.get("media_type") or "")
-        fid = str(entry.get("file_id") or entry.get("media_file_id") or "")
-        if kind == "photo":
-            album.append(InputMediaPhoto(fid))
-        elif kind == "video":
-            album.append(InputMediaVideo(fid))
-        elif kind == "document":
-            album.append(InputMediaDocument(fid))
-    if album:
-        await message.reply_media_group(media=album)
-    else:
-        await message.reply_text("❌ Saved media cannot be displayed as an album.")
-
-
-async def _show_broadcast_buttons(message, item):
-    buttons = item.get("buttons") or []
-    raw = str(item.get("buttons_input") or "").strip()
-    if not raw:
-        lines = []
-        reverse = {
-            "c_plans": "plans", "c_buy": "buy", "c_profile": "profile",
-            "c_renew": "renew", "c_referral": "referral",
-            "c_referral_unlock": "referral_unlock", "c_support": "support",
-            "c_home": "home",
-        }
-        for row in buttons:
-            parts = []
-            for button in row or []:
-                title = str(button.get("text") or "Button")
-                kind = str(button.get("type") or "")
-                value = str(button.get("value") or "")
-                if kind == "url":
-                    value = value.removeprefix("https://")
-                elif kind == "share":
-                    value = f"share: {value}"
-                elif kind == "callback":
-                    value = f"feature: {reverse.get(value, value)}"
-                parts.append(f"{title} - {value}")
-            if parts:
-                lines.append(" && ".join(parts))
-        raw = "\n".join(lines)
-    if not buttons:
-        await message.reply_text("❌ No buttons have been saved.")
-        return
-    await message.reply_text(f"🔗 Current Buttons\n\n{raw}", reply_markup=build_editor_keyboard(buttons))
 
 
 def _broadcast_text(item):
@@ -143,20 +12,20 @@ def _broadcast_text(item):
         + editor_header(
             "Current Setup",
             {**item, "enabled": True},
-            variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
         )
     )
 
 
 def _broadcast_keyboard(item):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Text", callback_data="a_bc_text"), InlineKeyboardButton("👀 See", callback_data="a_bc_see_text")],
-        [InlineKeyboardButton("🖼 Media", callback_data="a_bc_media"), InlineKeyboardButton("👀 See", callback_data="a_bc_see_media")],
-        [InlineKeyboardButton("🔗 Buttons", callback_data="a_bc_buttons"), InlineKeyboardButton("👀 See", callback_data="a_bc_see_buttons")],
-        [InlineKeyboardButton("👀 Full Preview", callback_data="a_bc_preview")],
-        [InlineKeyboardButton("📤 Send Broadcast", callback_data="a_bc_send")],
-        [InlineKeyboardButton("⬅ Back", callback_data="a_home")],
-    ])
+    base = editor_menu_keyboard(
+        "a_bc",
+        {**item, "enabled": True},
+        back_callback="a_home",
+        allow_toggle=False,
+    )
+    rows = list(base.inline_keyboard)
+    rows.insert(-1, [InlineKeyboardButton("📤 Send Broadcast", callback_data="a_bc_send")])
+    return InlineKeyboardMarkup(rows)
 
 
 
@@ -186,18 +55,15 @@ def _scheduled_editor_text(item):
     media_count = len(item.get("media") or [])
     button_count = sum(len(row) for row in (item.get("buttons") or []))
     status = "🟢 Active" if item.get("status") == "active" else "⏸ Paused"
+    media_line = f"🖼 Media: {media_count}/10" if media_count else "🖼 Media: ❌ Not added"
     return (
         "📅 Scheduled Broadcast\n\n"
+        "Automatically sends this saved broadcast to your selected audience at the scheduled time. "
+        "You can send it once or repeat it automatically.\n\n"
         f"Name: {item.get('name') or 'Scheduled Broadcast'}\n"
         f"Status: {status}\n\n"
         f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
-        f"🖼 Media: {media_count}/10\n" if media_count else
-        "📅 Scheduled Broadcast\n\n"
-        f"Name: {item.get('name') or 'Scheduled Broadcast'}\n"
-        f"Status: {status}\n\n"
-        f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
-        "🖼 Media: ❌ Not added\n"
-    ) + (
+        f"{media_line}\n"
         f"🔗 Buttons: {button_count}\n\n"
         f"📆 Schedule: {item.get('schedule_at') or 'Not Set'}\n"
         f"🔁 Repeat: {item.get('repeat_interval') or 'Not Set'}"
@@ -208,12 +74,11 @@ def _scheduled_editor_keyboard(item):
     job_id = item["job_id"]
     pause_label = "⏸ Pause" if item.get("status") == "active" else "▶️ Resume"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(pause_label, callback_data=f"a_sb_toggle_{job_id}")],
-        [InlineKeyboardButton("📝 Text", callback_data=f"a_sb_text_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_text_{job_id}")],
-        [InlineKeyboardButton("🖼 Media", callback_data=f"a_sb_media_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_media_{job_id}")],
-        [InlineKeyboardButton("🔗 Buttons", callback_data=f"a_sb_buttons_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_buttons_{job_id}")],
-        [InlineKeyboardButton("👀 Full Preview", callback_data=f"a_sb_preview_{job_id}")],
+        [InlineKeyboardButton("📝 Edit Text", callback_data=f"a_sb_text_{job_id}"), InlineKeyboardButton("🖼 Edit Media", callback_data=f"a_sb_media_{job_id}")],
+        [InlineKeyboardButton("🔗 Edit Buttons", callback_data=f"a_sb_buttons_{job_id}")],
+        [InlineKeyboardButton("👁 Full Preview", callback_data=f"a_sb_preview_{job_id}")],
         [InlineKeyboardButton("📅 Schedule Settings", callback_data=f"a_sb_settings_{job_id}")],
+        [InlineKeyboardButton(pause_label, callback_data=f"a_sb_toggle_{job_id}")],
         [InlineKeyboardButton("🗑 Delete", callback_data=f"a_sb_delete_{job_id}")],
         [InlineKeyboardButton("⬅ Back", callback_data="a_broadcast_schedule")],
     ])
@@ -296,34 +161,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 'menu_chat_id': q.message.chat_id, 'menu_message_id': q.message.message_id,
             }
             if field == 'text':
-                prompt = _broadcast_text_prompt('Scheduled Broadcast Text')
+                prompt = editor_text_prompt('Scheduled Broadcast Text', variables='{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}')
                 remove = 'rmtext' if item.get('text') else None
             elif field == 'media':
-                prompt = _broadcast_media_prompt('Scheduled Broadcast Media')
+                prompt = editor_media_prompt('Scheduled Broadcast Media')
                 remove = 'rmmedia' if item.get('media') else None
             else:
-                prompt = _BROADCAST_BUTTONS_HEADER
+                prompt = url_buttons_header()
                 remove = 'rmbuttons' if item.get('buttons') else None
             await q.edit_message_text(prompt, reply_markup=_scheduled_input_keyboard(job_id, remove))
             return True
-    if a.startswith('a_sb_see_text_'):
-        job_id = a.removeprefix('a_sb_see_text_')
-        item = await get_scheduled_campaign(owner, job_id)
-        await q.message.reply_text((item or {}).get('text') or '❌ No text has been saved.')
-        await q.answer('Saved text shown.')
-        return True
-    if a.startswith('a_sb_see_media_'):
-        job_id = a.removeprefix('a_sb_see_media_')
-        item = await get_scheduled_campaign(owner, job_id)
-        await _show_broadcast_media(q.message, item or {})
-        await q.answer('Saved media shown.')
-        return True
-    if a.startswith('a_sb_see_buttons_'):
-        job_id = a.removeprefix('a_sb_see_buttons_')
-        item = await get_scheduled_campaign(owner, job_id)
-        await _show_broadcast_buttons(q.message, item or {})
-        await q.answer('Saved buttons shown.')
-        return True
     if a.startswith('a_sb_settings_'):
         job_id = a.removeprefix('a_sb_settings_')
         item = await get_scheduled_campaign(owner, job_id)
@@ -399,7 +246,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         item = await get_seller_broadcast_draft(owner)
         context.user_data['seller_broadcast_editor'] = {'field': 'text'}
         await q.edit_message_text(
-            _broadcast_text_prompt('Seller Broadcast Text'),
+            editor_text_prompt('Seller Broadcast Text', variables='{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}'),
             reply_markup=_input_keyboard('a_broadcast', 'a_bc_rmtext' if item.get('text') else None, 'Remove Text'),
         )
         return True
@@ -407,7 +254,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         item = await get_seller_broadcast_draft(owner)
         context.user_data['seller_broadcast_editor'] = {'field': 'media'}
         await q.edit_message_text(
-            _broadcast_media_prompt('Seller Broadcast Media'),
+            editor_media_prompt('Seller Broadcast Media'),
             reply_markup=_input_keyboard('a_broadcast', 'a_bc_rmmedia' if (item.get('media') or item.get('media_file_id')) else None, 'Remove Media'),
         )
         return True
@@ -415,24 +262,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
         item = await get_seller_broadcast_draft(owner)
         context.user_data['seller_broadcast_editor'] = {'field': 'buttons'}
         await q.edit_message_text(
-            _BROADCAST_BUTTONS_HEADER,
-            reply_markup=_broadcast_input_keyboard('a_broadcast', 'a_bc_rmbuttons' if item.get('buttons') else None, 'Remove Buttons'),
+            url_buttons_header(),
+            reply_markup=_input_keyboard('a_broadcast', 'a_bc_rmbuttons' if item.get('buttons') else None, 'Remove Buttons'),
         )
-        return True
-    if a == 'a_bc_see_text':
-        item = await get_seller_broadcast_draft(owner)
-        await q.message.reply_text(item.get('text') or '❌ No text has been saved.')
-        await q.answer('Saved text shown.')
-        return True
-    if a == 'a_bc_see_media':
-        item = await get_seller_broadcast_draft(owner)
-        await _show_broadcast_media(q.message, item)
-        await q.answer('Saved media shown.')
-        return True
-    if a == 'a_bc_see_buttons':
-        item = await get_seller_broadcast_draft(owner)
-        await _show_broadcast_buttons(q.message, item)
-        await q.answer('Saved buttons shown.')
         return True
     if a == 'a_bc_rmtext':
         item = await update_seller_broadcast_draft(owner, text='')
