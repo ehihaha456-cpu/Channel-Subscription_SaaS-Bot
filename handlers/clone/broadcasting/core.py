@@ -1,6 +1,7 @@
 """Clone-bot seller broadcast editor and delivery engine."""
 
 from handlers.common.clone_context import *
+from datetime import timedelta
 from handlers.common.editor_engine import build_editor_keyboard, parse_editor_buttons
 from handlers.common.feature_navigation import register_feature_origin
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
@@ -195,6 +196,114 @@ class CloneBroadcastMixin:
         else:
             await update.effective_message.reply_text("ℹ️ No broadcast is waiting for confirmation.")
 
+    @staticmethod
+    def _campaign_interval_seconds(value: str) -> int | None:
+        import re
+        match = re.fullmatch(r"([1-9]\d*)([smhdSMHD])", str(value or "").strip())
+        if not match:
+            return None
+        return int(match.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2).lower()]
+
+    async def _campaign_job_remove(self, application: Application, job_id: str):
+        if not application.job_queue:
+            return
+        for job in application.job_queue.get_jobs_by_name(f"campaign_{job_id}"):
+            job.schedule_removal()
+
+    async def _campaign_next_run_from_item(self, owner: int, item: dict, *, prefer_now_for_repeat: bool = False):
+        now = datetime.now(timezone.utc)
+        interval = self._campaign_interval_seconds(item.get("repeat_interval"))
+        if prefer_now_for_repeat and interval:
+            return now + timedelta(seconds=interval)
+        next_run = item.get("next_run_at")
+        if next_run:
+            return next_run if next_run.tzinfo else next_run.replace(tzinfo=timezone.utc)
+        schedule_at = str(item.get("schedule_at") or "").strip()
+        if schedule_at:
+            try:
+                parsed = datetime.strptime(schedule_at, "%d %b %Y • %I:%M %p")
+                settings = await get_seller_settings(int(owner))
+                zone = ZoneInfo(settings.get("timezone", "Asia/Kolkata"))
+                return parsed.replace(tzinfo=zone).astimezone(timezone.utc)
+            except Exception:
+                logger.exception("Could not parse campaign schedule owner=%s job=%s", owner, item.get("job_id"))
+        return now + timedelta(seconds=interval) if interval else None
+
+    async def _campaign_schedule_job(self, application: Application, item: dict, when=None):
+        if not application.job_queue or item.get("status") != "active":
+            return
+        job_id = str(item["job_id"])
+        await self._campaign_job_remove(application, job_id)
+        run_at = when or item.get("next_run_at")
+        if not run_at:
+            return
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=timezone.utc)
+        application.job_queue.run_once(
+            self.scheduled_campaign_job,
+            when=max(run_at, datetime.now(timezone.utc) + timedelta(seconds=1)),
+            data={"owner_id": int(item["owner_id"]), "job_id": job_id},
+            name=f"campaign_{job_id}",
+        )
+
+    async def schedule_campaign_from_item(self, application: Application, owner: int, item: dict, *, prefer_now_for_repeat: bool = False):
+        if not item or item.get("status") != "active":
+            return item
+        next_run = await self._campaign_next_run_from_item(owner, item, prefer_now_for_repeat=prefer_now_for_repeat)
+        if not next_run:
+            return item
+        updated = await update_scheduled_campaign(owner, item["job_id"], next_run_at=next_run)
+        if updated:
+            await self._campaign_schedule_job(application, updated)
+            return updated
+        return item
+
+    async def scheduled_campaign_job(self, context: ContextTypes.DEFAULT_TYPE):
+        data = context.job.data or {}
+        owner = int(data.get("owner_id") or 0)
+        job_id = str(data.get("job_id") or "")
+        item = await get_scheduled_campaign(owner, job_id)
+        if not item or item.get("status") != "active":
+            return
+        try:
+            await self.send_seller_broadcast(owner, context, item)
+            interval = self._campaign_interval_seconds(item.get("repeat_interval"))
+            if interval:
+                next_run = datetime.now(timezone.utc) + timedelta(seconds=interval)
+                updated = await update_scheduled_campaign(
+                    owner, job_id, next_run_at=next_run, last_run_at=datetime.now(timezone.utc), status="active"
+                )
+                if updated:
+                    await self._campaign_schedule_job(context.application, updated)
+            else:
+                await update_scheduled_campaign(
+                    owner, job_id, next_run_at=None, last_run_at=datetime.now(timezone.utc), status="paused"
+                )
+                await self._campaign_job_remove(context.application, job_id)
+        except Exception:
+            logger.exception("Scheduled campaign execution failed owner=%s job=%s", owner, job_id)
+            interval = self._campaign_interval_seconds(item.get("repeat_interval"))
+            if interval:
+                updated = await update_scheduled_campaign(
+                    owner, job_id, next_run_at=datetime.now(timezone.utc) + timedelta(seconds=interval)
+                )
+                if updated:
+                    await self._campaign_schedule_job(context.application, updated)
+            else:
+                await update_scheduled_campaign(owner, job_id, status="paused")
+
+    async def restore_scheduled_campaigns(self, application: Application, owner_id: int):
+        items = await list_scheduled_campaigns(owner_id)
+        now = datetime.now(timezone.utc)
+        for item in items:
+            if item.get("status") != "active":
+                continue
+            next_run = await self._campaign_next_run_from_item(owner_id, item)
+            if not next_run:
+                continue
+            item = await update_scheduled_campaign(owner_id, item["job_id"], next_run_at=next_run) or item
+            await self._campaign_schedule_job(application, item, when=max(next_run, now + timedelta(seconds=1)))
+
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
         if update.effective_user.id != owner:
@@ -274,7 +383,10 @@ class CloneBroadcastMixin:
                         "❌ Use: 02 Sep 2026 06:50 PM\nThe date/time must be in the future."
                     )
                     raise ApplicationHandlerStop
-                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, status="active")
+                zone = ZoneInfo((await get_seller_settings(owner)).get("timezone", "Asia/Kolkata"))
+                run_at = parsed.replace(tzinfo=zone).astimezone(timezone.utc)
+                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, next_run_at=run_at, status="active")
+                item = await self.schedule_campaign_from_item(context.application, owner, item)
                 context.user_data.pop("scheduled_broadcast_editor", None)
                 await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
                 raise ApplicationHandlerStop
@@ -287,6 +399,7 @@ class CloneBroadcastMixin:
                     raise ApplicationHandlerStop
                 interval = f"{match.group(1)}{match.group(2).lower()}"
                 item = await update_scheduled_campaign(owner, job_id, repeat_interval=interval, status="active")
+                item = await self.schedule_campaign_from_item(context.application, owner, item, prefer_now_for_repeat=not bool(item.get("schedule_at")))
                 context.user_data.pop("scheduled_broadcast_editor", None)
                 await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
                 raise ApplicationHandlerStop
