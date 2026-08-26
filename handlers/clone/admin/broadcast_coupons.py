@@ -1,7 +1,11 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
-from handlers.common.editor_engine import editor_header, editor_menu_keyboard, editor_media_prompt, editor_text_prompt, url_buttons_header
+from handlers.common.editor_engine import (
+    editor_header, editor_menu_keyboard, editor_media_prompt, editor_text_prompt,
+    url_buttons_header, build_editor_keyboard,
+)
+from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument, InputMediaAnimation
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
 
 
@@ -17,14 +21,14 @@ def _broadcast_text(item):
 
 
 def _broadcast_keyboard(item):
-    base = editor_menu_keyboard(
-        "a_bc",
-        {**item, "enabled": True},
-        back_callback="a_home",
-        allow_toggle=False,
-    )
-    rows = list(base.inline_keyboard)
-    rows.insert(-1, [InlineKeyboardButton("📤 Send Broadcast", callback_data="a_bc_send")])
+    rows = [
+        [InlineKeyboardButton("📝 Text", callback_data="a_bc_text"), InlineKeyboardButton("👀 See", callback_data="a_bc_see_text")],
+        [InlineKeyboardButton("🖼 Media", callback_data="a_bc_media"), InlineKeyboardButton("👀 See", callback_data="a_bc_see_media")],
+        [InlineKeyboardButton("🔗 Buttons", callback_data="a_bc_buttons"), InlineKeyboardButton("👀 See", callback_data="a_bc_see_buttons")],
+        [InlineKeyboardButton("👀 Full Preview", callback_data="a_bc_preview")],
+        [InlineKeyboardButton("📤 Send Broadcast", callback_data="a_bc_send")],
+        [InlineKeyboardButton("⬅ Back", callback_data="a_home")],
+    ]
     return InlineKeyboardMarkup(rows)
 
 
@@ -74,11 +78,12 @@ def _scheduled_editor_keyboard(item):
     job_id = item["job_id"]
     pause_label = "⏸ Pause" if item.get("status") == "active" else "▶️ Resume"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Edit Text", callback_data=f"a_sb_text_{job_id}"), InlineKeyboardButton("🖼 Edit Media", callback_data=f"a_sb_media_{job_id}")],
-        [InlineKeyboardButton("🔗 Edit Buttons", callback_data=f"a_sb_buttons_{job_id}")],
-        [InlineKeyboardButton("👁 Full Preview", callback_data=f"a_sb_preview_{job_id}")],
-        [InlineKeyboardButton("📅 Schedule Settings", callback_data=f"a_sb_settings_{job_id}")],
         [InlineKeyboardButton(pause_label, callback_data=f"a_sb_toggle_{job_id}")],
+        [InlineKeyboardButton("📝 Text", callback_data=f"a_sb_text_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_text_{job_id}")],
+        [InlineKeyboardButton("🖼 Media", callback_data=f"a_sb_media_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_media_{job_id}")],
+        [InlineKeyboardButton("🔗 Buttons", callback_data=f"a_sb_buttons_{job_id}"), InlineKeyboardButton("👀 See", callback_data=f"a_sb_see_buttons_{job_id}")],
+        [InlineKeyboardButton("👀 Full Preview", callback_data=f"a_sb_preview_{job_id}")],
+        [InlineKeyboardButton("📅 Schedule Settings", callback_data=f"a_sb_settings_{job_id}")],
         [InlineKeyboardButton("🗑 Delete", callback_data=f"a_sb_delete_{job_id}")],
         [InlineKeyboardButton("⬅ Back", callback_data="a_broadcast_schedule")],
     ])
@@ -123,6 +128,74 @@ def _input_keyboard(back_callback, remove_callback=None, remove_label="Remove"):
         rows.append([InlineKeyboardButton(f"🗑 {remove_label}", callback_data=remove_callback)])
     rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_callback)])
     return InlineKeyboardMarkup(rows)
+
+
+async def _send_editor_text_see(bot, chat_id, text, title):
+    if not text:
+        await bot.send_message(chat_id, f"{title}\n\n❌ Not added")
+        return
+    await bot.send_message(chat_id, text)
+
+
+def _media_items(item):
+    media = list(item.get("media") or [])
+    if not media and item.get("media_file_id"):
+        media = [{"type": item.get("media_type"), "file_id": item.get("media_file_id")}]
+    return media[:10]
+
+
+def _build_media(item, caption=None):
+    media_type = str(item.get("type") or item.get("media_type") or "")
+    file_id = str(item.get("file_id") or item.get("media_file_id") or "")
+    if media_type == "photo":
+        return InputMediaPhoto(file_id, caption=caption)
+    if media_type == "video":
+        return InputMediaVideo(file_id, caption=caption)
+    if media_type == "document":
+        return InputMediaDocument(file_id, caption=caption)
+    if media_type == "animation":
+        return InputMediaAnimation(file_id, caption=caption)
+    return None
+
+
+async def _send_editor_media_see(bot, chat_id, item, title):
+    media = _media_items(item)
+    if not media:
+        await bot.send_message(chat_id, f"{title}\n\n❌ Not added")
+        return
+    if len(media) == 1:
+        built = _build_media(media[0], item.get("text") or None)
+        if built:
+            if isinstance(built, InputMediaPhoto):
+                await bot.send_photo(chat_id, media[0]["file_id"], caption=item.get("text") or None)
+            elif isinstance(built, InputMediaVideo):
+                await bot.send_video(chat_id, media[0]["file_id"], caption=item.get("text") or None)
+            elif isinstance(built, InputMediaDocument):
+                await bot.send_document(chat_id, media[0]["file_id"], caption=item.get("text") or None)
+            elif isinstance(built, InputMediaAnimation):
+                await bot.send_animation(chat_id, media[0]["file_id"], caption=item.get("text") or None)
+            return
+    album = []
+    for index, media_item in enumerate(media):
+        built = _build_media(media_item, item.get("text") if index == 0 else None)
+        if built:
+            album.append(built)
+    if album:
+        await bot.send_media_group(chat_id=chat_id, media=album)
+
+
+async def _send_editor_buttons_see(bot, chat_id, item, title):
+    buttons = item.get("buttons") or []
+    if not buttons:
+        await bot.send_message(chat_id, f"{title}\n\n❌ Not added")
+        return
+    lines = [title, "", "Current Buttons"]
+    for row in buttons:
+        if isinstance(row, list):
+            for button in row:
+                if isinstance(button, dict):
+                    lines.append(f"• {button.get('text') or button.get('label') or 'Button'}")
+    await bot.send_message(chat_id, "\n".join(lines), reply_markup=build_editor_keyboard(buttons))
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
@@ -171,6 +244,25 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 remove = 'rmbuttons' if item.get('buttons') else None
             await q.edit_message_text(prompt, reply_markup=_scheduled_input_keyboard(job_id, remove))
             return True
+    if a.startswith('a_sb_see_text_') or a.startswith('a_sb_see_media_') or a.startswith('a_sb_see_buttons_'):
+        if a.startswith('a_sb_see_text_'):
+            kind, job_id = 'text', a.removeprefix('a_sb_see_text_')
+        elif a.startswith('a_sb_see_media_'):
+            kind, job_id = 'media', a.removeprefix('a_sb_see_media_')
+        else:
+            kind, job_id = 'buttons', a.removeprefix('a_sb_see_buttons_')
+        item = await get_scheduled_campaign(owner, job_id)
+        if not item:
+            await q.answer('Scheduled broadcast not found.', show_alert=True)
+            return True
+        if kind == 'text':
+            await _send_editor_text_see(q.message.get_bot(), q.message.chat_id, item.get('text'), '📝 Scheduled Broadcast Text')
+        elif kind == 'media':
+            await _send_editor_media_see(q.message.get_bot(), q.message.chat_id, item, '🖼 Scheduled Broadcast Media')
+        else:
+            await _send_editor_buttons_see(q.message.get_bot(), q.message.chat_id, item, '🔗 Scheduled Broadcast Buttons')
+        await q.answer('Shown.')
+        return True
     if a.startswith('a_sb_settings_'):
         job_id = a.removeprefix('a_sb_settings_')
         item = await get_scheduled_campaign(owner, job_id)
@@ -265,6 +357,17 @@ async def handle(self, update, context, q, owner, staff, a, role):
             url_buttons_header(),
             reply_markup=_input_keyboard('a_broadcast', 'a_bc_rmbuttons' if item.get('buttons') else None, 'Remove Buttons'),
         )
+        return True
+    if a in ('a_bc_see_text', 'a_bc_see_media', 'a_bc_see_buttons'):
+        item = await get_seller_broadcast_draft(owner)
+        bot = q.message.get_bot()
+        if a == 'a_bc_see_text':
+            await _send_editor_text_see(bot, q.message.chat_id, item.get('text'), '📝 Seller Broadcast Text')
+        elif a == 'a_bc_see_media':
+            await _send_editor_media_see(bot, q.message.chat_id, item, '🖼 Seller Broadcast Media')
+        else:
+            await _send_editor_buttons_see(bot, q.message.chat_id, item, '🔗 Seller Broadcast Buttons')
+        await q.answer('Shown.')
         return True
     if a == 'a_bc_rmtext':
         item = await update_seller_broadcast_draft(owner, text='')
