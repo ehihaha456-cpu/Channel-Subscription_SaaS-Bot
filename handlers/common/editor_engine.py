@@ -118,8 +118,11 @@ def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
     return rows
 
 
-def build_editor_keyboard(rows: Iterable[Iterable[dict[str, Any]]] | None) -> InlineKeyboardMarkup | None:
-    """Build URL, feature and special buttons from the stored editor schema."""
+def build_editor_keyboard(
+    rows: Iterable[Iterable[dict[str, Any]]] | None,
+    clone_username: str = "",
+) -> InlineKeyboardMarkup | None:
+    """Build URL, feature, special and clone buttons from the stored editor schema."""
     if not rows:
         return None
     keyboard: list[list[InlineKeyboardButton]] = []
@@ -138,6 +141,11 @@ def build_editor_keyboard(rows: Iterable[Iterable[dict[str, Any]]] | None) -> In
                 built.append(InlineKeyboardButton(text, copy_text=CopyTextButton(value[:256])))
             elif kind == "share":
                 built.append(InlineKeyboardButton(text, url=f"https://t.me/share/url?text={quote(value)}"))
+            elif kind == "clone":
+                username = str(clone_username or "").lstrip("@")
+                if username:
+                    start_param = value or "home"
+                    built.append(InlineKeyboardButton(text, url=f"https://t.me/{username}?start={quote(start_param)}"))
             elif kind in {"popup", "alert", "rules"}:
                 # Keep the payload compact enough for Telegram's 64-byte callback limit.
                 if kind == "rules":
