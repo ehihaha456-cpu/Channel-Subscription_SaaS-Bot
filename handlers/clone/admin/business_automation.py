@@ -264,6 +264,41 @@ def _business_text_prompt(title: str) -> str:
     )
 
 
+
+def _buttons_input_text(rows) -> str:
+    """Rebuild the exact-style button input text for the See Buttons view."""
+    lines = []
+    for row in rows or []:
+        parts = []
+        for item in row or []:
+            title = str(item.get("text") or "Button")
+            kind = str(item.get("type") or "")
+            value = str(item.get("value") or "")
+            if kind == "url":
+                if value.startswith("https://t.me/"):
+                    target = value[len("https://"):]
+                else:
+                    target = value
+            elif kind == "share":
+                target = f"share: {value}"
+            elif kind == "callback":
+                reverse = {
+                    "c_plans": "plans", "c_buy": "buy", "c_profile": "profile",
+                    "c_renew": "renew", "c_referral": "referral",
+                    "c_referral_unlock": "referral_unlock",
+                    "c_support": "support", "c_home": "home",
+                }
+                target = f"feature: {reverse.get(value, value)}"
+            elif kind == "clone":
+                target = f"clone: {value}"
+            else:
+                target = value
+            parts.append(f"{title} - {target}")
+        if parts:
+            lines.append(" && ".join(parts))
+    return "\n".join(lines)
+
+
 async def _send_business_component_preview(message, item: dict, component: str):
     bot = message.get_bot()
     clone_username = str(getattr(bot, "username", "") or "").lstrip("@")
@@ -291,11 +326,16 @@ async def _send_business_component_preview(message, item: dict, component: str):
                 await message.reply_document(fid)
         return
     if component == "buttons":
-        markup = _build_business_buttons(item.get("buttons"), clone_username=clone_username)
+        buttons = item.get("buttons") or []
+        markup = _build_business_buttons(buttons, clone_username=clone_username)
         if not markup:
             await message.reply_text("❌ No buttons have been saved.")
             return
-        await message.reply_text("🔗 Current Buttons", reply_markup=markup)
+        input_text = _buttons_input_text(buttons)
+        await message.reply_text(
+            f"🔗 Current Buttons\n\n{input_text}",
+            reply_markup=markup,
+        )
 
 
 def _input_keyboard(back_callback: str, *, remove_callback: str | None = None, remove_label: str = "Remove"):
@@ -363,7 +403,7 @@ def _welcome_keyboard(item):
 
 def _auto_replies_keyboard(items):
     rows = [[InlineKeyboardButton(
-        f"💬 {item.get('keyword') or 'Keyword'}",
+        f"{'🟢' if item.get('enabled', True) else '🔴'} {item.get('keyword') or 'Keyword'}",
         callback_data=f"ba_ar_open_{item.get('reply_id')}",
     )] for item in items]
     rows.extend([
@@ -383,9 +423,22 @@ def _auto_item_text(item):
 
 def _auto_item_keyboard(item):
     rid = str(item.get("reply_id"))
-    rows = [[InlineKeyboardButton("✏️ Change Keyword", callback_data=f"ba_ar_keyword_{rid}")]]
+    enabled = bool(item.get("enabled", True))
+    rows = [
+        [InlineKeyboardButton("✏️ Change Keyword", callback_data=f"ba_ar_keyword_{rid}")],
+        [
+            InlineKeyboardButton(
+                "🔴 Disable" if enabled else "🟢 Enable",
+                callback_data=f"ba_ar_{rid}_toggle",
+            ),
+            InlineKeyboardButton(
+                "🗑 Remove Keyword",
+                callback_data=f"ba_ar_{rid}_delete",
+            ),
+        ],
+    ]
     common = _business_editor_keyboard(
-        f"ba_ar_{rid}", item, back_callback="ba_auto", allow_toggle=True,
+        f"ba_ar_{rid}", item, back_callback="ba_auto", allow_toggle=False,
     )
     rows.extend(common.inline_keyboard)
     return _kb(rows)
@@ -393,7 +446,7 @@ def _auto_item_keyboard(item):
 def _templates_keyboard(templates):
     rows = [
         [InlineKeyboardButton(
-            f"📝 {item.get('name') or item.get('shortcut') or 'Template'}",
+            f"{'🟢' if item.get('enabled', True) else '🔴'} {item.get('name') or item.get('shortcut') or 'Template'}",
             callback_data=f"ba_tpl_open_{item.get('template_id')}",
         )]
         for item in templates
@@ -408,7 +461,7 @@ def _templates_keyboard(templates):
 def _template_text(item):
     summary = _editor_header(
         "📝 Business Reply Template",
-        {**item, "enabled": True},
+        item,
     )
     return (
         f"{summary}\n\n"
@@ -419,12 +472,23 @@ def _template_text(item):
 
 def _template_keyboard(item):
     tid = str(item.get("template_id"))
+    enabled = bool(item.get("enabled", True))
     rows = [
         [InlineKeyboardButton("✏️ Change Keyword", callback_data=f"ba_tpl_meta_{tid}")],
+        [
+            InlineKeyboardButton(
+                "🔴 Disable" if enabled else "🟢 Enable",
+                callback_data=f"ba_tpl_{tid}_toggle",
+            ),
+            InlineKeyboardButton(
+                "🗑 Remove Keyword",
+                callback_data=f"ba_tpl_{tid}_delete",
+            ),
+        ],
     ]
     common = _business_editor_keyboard(
         f"ba_tpl_{tid}",
-        {**item, "enabled": True},
+        item,
         back_callback="ba_templates",
         allow_toggle=False,
     )
@@ -754,7 +818,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             if suffix.startswith(prefix): op = candidate; tid = suffix[len(prefix):]; break
         if not op:
             # Common editor callbacks are ba_tpl_<id>_<operation>.
-            for candidate in ("preview", "see_text", "see_media", "see_buttons", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
+            for candidate in ("toggle", "delete", "preview", "see_text", "see_media", "see_buttons", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
                 marker = "_" + candidate
                 if suffix.endswith(marker): tid = suffix[:-len(marker)]; op = candidate; break
         item = await get_business_reply_template(owner, tid) if tid else None
@@ -765,6 +829,8 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         if op == "meta":
             context.user_data["ba_editor"] = {"field": "template_meta", "template_id": tid}
             await q.edit_message_text("✏️ Change Template Keyword\n\nSend one unique keyword only. It cannot contain spaces.", reply_markup=_input_keyboard(f"ba_tpl_open_{tid}")); return True
+        if op == "toggle":
+            item = await update_business_reply_template(owner, tid, enabled=not item.get("enabled", True))
         if op == "text":
             context.user_data["ba_editor"] = {"field": "template_text", "template_id": tid}
             await q.edit_message_text(_business_text_prompt("Reply Template Text"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
