@@ -1,7 +1,7 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
-from handlers.common.editor_engine import url_buttons_header, build_editor_keyboard, FEATURE_CALLBACKS
+from handlers.clone.welcome_editor import welcome_url_buttons_header, build_welcome_keyboard, WELCOME_FEATURE_CALLBACKS
 
 
 def _welcome_cache(context):
@@ -38,7 +38,7 @@ def _button_target(item):
     if kind == "url":
         return value
     if kind == "callback":
-        reverse = {v: k for k, v in FEATURE_CALLBACKS.items()}
+        reverse = {v: k for k, v in WELCOME_FEATURE_CALLBACKS.items()}
         feature = reverse.get(value)
         return f"feature:{feature}" if feature else value
     if kind in {"popup", "alert", "share", "copy"}:
@@ -96,7 +96,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         s = await _get_welcome_settings(owner, context)
         _clear_wait_state(context)
         context.user_data['wait_welcome_buttons'] = True
-        await q.edit_message_text(url_buttons_header(), reply_markup=self.welcome_buttons_menu(bool(s.get('welcome_buttons'))))
+        await q.edit_message_text(welcome_url_buttons_header(), reply_markup=self.welcome_buttons_menu(bool(s.get('welcome_buttons'))))
         return True
     if a == 'a_welcome_quick':
         await q.edit_message_text('⚡ Choose a bot button to add', reply_markup=self.welcome_quick_menu())
@@ -120,7 +120,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         s = await _get_welcome_settings(owner, context)
         _clear_wait_state(context)
         context.user_data['wait_welcome_buttons'] = True
-        await q.edit_message_text(url_buttons_header(), reply_markup=self.welcome_buttons_menu(bool(s.get('welcome_buttons'))))
+        await q.edit_message_text(welcome_url_buttons_header(), reply_markup=self.welcome_buttons_menu(bool(s.get('welcome_buttons'))))
         return True
     if a == 'a_welcome_see_text':
         s = await _get_welcome_settings(owner, context)
@@ -165,7 +165,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             for item in row:
                 lines.append(f"Row {row_index}: {item.get('text', 'Button')} - {_button_target(item)}")
 
-        preview = build_editor_keyboard(rows)
+        preview = build_welcome_keyboard(rows)
         keyboard_rows = [list(row) for row in (preview.inline_keyboard if preview else [])]
         keyboard_rows.append([InlineKeyboardButton('⬅ Back', callback_data='a_welcome')])
         await q.edit_message_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(keyboard_rows))
