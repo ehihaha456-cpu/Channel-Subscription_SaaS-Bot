@@ -69,6 +69,164 @@ def _buttons_count(rows):
     return sum(len(row) for row in (rows or []))
 
 
+BA_VARIABLES = (
+    "{ID} = user ID\\n"
+    "{NAME} = first name\\n"
+    "{SURNAME} = surname\\n"
+    "{NAMESURNAME} = full name\\n"
+    "{DATE} = current date\\n"
+    "{TIME} = current time\\n"
+    "{WEEKDAY} = week day\\n"
+    "{MENTION} = link to the user profile\\n"
+    "{USERNAME} = username"
+)
+
+
+def _business_buttons_header() -> str:
+    return (
+        "👉 Set the buttons to be placed under the message\\n\\n"
+        "Send a message structured as follows:\\n\\n"
+        "• Add a single button:\\n"
+        "Button title - t.me/LinkExample\\n\\n"
+        "• Add multiple buttons on a single line:\\n"
+        "Button title - t.me/LinkExample && Button text - t.me/LinkExample\\n\\n"
+        "• Add multiple rows of buttons:\\n"
+        "Button title - t.me/LinkExample\\n"
+        "Button title - t.me/LinkExample\\n\\n"
+        "⭐ Special Buttons\\n\\n"
+        "• Add a share button:\\n"
+        "Button title - share: Text to be shared\\n\\n"
+        "⚡ Feature Buttons\\n\\n"
+        "• Add a feature button:\\n"
+        "Button title - feature: feature_name\\n\\n"
+        "Available feature names:\\n"
+        "plans, buy, profile, renew, referral, referral_unlock, support, home, move_to_clone"
+    )
+
+
+def _parse_business_buttons(text: str) -> list[list[dict[str, str]]]:
+    rows: list[list[dict[str, str]]] = []
+    for line_no, raw_line in enumerate((text or "").splitlines(), 1):
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        row = []
+        for button_no, item in enumerate(raw_line.split("&&"), 1):
+            item = item.strip()
+            if " - " not in item:
+                raise ValueError(f"Line {line_no}, button {button_no}: missing ' - '.")
+            title, target = [part.strip() for part in item.split(" - ", 1)]
+            if not title or not target:
+                raise ValueError(f"Line {line_no}, button {button_no}: button title and target are required.")
+            if target.startswith(("http://", "https://", "tg://")) or target.startswith("t.me/"):
+                value = "https://" + target if target.startswith("t.me/") else target
+                row.append({"text": title, "type": "url", "value": value})
+            elif target.startswith("@"):
+                username = target[1:].strip()
+                if not username or len(username) > 32 or not all(ch.isalnum() or ch == "_" for ch in username):
+                    raise ValueError(f"Line {line_no}, button {button_no}: invalid Telegram username.")
+                row.append({"text": title, "type": "url", "value": f"https://t.me/{username}"})
+            elif target.startswith("share:"):
+                value = target.split(":", 1)[1].strip()
+                if not value:
+                    raise ValueError(f"Line {line_no}, button {button_no}: share text is required.")
+                row.append({"text": title, "type": "share", "value": value})
+            elif target.startswith("feature:"):
+                feature = target.split(":", 1)[1].strip().lower()
+                if feature == "move_to_clone":
+                    row.append({"text": title, "type": "clone", "value": "home"})
+                else:
+                    callback = {
+                        "plans": "c_plans", "buy": "c_buy", "profile": "c_profile",
+                        "renew": "c_renew", "referral": "c_referral",
+                        "referral_unlock": "c_referral_unlock", "support": "c_support",
+                        "home": "c_home",
+                    }.get(feature)
+                    if not callback:
+                        raise ValueError(
+                            f"Line {line_no}, button {button_no}: unknown feature '{feature}'. "
+                            "Available: plans, buy, profile, renew, referral, referral_unlock, support, home, move_to_clone"
+                        )
+                    row.append({"text": title, "type": "callback", "value": callback})
+            else:
+                raise ValueError(
+                    f"Line {line_no}, button {button_no}: only URL, @username, share:, or feature: are supported."
+                )
+        rows.append(row)
+    if not rows:
+        raise ValueError("No buttons found.")
+    return rows
+
+
+def _business_editor_keyboard(prefix: str, item: dict, *, back_callback: str, allow_toggle: bool = True):
+    rows = []
+    if allow_toggle:
+        rows.append([InlineKeyboardButton(
+            "🔴 Disable" if item.get("enabled", True) else "🟢 Enable",
+            callback_data=f"{prefix}_toggle"
+        )])
+    rows.extend([
+        [
+            InlineKeyboardButton("📝 Text", callback_data=f"{prefix}_text"),
+            InlineKeyboardButton("👀 See", callback_data=f"{prefix}_see_text"),
+        ],
+        [
+            InlineKeyboardButton("🖼 Media", callback_data=f"{prefix}_media"),
+            InlineKeyboardButton("👀 See", callback_data=f"{prefix}_see_media"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Buttons", callback_data=f"{prefix}_buttons"),
+            InlineKeyboardButton("👀 See", callback_data=f"{prefix}_see_buttons"),
+        ],
+        [InlineKeyboardButton("👀 Full Preview", callback_data=f"{prefix}_preview")],
+        [InlineKeyboardButton("⬅ Back", callback_data=back_callback)],
+    ])
+    return _kb(rows)
+
+
+def _business_text_prompt(title: str) -> str:
+    return (
+        f"📝 {title}\\n\\n"
+        "Seller, send now the message you want to set!\\n\\n"
+        "You can use HTML and:\\n"
+        f"• {BA_VARIABLES.replace(chr(10), chr(10) + '• ')}"
+    )
+
+
+async def _send_business_component_preview(message, item: dict, component: str):
+    bot = message.get_bot()
+    clone_username = str(getattr(bot, "username", "") or "").lstrip("@")
+    if component == "text":
+        await message.reply_text(item.get("text") or "❌ No text has been saved.")
+        return
+    if component == "media":
+        items = list(item.get("media") or [])
+        if not items and item.get("media_file_id"):
+            items = [{"type": item.get("media_type") or "document", "file_id": item.get("media_file_id")}]
+        items = [x for x in items if x.get("file_id")][:10]
+        if not items:
+            await message.reply_text("❌ No media has been saved.")
+            return
+        for x in items:
+            kind = str(x.get("type") or "document").lower()
+            fid = x.get("file_id")
+            if kind == "photo":
+                await message.reply_photo(fid)
+            elif kind == "video":
+                await message.reply_video(fid)
+            elif kind == "animation":
+                await message.reply_animation(fid)
+            else:
+                await message.reply_document(fid)
+        return
+    if component == "buttons":
+        markup = build_editor_keyboard(item.get("buttons"), clone_username=clone_username)
+        if not markup:
+            await message.reply_text("❌ No buttons have been saved.")
+            return
+        await message.reply_text("🔗 Current Buttons", reply_markup=markup)
+
+
 def _input_keyboard(back_callback: str, *, remove_callback: str | None = None, remove_label: str = "Remove"):
     rows = []
     if remove_callback:
@@ -124,18 +282,12 @@ def _welcome_text(item):
         "👋 Welcome Message\n\n"
         "This message is sent automatically when a customer messages a connected account for the first time. "
         "Add text, media, URL buttons, or Clone Bot feature buttons, then use Preview before enabling it.\n\n"
-        + editor_header(
-            "Current Setup",
-            item,
-            variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
-        )
+        + editor_header("Current Setup", item)
     )
 
 
 def _welcome_keyboard(item):
-    return editor_menu_keyboard(
-        "ba_welcome", item, back_callback="ba_home", allow_toggle=True
-    )
+    return _business_editor_keyboard("ba_welcome", item, back_callback="ba_home", allow_toggle=True)
 
 
 def _auto_replies_keyboard(items):
@@ -155,13 +307,13 @@ def _auto_item_text(item):
         "💬 Keyword Auto Reply\n\n"
         f"Keyword: {item.get('keyword') or '-'}\n\n"
         "When this keyword appears anywhere in a customer message or sentence, the configured reply is sent automatically.\n\n"
-        + editor_header("Current Setup", item, variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}")
+        + editor_header("Current Setup", item)
     )
 
 def _auto_item_keyboard(item):
     rid = str(item.get("reply_id"))
     rows = [[InlineKeyboardButton("✏️ Change Keyword", callback_data=f"ba_ar_keyword_{rid}")]]
-    common = editor_menu_keyboard(
+    common = _business_editor_keyboard(
         f"ba_ar_{rid}", item, back_callback="ba_auto", allow_toggle=True,
     )
     rows.extend(common.inline_keyboard)
@@ -186,7 +338,6 @@ def _template_text(item):
     summary = editor_header(
         "📝 Business Reply Template",
         {**item, "enabled": True},
-        variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}",
     )
     return (
         f"{summary}\n\n"
@@ -200,7 +351,7 @@ def _template_keyboard(item):
     rows = [
         [InlineKeyboardButton("✏️ Change Keyword", callback_data=f"ba_tpl_meta_{tid}")],
     ]
-    common = editor_menu_keyboard(
+    common = _business_editor_keyboard(
         f"ba_tpl_{tid}",
         {**item, "enabled": True},
         back_callback="ba_templates",
@@ -436,13 +587,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
     if action == "ba_welcome_text":
         context.user_data["ba_editor"] = {"field": "welcome_text"}
-        await q.edit_message_text(editor_text_prompt("Business Welcome Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmtext" if welcome.get("text") else None, remove_label="Remove Text")); return True
+        await q.edit_message_text(_business_text_prompt("Business Welcome Text"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmtext" if welcome.get("text") else None, remove_label="Remove Text")); return True
     if action == "ba_welcome_media":
         context.user_data["ba_editor"] = {"field": "welcome_media"}
         await q.edit_message_text(editor_media_prompt("Business Welcome Media"), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmmedia" if (welcome.get("media") or welcome.get("media_file_id")) else None, remove_label="Remove Media")); return True
     if action == "ba_welcome_buttons":
         context.user_data["ba_editor"] = {"field": "welcome_buttons"}
-        await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
+        await q.edit_message_text(_business_buttons_header(), reply_markup=_input_keyboard("ba_welcome", remove_callback="ba_welcome_rmbuttons" if welcome.get("buttons") else None, remove_label="Remove Buttons")); return True
     if action == "ba_welcome_rmtext":
         welcome = await update_business_welcome(owner, text="")
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
@@ -452,6 +603,12 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     if action == "ba_welcome_rmbuttons":
         welcome = await update_business_welcome(owner, buttons=[])
         await q.edit_message_text(_welcome_text(welcome), reply_markup=_welcome_keyboard(welcome)); return True
+    if action == "ba_welcome_see_text":
+        await _send_business_component_preview(q.message, welcome, "text"); await q.answer("Saved text shown."); return True
+    if action == "ba_welcome_see_media":
+        await _send_business_component_preview(q.message, welcome, "media"); await q.answer("Saved media shown."); return True
+    if action == "ba_welcome_see_buttons":
+        await _send_business_component_preview(q.message, welcome, "buttons"); await q.answer("Saved buttons shown."); return True
     if action == "ba_welcome_preview":
         await _send_preview(q.message, welcome.get("text"), welcome.get("media_type"), welcome.get("media_file_id"), welcome.get("buttons"), welcome.get("media")); await q.answer("Preview sent."); return True
 
@@ -470,7 +627,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             prefix = candidate + "_"
             if suffix.startswith(prefix): op = candidate; rid = suffix[len(prefix):]; break
         if not op:
-            for candidate in ("toggle", "preview", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
+            for candidate in ("toggle", "preview", "see_text", "see_media", "see_buttons", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
                 marker = "_" + candidate
                 if suffix.endswith(marker): rid = suffix[:-len(marker)]; op = candidate; break
         item = await get_business_auto_reply_item(owner, rid) if rid else None
@@ -483,13 +640,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text("✏️ Change Keyword\n\nSend the new word or phrase.", reply_markup=_input_keyboard(f"ba_ar_open_{rid}")); return True
         if op == "text":
             context.user_data["ba_editor"] = {"field": "auto_item_text", "reply_id": rid}
-            await q.edit_message_text(editor_text_prompt("Auto Reply Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
+            await q.edit_message_text(_business_text_prompt("Auto Reply Text"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
         if op == "media":
             context.user_data["ba_editor"] = {"field": "auto_item_media", "reply_id": rid}
             await q.edit_message_text(editor_media_prompt("Auto Reply Media"), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "auto_item_buttons", "reply_id": rid}
-            await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+            await q.edit_message_text(_business_buttons_header(), reply_markup=_input_keyboard(f"ba_ar_open_{rid}", remove_callback=f"ba_ar_{rid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "toggle": item = await update_business_auto_reply_item(owner, rid, enabled=not item.get("enabled", True))
         elif op == "rmtext": item = await update_business_auto_reply_item(owner, rid, text="")
         elif op == "rmmedia": item = await update_business_auto_reply_item(owner, rid, media_type="", media_file_id="", media=[])
@@ -498,6 +655,12 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await delete_business_auto_reply_item(owner, rid)
             auto_replies = await list_business_auto_replies(owner)
             await q.edit_message_text("✅ Auto reply deleted.", reply_markup=_auto_replies_keyboard(auto_replies)); return True
+        elif op == "see_text":
+            await _send_business_component_preview(q.message, item, "text"); await q.answer("Saved text shown."); return True
+        elif op == "see_media":
+            await _send_business_component_preview(q.message, item, "media"); await q.answer("Saved media shown."); return True
+        elif op == "see_buttons":
+            await _send_business_component_preview(q.message, item, "buttons"); await q.answer("Saved buttons shown."); return True
         elif op == "preview":
             await _send_preview(q.message, item.get("text") or item.get("keyword"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
         if item:
@@ -520,7 +683,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             if suffix.startswith(prefix): op = candidate; tid = suffix[len(prefix):]; break
         if not op:
             # Common editor callbacks are ba_tpl_<id>_<operation>.
-            for candidate in ("preview", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
+            for candidate in ("preview", "see_text", "see_media", "see_buttons", "rmtext", "rmmedia", "rmbuttons", "text", "media", "buttons"):
                 marker = "_" + candidate
                 if suffix.endswith(marker): tid = suffix[:-len(marker)]; op = candidate; break
         item = await get_business_reply_template(owner, tid) if tid else None
@@ -533,13 +696,13 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text("✏️ Change Template Keyword\n\nSend one unique keyword only. It cannot contain spaces.", reply_markup=_input_keyboard(f"ba_tpl_open_{tid}")); return True
         if op == "text":
             context.user_data["ba_editor"] = {"field": "template_text", "template_id": tid}
-            await q.edit_message_text(editor_text_prompt("Reply Template Text", variables="{NAME} {ID} {USERNAME} {MENTION} {DATE} {TIME}"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
+            await q.edit_message_text(_business_text_prompt("Reply Template Text"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmtext" if item.get("text") else None, remove_label="Remove Text")); return True
         if op == "media":
             context.user_data["ba_editor"] = {"field": "template_media", "template_id": tid}
             await q.edit_message_text(editor_media_prompt("Reply Template Media"), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmmedia" if (item.get("media") or item.get("media_file_id")) else None, remove_label="Remove Media")); return True
         if op == "buttons":
             context.user_data["ba_editor"] = {"field": "template_buttons", "template_id": tid}
-            await q.edit_message_text(business_url_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
+            await q.edit_message_text(_business_buttons_header(), reply_markup=_input_keyboard(f"ba_tpl_open_{tid}", remove_callback=f"ba_tpl_{tid}_rmbuttons" if item.get("buttons") else None, remove_label="Remove Buttons")); return True
         if op == "rmtext": item = await update_business_reply_template(owner, tid, text="")
         elif op == "rmmedia": item = await update_business_reply_template(owner, tid, media_type="", media_file_id="", media=[])
         elif op == "rmbuttons": item = await update_business_reply_template(owner, tid, buttons=[])
@@ -547,6 +710,12 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await delete_business_reply_template(owner, tid)
             templates = await list_business_reply_templates(owner)
             await q.edit_message_text("✅ Reply template deleted.", reply_markup=_templates_keyboard(templates)); return True
+        elif op == "see_text":
+            await _send_business_component_preview(q.message, item, "text"); await q.answer("Saved text shown."); return True
+        elif op == "see_media":
+            await _send_business_component_preview(q.message, item, "media"); await q.answer("Saved media shown."); return True
+        elif op == "see_buttons":
+            await _send_business_component_preview(q.message, item, "buttons"); await q.answer("Saved buttons shown."); return True
         elif op == "preview":
             await _send_preview(q.message, item.get("text") or item.get("name"), item.get("media_type"), item.get("media_file_id"), item.get("buttons"), item.get("media")); await q.answer("Preview sent."); return True
         if item:
@@ -671,11 +840,11 @@ async def handle_text(self, update, context):
         elif field == "auto_item_text":
             await update_business_auto_reply_item(owner, str(editor.get("reply_id") or ""), text=text)
         elif field == "welcome_buttons":
-            await update_business_welcome(owner, buttons=parse_editor_buttons(text))
+            await update_business_welcome(owner, buttons=_parse_business_buttons(text))
         elif field == "auto_item_buttons":
-            await update_business_auto_reply_item(owner, str(editor.get("reply_id") or ""), buttons=parse_editor_buttons(text))
+            await update_business_auto_reply_item(owner, str(editor.get("reply_id") or ""), buttons=_parse_business_buttons(text))
         elif field == "template_buttons":
-            await update_business_reply_template(owner, template_id, buttons=parse_editor_buttons(text))
+            await update_business_reply_template(owner, template_id, buttons=_parse_business_buttons(text))
         elif field == "template_add":
             keyword = text.strip()
             if not keyword or any(ch.isspace() for ch in keyword):
