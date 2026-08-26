@@ -17,7 +17,7 @@ class CloneMediaHandlersMixin:
             elif msg.document: media_type="document"; file_id=msg.document.file_id
             if not file_id: await msg.reply_text("❌ Send a photo, video, GIF or document."); return
             await save_support_auto_reply(owner,keyword,media_type=media_type,media_file_id=file_id)
-            context.user_data.clear(); await msg.reply_text("✅ Media saved",reply_markup=self.support_auto_reply_edit_menu(keyword))
+            context.user_data.clear(); await msg.reply_text("✅ Media saved",reply_markup=self.support_auto_reply_edit_menu(keyword, await get_support_auto_reply(owner, keyword)))
             raise ApplicationHandlerStop
         if context.user_data.get("wait_support_tpl_media"):
             command=context.user_data["wait_support_tpl_media"]
@@ -28,7 +28,7 @@ class CloneMediaHandlersMixin:
             elif msg.document: media_type="document"; file_id=msg.document.file_id
             if not file_id: await msg.reply_text("❌ Photo, video, GIF ya document bhejo."); return
             await save_support_template(owner,command,media_type=media_type,media_file_id=file_id)
-            context.user_data.clear(); await msg.reply_text("✅ Template media saved",reply_markup=self.support_template_edit_menu(command))
+            context.user_data.clear(); await msg.reply_text("✅ Template media saved",reply_markup=self.support_template_edit_menu(command, await get_support_template(owner, command)))
             raise ApplicationHandlerStop
         if not context.user_data.get("wait_welcome_media"): return
         msg=update.effective_message; media_type=""; file_id=""

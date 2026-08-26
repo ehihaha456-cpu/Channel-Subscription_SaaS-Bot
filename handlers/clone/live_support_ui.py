@@ -52,92 +52,96 @@ class CloneLiveSupportUIMixin:
 
     @staticmethod
     def support_templates_menu(templates):
-        rows=[[InlineKeyboardButton("➕ Add Command",callback_data="a_support_tpl_add")]]
+        rows=[]
         for item in templates:
             command=item.get("command","")
-            duration=_format_auto_delete(_template_auto_delete_seconds(item))
-            icon="🔴" if duration=="Off" else "🟢"
-            rows.append([InlineKeyboardButton(f"/{command}   {icon} {duration}",callback_data=f"a_support_tpl_view_{command}")])
+            icon="🟢" if item.get("enabled", True) else "🔴"
+            rows.append([InlineKeyboardButton(f"{icon} {command[:42]}",callback_data=f"a_support_tpl_view_{command}")])
+        rows.append([InlineKeyboardButton("➕ Add Reply Template",callback_data="a_support_tpl_add")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_live_support")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def support_auto_replies_menu(items):
-        rows=[[InlineKeyboardButton("➕ Add Auto Reply",callback_data="a_support_ar_add")]]
+        rows=[]
         for item in items:
             keyword=item.get("keyword","")
-            rows.append([InlineKeyboardButton(f"🔑 {keyword[:42]}",callback_data=f"a_support_ar_view_{keyword}")])
+            icon="🟢" if item.get("enabled", True) else "🔴"
+            rows.append([InlineKeyboardButton(f"{icon} {keyword[:42]}",callback_data=f"a_support_ar_view_{keyword}")])
+        rows.append([InlineKeyboardButton("➕ Add Keyword",callback_data="a_support_ar_add")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data="a_live_support")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
-    def support_auto_reply_edit_menu(keyword):
+    def support_auto_reply_edit_menu(keyword, item=None):
+        item=item or {}
+        enabled=bool(item.get("enabled", True))
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📄 Text",callback_data=f"a_support_ar_text_{keyword}")],
-            [InlineKeyboardButton("🖼 Media",callback_data=f"a_support_ar_media_{keyword}")],
-            [InlineKeyboardButton("🔗 URL Buttons",callback_data=f"a_support_ar_buttons_{keyword}")],
+            [InlineKeyboardButton("✏️ Change Keyword",callback_data=f"a_support_ar_keyword_{keyword}")],
+            [InlineKeyboardButton("🔴 Disable" if enabled else "🟢 Enable",callback_data=f"a_support_ar_toggle_{keyword}"),
+             InlineKeyboardButton("🗑 Remove Keyword",callback_data=f"a_support_ar_delete_{keyword}")],
+            [InlineKeyboardButton("📝 Text",callback_data=f"a_support_ar_text_{keyword}"),InlineKeyboardButton("👀 See",callback_data=f"a_support_ar_see_text_{keyword}")],
+            [InlineKeyboardButton("🖼 Media",callback_data=f"a_support_ar_media_{keyword}"),InlineKeyboardButton("👀 See",callback_data=f"a_support_ar_see_media_{keyword}")],
+            [InlineKeyboardButton("🔗 Buttons",callback_data=f"a_support_ar_buttons_{keyword}"),InlineKeyboardButton("👀 See",callback_data=f"a_support_ar_see_buttons_{keyword}")],
             [InlineKeyboardButton("👀 Full Preview",callback_data=f"a_support_ar_preview_{keyword}")],
-            [InlineKeyboardButton("🗑 Delete Auto Reply",callback_data=f"a_support_ar_delete_{keyword}")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_support_auto_replies")],
         ])
 
     @staticmethod
     def support_auto_reply_text_menu(keyword, has_text=False):
         rows=[]
-        if has_text:
-            rows.append([InlineKeyboardButton("🗑 Remove Text",callback_data=f"a_support_ar_rmtext_{keyword}")])
+        if has_text: rows.append([InlineKeyboardButton("🗑 Remove Text",callback_data=f"a_support_ar_rmtext_{keyword}")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_ar_view_{keyword}")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def support_auto_reply_media_menu(keyword, has_media=False):
         rows=[]
-        if has_media:
-            rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data=f"a_support_ar_rmmedia_{keyword}")])
+        if has_media: rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data=f"a_support_ar_rmmedia_{keyword}")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_ar_view_{keyword}")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def support_auto_reply_buttons_menu(keyword, has_buttons=False):
         rows=[]
-        if has_buttons:
-            rows.append([InlineKeyboardButton("🚫 Remove Keyboard",callback_data=f"a_support_ar_rmbuttons_{keyword}")])
+        if has_buttons: rows.append([InlineKeyboardButton("🗑 Remove Buttons",callback_data=f"a_support_ar_rmbuttons_{keyword}")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_ar_view_{keyword}")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
-    def support_template_edit_menu(command):
+    def support_template_edit_menu(command, item=None):
+        item=item or {}
+        enabled=bool(item.get("enabled", True))
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📄 Text",callback_data=f"a_support_tpl_text_{command}")],
-            [InlineKeyboardButton("🖼 Media",callback_data=f"a_support_tpl_media_{command}")],
-            [InlineKeyboardButton("🔗 URL Buttons",callback_data=f"a_support_tpl_buttons_{command}")],
+            [InlineKeyboardButton("✏️ Change Keyword",callback_data=f"a_support_tpl_keyword_{command}")],
+            [InlineKeyboardButton("🔴 Disable" if enabled else "🟢 Enable",callback_data=f"a_support_tpl_toggle_{command}"),
+             InlineKeyboardButton("🗑 Remove Keyword",callback_data=f"a_support_tpl_delete_{command}")],
+            [InlineKeyboardButton("📝 Text",callback_data=f"a_support_tpl_text_{command}"),InlineKeyboardButton("👀 See",callback_data=f"a_support_tpl_see_text_{command}")],
+            [InlineKeyboardButton("🖼 Media",callback_data=f"a_support_tpl_media_{command}"),InlineKeyboardButton("👀 See",callback_data=f"a_support_tpl_see_media_{command}")],
+            [InlineKeyboardButton("🔗 Buttons",callback_data=f"a_support_tpl_buttons_{command}"),InlineKeyboardButton("👀 See",callback_data=f"a_support_tpl_see_buttons_{command}")],
             [InlineKeyboardButton("👀 Full Preview",callback_data=f"a_support_tpl_preview_{command}")],
             [InlineKeyboardButton("⏱ Template Auto Remove",callback_data=f"a_support_tpl_autodel_{command}")],
-            [InlineKeyboardButton("🗑 Delete Command",callback_data=f"a_support_tpl_delete_{command}")],
             [InlineKeyboardButton("⬅ Back",callback_data="a_support_templates")],
         ])
 
     @staticmethod
     def support_template_text_menu(command, has_text=False):
         rows=[]
-        if has_text:
-            rows.append([InlineKeyboardButton("🗑 Remove Text",callback_data=f"a_support_tpl_rmtext_{command}")])
+        if has_text: rows.append([InlineKeyboardButton("🗑 Remove Text",callback_data=f"a_support_tpl_rmtext_{command}")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def support_template_media_menu(command, has_media=False):
         rows=[]
-        if has_media:
-            rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data=f"a_support_tpl_rmmedia_{command}")])
+        if has_media: rows.append([InlineKeyboardButton("🗑 Remove Media",callback_data=f"a_support_tpl_rmmedia_{command}")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def support_template_buttons_menu(command, has_buttons=False):
         rows=[]
-        if has_buttons:
-            rows.append([InlineKeyboardButton("🚫 Remove Keyboard",callback_data=f"a_support_tpl_rmbuttons_{command}")])
+        if has_buttons: rows.append([InlineKeyboardButton("🗑 Remove Buttons",callback_data=f"a_support_tpl_rmbuttons_{command}")])
         rows.append([InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")])
         return InlineKeyboardMarkup(rows)
 

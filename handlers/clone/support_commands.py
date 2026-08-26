@@ -11,7 +11,7 @@ class CloneSupportCommandsMixin:
         owner=self.owner(context); support=await get_live_support_settings(owner)
         command=message.text.split()[0].split("@",1)[0].lstrip("/").lower()
         template=await get_support_template(owner,command)
-        if not template:
+        if not template or template.get("enabled", True) is False:
             return
         target_user_id=None
         if support.get("mode")=="topic" and support.get("support_group_id") and int(chat.id)==int(support["support_group_id"]) and message.message_thread_id:

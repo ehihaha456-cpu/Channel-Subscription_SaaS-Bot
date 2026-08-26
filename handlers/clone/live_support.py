@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from handlers.clone.admin.live_support import _live_support_parse_buttons
 
 
 # One FIFO lock per seller/user pair. Telegram can dispatch several updates
@@ -334,33 +335,65 @@ class CloneLiveSupportMixin:
                     "✅ Auto reply created",
                     reply_markup=self.support_auto_reply_edit_menu(keyword),
                 ); return
+            if context.user_data.get("wait_support_ar_keyword_edit"):
+                old_keyword=context.user_data["wait_support_ar_keyword_edit"]
+                new_keyword=" ".join(text.strip().lower().split())
+                try:
+                    item=await get_support_auto_reply(owner,old_keyword)
+                    if not item: raise ValueError("Auto reply not found")
+                    if not new_keyword: raise ValueError("Keyword cannot be empty")
+                    existing=await get_support_auto_reply(owner,new_keyword)
+                    if existing and new_keyword != old_keyword: raise ValueError("This keyword already exists")
+                    payload={k:item.get(k) for k in ("text","media_type","media_file_id","buttons","buttons_input","enabled") if k in item}
+                    await save_support_auto_reply(owner,new_keyword,**payload)
+                    if new_keyword != old_keyword: await delete_support_auto_reply(owner,old_keyword)
+                    context.user_data.clear()
+                    await update.effective_message.reply_text("✅ Keyword changed",reply_markup=self.support_auto_reply_edit_menu(new_keyword,await get_support_auto_reply(owner,new_keyword)))
+                except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}")
+                return
             if context.user_data.get("wait_support_ar_text"):
                 keyword=context.user_data["wait_support_ar_text"]
                 await save_support_auto_reply(owner,keyword,text=text); context.user_data.clear()
-                await update.effective_message.reply_text("✅ Text saved",reply_markup=self.support_auto_reply_edit_menu(keyword)); return
+                await update.effective_message.reply_text("✅ Text saved",reply_markup=self.support_auto_reply_edit_menu(keyword, await get_support_auto_reply(owner, keyword))); return
             if context.user_data.get("wait_support_ar_buttons"):
                 keyword=context.user_data["wait_support_ar_buttons"]
-                try: rows=self.parse_welcome_buttons(text)
+                try: rows=_live_support_parse_buttons(text)
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}"); return
-                await save_support_auto_reply(owner,keyword,buttons=rows); context.user_data.clear()
-                await update.effective_message.reply_text("✅ URL buttons saved",reply_markup=self.support_auto_reply_edit_menu(keyword)); return
+                await save_support_auto_reply(owner,keyword,buttons=rows,buttons_input=text); context.user_data.clear()
+                await update.effective_message.reply_text("✅ URL buttons saved",reply_markup=self.support_auto_reply_edit_menu(keyword, await get_support_auto_reply(owner, keyword))); return
             if context.user_data.get("wait_support_tpl_command"):
                 command=text.strip().lower().lstrip("/")
                 try:
                     await save_support_template(owner,command)
                 except Exception as exc:
                     await update.effective_message.reply_text(f"❌ {exc}"); return
-                context.user_data.clear(); await update.effective_message.reply_text(f"✅ /{command} created",reply_markup=self.support_template_edit_menu(command)); return
+                context.user_data.clear(); await update.effective_message.reply_text(f"✅ /{command} created",reply_markup=self.support_template_edit_menu(command, await get_support_template(owner, command))); return
+            if context.user_data.get("wait_support_tpl_command_edit"):
+                old_command=context.user_data["wait_support_tpl_command_edit"]
+                new_command=text.strip().lower().lstrip("/")
+                try:
+                    tpl=await get_support_template(owner,old_command)
+                    if not tpl: raise ValueError("Template not found")
+                    if not new_command: raise ValueError("Keyword cannot be empty")
+                    existing=await get_support_template(owner,new_command)
+                    if existing and new_command != old_command: raise ValueError("This keyword already exists")
+                    payload={k:tpl.get(k) for k in ("text","media_type","media_file_id","buttons","buttons_input","enabled","auto_delete_seconds","auto_delete_minutes") if k in tpl}
+                    await save_support_template(owner,new_command,**payload)
+                    if new_command != old_command: await delete_support_template(owner,old_command)
+                    context.user_data.clear()
+                    await update.effective_message.reply_text(f"✅ Keyword changed",reply_markup=self.support_template_edit_menu(new_command,await get_support_template(owner,new_command)))
+                except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}")
+                return
             if context.user_data.get("wait_support_tpl_text"):
                 command=context.user_data["wait_support_tpl_text"]
                 await save_support_template(owner,command,text=text); context.user_data.clear()
-                await update.effective_message.reply_text("✅ Template text saved",reply_markup=self.support_template_edit_menu(command)); return
+                await update.effective_message.reply_text("✅ Template text saved",reply_markup=self.support_template_edit_menu(command, await get_support_template(owner, command))); return
             if context.user_data.get("wait_support_tpl_buttons"):
                 command=context.user_data["wait_support_tpl_buttons"]
-                try: rows=self.parse_welcome_buttons(text)
+                try: rows=_live_support_parse_buttons(text)
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}"); return
-                await save_support_template(owner,command,buttons=rows); context.user_data.clear()
-                await update.effective_message.reply_text("✅ Template buttons saved",reply_markup=self.support_template_edit_menu(command)); return
+                await save_support_template(owner,command,buttons=rows,buttons_input=text); context.user_data.clear()
+                await update.effective_message.reply_text("✅ Template buttons saved",reply_markup=self.support_template_edit_menu(command, await get_support_template(owner, command))); return
             if context.user_data.get("wait_support_tpl_auto_delete"):
                 command=context.user_data["wait_support_tpl_auto_delete"]
                 try:
