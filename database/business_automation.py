@@ -45,6 +45,7 @@ async def get_business_welcome(owner_id: int) -> dict:
         "media_file_id": str(legacy.get("business_welcome_media_file_id") or ""),
         "media": ([{"type": str(legacy.get("business_welcome_media_type") or "document"), "file_id": str(legacy.get("business_welcome_media_file_id") or "")}] if legacy.get("business_welcome_media_file_id") else []),
         "buttons": legacy.get("business_welcome_buttons") or [],
+        "buttons_input": str(legacy.get("business_welcome_buttons_input") or ""),
     }
     if item["text"] or item["media_file_id"] or item["buttons"]:
         return await update_business_welcome(owner_id, **{k: v for k, v in item.items() if k != "owner_id"})
@@ -52,7 +53,7 @@ async def get_business_welcome(owner_id: int) -> dict:
 
 
 async def update_business_welcome(owner_id: int, **fields) -> dict:
-    allowed = {"enabled", "text", "media_type", "media_file_id", "media", "buttons"}
+    allowed = {"enabled", "text", "media_type", "media_file_id", "media", "buttons", "buttons_input"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
     col = _collection(WELCOME_COLLECTION)
@@ -79,6 +80,7 @@ async def get_business_auto_reply(owner_id: int) -> dict:
         "media_file_id": str(legacy.get("business_auto_reply_media_file_id") or ""),
         "media": ([{"type": str(legacy.get("business_auto_reply_media_type") or "document"), "file_id": str(legacy.get("business_auto_reply_media_file_id") or "")}] if legacy.get("business_auto_reply_media_file_id") else []),
         "buttons": legacy.get("business_auto_reply_buttons") or [],
+        "buttons_input": str(legacy.get("business_auto_reply_buttons_input") or ""),
     }
     if item["text"] or item["media_file_id"] or item["buttons"]:
         return await update_business_auto_reply(owner_id, **{k: v for k, v in item.items() if k != "owner_id"})
@@ -86,7 +88,7 @@ async def get_business_auto_reply(owner_id: int) -> dict:
 
 
 async def update_business_auto_reply(owner_id: int, **fields) -> dict:
-    allowed = {"enabled", "text", "media_type", "media_file_id", "media", "buttons"}
+    allowed = {"enabled", "text", "media_type", "media_file_id", "media", "buttons", "buttons_input"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
     col = _collection(AUTO_REPLY_COLLECTION)
@@ -122,6 +124,7 @@ async def list_business_reply_templates(owner_id: int) -> list[dict]:
             media_file_id=str(old.get("media_file_id") or ""),
             media=old.get("media") or [],
             buttons=old.get("buttons") or [],
+            buttons_input=str(old.get("buttons_input") or ""),
         )
     if legacy.get("business_reply_templates"):
         cursor = col.find({"owner_id": int(owner_id)}, {"_id": 0}).sort("created_at", 1)
@@ -148,6 +151,7 @@ async def create_business_reply_template(owner_id: int, shortcut: str, name: str
         "media_file_id": "",
         "media": [],
         "buttons": [],
+        "buttons_input": "",
         "enabled": True,
         "created_at": _now(),
         "updated_at": _now(),
@@ -159,7 +163,7 @@ async def create_business_reply_template(owner_id: int, shortcut: str, name: str
 
 
 async def update_business_reply_template(owner_id: int, template_id: str, **fields) -> dict | None:
-    allowed = {"shortcut", "name", "text", "media_type", "media_file_id", "media", "buttons", "enabled"}
+    allowed = {"shortcut", "name", "text", "media_type", "media_file_id", "media", "buttons", "buttons_input", "enabled"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
     col = _collection(TEMPLATE_COLLECTION)
