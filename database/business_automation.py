@@ -148,6 +148,7 @@ async def create_business_reply_template(owner_id: int, shortcut: str, name: str
         "media_file_id": "",
         "media": [],
         "buttons": [],
+        "enabled": True,
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -158,7 +159,7 @@ async def create_business_reply_template(owner_id: int, shortcut: str, name: str
 
 
 async def update_business_reply_template(owner_id: int, template_id: str, **fields) -> dict | None:
-    allowed = {"shortcut", "name", "text", "media_type", "media_file_id", "media", "buttons"}
+    allowed = {"shortcut", "name", "text", "media_type", "media_file_id", "media", "buttons", "enabled"}
     payload = {k: v for k, v in fields.items() if k in allowed}
     payload["updated_at"] = _now()
     col = _collection(TEMPLATE_COLLECTION)
