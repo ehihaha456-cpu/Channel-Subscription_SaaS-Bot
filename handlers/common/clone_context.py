@@ -24,7 +24,7 @@ from database.payment_gateways import (
 from services.payment_gateways import create_checkout, test_gateway_connection, GatewayError
 from database.official_links import get_official_links
 from database.seller_bots import (
-    claim_runtime_recovery, finish_runtime_recovery, get_all_active_bots, get_bot,
+    claim_runtime_recovery, finish_runtime_recovery, get_all_active_bots, get_bot, get_bot_payment_qr, set_bot_payment_qr,
     get_bot_by_bot_id, get_bot_by_data_owner_id, get_decrypted_bot_token,
     mark_invalid_token, recovery_allowed, set_runtime_status,
 )
