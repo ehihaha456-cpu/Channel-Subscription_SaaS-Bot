@@ -88,7 +88,10 @@ class CloneRuntimeAppMixin:
         )
         protected_bot=ProtectedExtBot(
             token=token,
-            owner_id=int(data_owner_id),
+            # Content protection must exempt the real seller account.
+            # data_owner_id is a storage scope and becomes the bot ID for
+            # additional clones.
+            owner_id=int(seller_account_id),
             request=request,
         )
         app=(
