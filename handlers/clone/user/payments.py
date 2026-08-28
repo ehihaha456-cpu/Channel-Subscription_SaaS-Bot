@@ -13,6 +13,9 @@ async def handle(self, update, context, q, owner, action):
             return True
         context.user_data['selected_child_plan'] = plan
         s = await get_seller_settings(owner)
+        qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
+        if not qr_file_id:
+            qr_file_id = str(s.get('upi_qr_file_id') or '')
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         gateways = gateway_cfg.get('gateways') or {}
         enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get('enabled')]
@@ -51,12 +54,12 @@ async def handle(self, update, context, q, owner, action):
             text = '⚠️ No payment method is currently available. Please contact support.'
         rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
         kb = InlineKeyboardMarkup(rows)
-        if s.get('upi_qr_file_id') and manual_enabled:
+        if qr_file_id and manual_enabled:
             try:
                 await q.message.delete()
             except TelegramError:
                 pass
-            await context.bot.send_photo(q.message.chat_id, s['upi_qr_file_id'], caption=text, reply_markup=kb)
+            await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
         else:
             await self.safe_query_message(q, text, kb)
         return True
