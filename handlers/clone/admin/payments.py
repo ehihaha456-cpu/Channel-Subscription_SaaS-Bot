@@ -3,16 +3,27 @@
 from handlers.common.clone_context import *
 
 
+async def _clone_qr_file_id(context, owner: int) -> str:
+    bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
+    qr = await get_bot_payment_qr(bot_id) if bot_id else ""
+    if qr:
+        return qr
+    # Backward compatibility for the original clone whose QR lived only in
+    # seller_settings.
+    settings = await get_seller_settings(owner)
+    return str(settings.get("upi_qr_file_id") or "")
+
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_payment':
         settings = await get_seller_settings(owner)
+        qr_file_id = await _clone_qr_file_id(context, owner)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         gateways = gateway_cfg.get('gateways') or {}
         rz = gateways.get('razorpay') or {}
         cf = gateways.get('cashfree') or {}
         manual_enabled = bool(gateway_cfg.get('manual_enabled', True))
         stars_enabled = bool(gateway_cfg.get('stars_enabled', False))
-        await q.edit_message_text(f"💳 Payment Settings\n\n{('✅' if rz.get('enabled') else '❌')} Razorpay: {('Enabled' if rz.get('enabled') else 'Disabled')} | Credentials: {('Added' if rz.get('key_id') and rz.get('key_secret') else 'Not added')}\n{('✅' if cf.get('enabled') else '❌')} Cashfree: {('Enabled' if cf.get('enabled') else 'Disabled')} | Credentials: {('Added' if cf.get('client_id') and cf.get('client_secret') else 'Not added')}\n{('✅' if manual_enabled else '❌')} Manual Payment: {('Enabled' if manual_enabled else 'Disabled')}\n{('✅' if stars_enabled else '❌')} Telegram Stars: {('Enabled' if stars_enabled else 'Disabled')}\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}", reply_markup=self.payment_menu())
+        await q.edit_message_text(f"💳 Payment Settings\n\n{('✅' if rz.get('enabled') else '❌')} Razorpay: {('Enabled' if rz.get('enabled') else 'Disabled')} | Credentials: {('Added' if rz.get('key_id') and rz.get('key_secret') else 'Not added')}\n{('✅' if cf.get('enabled') else '❌')} Cashfree: {('Enabled' if cf.get('enabled') else 'Disabled')} | Credentials: {('Added' if cf.get('client_id') and cf.get('client_secret') else 'Not added')}\n{('✅' if manual_enabled else '❌')} Manual Payment: {('Enabled' if manual_enabled else 'Disabled')}\n{('✅' if stars_enabled else '❌')} Telegram Stars: {('Enabled' if stars_enabled else 'Disabled')}\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if qr_file_id else 'Not added ❌')}", reply_markup=self.payment_menu())
         return True
     if a == 'a_stars_toggle':
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
@@ -21,6 +32,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             stars_enabled=not bool(gateway_cfg.get('stars_enabled', False)),
         )
         settings = await get_seller_settings(owner)
+        qr_file_id = await _clone_qr_file_id(context, owner)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         gateways = gateway_cfg.get('gateways') or {}
         rz = gateways.get('razorpay') or {}
@@ -35,25 +47,30 @@ async def handle(self, update, context, q, owner, staff, a, role):
             f"{('✅' if stars_enabled else '❌')} Telegram Stars: {('Enabled' if stars_enabled else 'Disabled')}\n\n"
             f"UPI ID: {settings.get('upi_id') or 'Not added'}\n"
             f"UPI Name: {settings.get('upi_name') or 'Not added'}\n"
-            f"QR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}",
+            f"QR Code: {('Added ✅' if qr_file_id else 'Not added ❌')}",
             reply_markup=self.payment_menu(),
         )
         return True
     if a == 'a_manual_payment':
         settings = await get_seller_settings(owner)
+        qr_file_id = await _clone_qr_file_id(context, owner)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         manual_enabled = bool(gateway_cfg.get('manual_enabled', True))
-        await q.edit_message_text(f"💵 Manual Payment\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}", reply_markup=self.manual_payment_menu(manual_enabled))
+        await q.edit_message_text(f"💵 Manual Payment\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if qr_file_id else 'Not added ❌')}", reply_markup=self.manual_payment_menu(manual_enabled))
         return True
     if a == 'a_manual_toggle':
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         await set_gateway_preferences('seller', owner, manual_enabled=not gateway_cfg.get('manual_enabled', True))
         settings = await get_seller_settings(owner)
+        qr_file_id = await _clone_qr_file_id(context, owner)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         manual_enabled = bool(gateway_cfg.get('manual_enabled', True))
-        await q.edit_message_text(f"💵 Manual Payment\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if settings.get('upi_qr_file_id') else 'Not added ❌')}", reply_markup=self.manual_payment_menu(manual_enabled))
+        await q.edit_message_text(f"💵 Manual Payment\n\nUPI ID: {settings.get('upi_id') or 'Not added'}\nUPI Name: {settings.get('upi_name') or 'Not added'}\nQR Code: {('Added ✅' if qr_file_id else 'Not added ❌')}", reply_markup=self.manual_payment_menu(manual_enabled))
         return True
     if a == 'a_remove_qr':
+        bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
+        if bot_id:
+            await set_bot_payment_qr(bot_id, "")
         await set_seller_setting(owner, 'upi_qr_file_id', '')
         settings = await get_seller_settings(owner)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
@@ -62,10 +79,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_payment_preview':
         settings = await get_seller_settings(owner)
-        preview = f"💳 Payment Details\n\nUPI ID: {settings.get('upi_id') or 'Not Set'}\nUPI Name: {settings.get('upi_name') or 'Not Set'}\nQR Code: {('Added' if settings.get('upi_qr_file_id') else 'Not Added')}"
+        qr_file_id = await _clone_qr_file_id(context, owner)
+        preview = f"💳 Payment Details\n\nUPI ID: {settings.get('upi_id') or 'Not Set'}\nUPI Name: {settings.get('upi_name') or 'Not Set'}\nQR Code: {('Added' if qr_file_id else 'Not Added')}"
         preview_kb = self.back('a_manual_payment')
-        if settings.get('upi_qr_file_id'):
-            await q.message.reply_photo(settings['upi_qr_file_id'], caption=preview, reply_markup=preview_kb)
+        if qr_file_id:
+            await q.message.reply_photo(qr_file_id, caption=preview, reply_markup=preview_kb)
         else:
             await q.edit_message_text(preview, reply_markup=preview_kb)
         return True
