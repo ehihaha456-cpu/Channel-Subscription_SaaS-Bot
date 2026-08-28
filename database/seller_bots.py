@@ -67,6 +67,23 @@ async def get_bot_by_data_owner_id(data_owner_id: int):
     return await seller_bots_collection().find_one({"data_owner_id": int(data_owner_id)})
 
 
+
+
+async def get_bot_payment_qr(bot_id: int) -> str:
+    """Return the QR file_id stored for one clone bot."""
+    record = await get_bot_by_bot_id(int(bot_id))
+    return str((record or {}).get("payment_qr_file_id") or "")
+
+
+async def set_bot_payment_qr(bot_id: int, file_id: str) -> bool:
+    """Store the Manual Payment QR file_id for one clone bot only."""
+    result = await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id)},
+        {"$set": {"payment_qr_file_id": str(file_id or ""), "updated_at": datetime.now(timezone.utc)}},
+    )
+    return bool(result.matched_count)
+
+
 async def get_bot_by_username(bot_username: str):
     return await seller_bots_collection().find_one({
         "bot_username_normalized": bot_username.lstrip("@").lower()
@@ -130,7 +147,7 @@ async def save_bot(owner_id: int, bot_id: int, bot_name: str, bot_username: str,
                     "bot_token": "",
                     "recovery_claimed_at": "",
                 },
-                "$setOnInsert": {"created_at": now},
+                "$setOnInsert": {"created_at": now, "payment_qr_file_id": ""},
             },
             upsert=True,
         )
