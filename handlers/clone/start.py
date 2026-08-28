@@ -77,10 +77,13 @@ class CloneStartMixin:
             target = context.args[0] if context.args else "admin_panel"
             if target == "admin_payment":
                 settings = await get_seller_settings(owner)
+                qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get("seller_bot_id") or 0))
+                if not qr_file_id:
+                    qr_file_id = str(settings.get("upi_qr_file_id") or "")
                 await update.effective_message.reply_text(
                     f"💳 Payment Settings\n\nUPI Name: {settings.get('upi_name') or 'Not Set'}\n"
                     f"UPI ID: {settings.get('upi_id') or 'Not Set'}\n"
-                    f"QR: {'Added' if settings.get('upi_qr_file_id') else 'Not Added'}",
+                    f"QR: {'Added' if qr_file_id else 'Not Added'}",
                     reply_markup=self.payment_menu(),
                 )
             elif target == "admin_settings":

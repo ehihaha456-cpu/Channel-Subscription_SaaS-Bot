@@ -75,14 +75,31 @@ class CloneMediaHandlersMixin:
             return
 
         try:
+            bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
+            if not bot_id:
+                raise RuntimeError("Clone bot id is missing")
+
+            # QR codes are clone-bot specific. This prevents a newly created
+            # clone from accidentally reading/writing another clone's QR.
+            saved = await set_bot_payment_qr(bot_id, file_id)
+            if not saved:
+                raise RuntimeError(f"Clone bot record not found: {bot_id}")
+
+            # Preserve the legacy first-bot storage as well. Existing first-bot
+            # data continues to work, while every newer clone gets its own QR.
             await set_seller_setting(owner, "upi_qr_file_id", file_id)
+
+            # Verify the exact clone record before confirming success.
+            if await get_bot_payment_qr(bot_id) != file_id:
+                raise RuntimeError(f"QR verification failed for bot_id={bot_id}")
+
             context.user_data.pop("wait_qr", None)
             gateway_cfg = await get_gateway_config("seller", owner, decrypt=True)
             await msg.reply_text(
                 "✅ QR code saved successfully.",
                 reply_markup=self.manual_payment_menu(bool(gateway_cfg.get("manual_enabled", True))),
             )
-            logger.info("Seller payment QR saved owner_id=%s", owner)
+            logger.info("Seller payment QR saved bot_id=%s owner_id=%s", bot_id, owner)
         except Exception:
             logger.exception("Failed to save seller payment QR owner_id=%s", owner)
             await msg.reply_text("❌ QR code could not be saved. Please try again.")
