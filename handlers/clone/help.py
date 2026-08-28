@@ -7,7 +7,7 @@ from handlers.clone.help_center import help_home_keyboard, help_home_text
 class CloneHelpMixin:
     async def help_command(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
-        is_owner=update.effective_user.id==owner
+        is_owner=update.effective_user.id==self.seller_account(context)
 
         user_text=(
             "📚 Clone Bot Help Center\n\n"

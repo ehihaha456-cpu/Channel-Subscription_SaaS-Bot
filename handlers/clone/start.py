@@ -178,14 +178,32 @@ class CloneStartMixin:
                     context, owner, update.effective_user, referrer_id,
                 )
             )
+        except Forbidden as exc:
+            # Telegram returns 403 when a user has blocked the clone bot.
+            # Do not try to send the error message back to the same blocked
+            # chat, and do not turn this expected condition into a traceback.
+            logger.info(
+                "Clone /start skipped because user blocked bot owner=%s user=%s: %s",
+                owner,
+                getattr(update.effective_user, "id", None),
+                exc,
+            )
+            return
         except Exception as exc:
             logger.exception(
                 "Child /start failed owner=%s runtime=%s",
                 owner,
                 WELCOME_RUNTIME_VERSION,
             )
-            await update.effective_message.reply_text(
-                "❌ Welcome message could not be sent.\n"
-                f"Runtime: {WELCOME_RUNTIME_VERSION}\n"
-                f"Error: {str(exc)[:250]}"
-            )
+            try:
+                await update.effective_message.reply_text(
+                    "❌ Welcome message could not be sent.\n"
+                    f"Runtime: {WELCOME_RUNTIME_VERSION}\n"
+                    f"Error: {str(exc)[:250]}"
+                )
+            except Forbidden:
+                logger.info(
+                    "Could not send /start error because user blocked bot owner=%s user=%s",
+                    owner,
+                    getattr(update.effective_user, "id", None),
+                )

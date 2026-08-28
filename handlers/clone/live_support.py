@@ -125,6 +125,7 @@ class CloneLiveSupportMixin:
         if is_business_update:
             return
         owner=self.owner(context)
+        seller_account=self.seller_account(context)
         support=await get_live_support_settings(owner)
 
         # Seller reply inside the connected topic group.
@@ -135,7 +136,7 @@ class CloneLiveSupportMixin:
             and int(chat.id)==int(support["support_group_id"])
             and message.message_thread_id
         ):
-            if user.id!=owner:
+            if user.id!=seller_account:
                 return
             topic=await get_topic_by_thread(owner,chat.id,message.message_thread_id)
             if not topic:
@@ -151,7 +152,7 @@ class CloneLiveSupportMixin:
             raise ApplicationHandlerStop
 
         # Seller reply in normal private mode must be a reply to a copied user message.
-        if chat.type=="private" and user.id==owner:
+        if chat.type=="private" and user.id==seller_account:
             if support.get("enabled") and support.get("mode")=="private" and message.reply_to_message:
                 link=await get_private_message_link(owner,chat.id,message.reply_to_message.message_id)
                 if link:
@@ -164,7 +165,7 @@ class CloneLiveSupportMixin:
             return
 
         # Users send an actual non-command content message in private chat.
-        if chat.type!="private" or user.id==owner:
+        if chat.type!="private" or user.id==seller_account:
             return
         has_user_content=bool(
             message.text
@@ -259,7 +260,7 @@ class CloneLiveSupportMixin:
         q=update.callback_query
         await q.answer()
         owner=self.owner(context)
-        if q.from_user.id!=owner:
+        if q.from_user.id!=self.seller_account(context):
             await q.answer("Not authorized",show_alert=True)
             return
         data=q.data
@@ -452,7 +453,7 @@ class CloneLiveSupportMixin:
             if context.user_data.get("wait_staff_promote"):
                 try:
                     staff_user_id=int(text.strip())
-                    if staff_user_id==owner:
+                    if staff_user_id==self.seller_account(context):
                         raise ValueError("Seller is already the owner")
                     user=await get_user(owner,staff_user_id)
                     role=context.user_data["wait_staff_promote"]

@@ -6,7 +6,11 @@ from handlers.common.clone_context import *
 class CloneMediaHandlersMixin:
     async def welcome_media_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
-        if update.effective_user.id!=owner:
+        # owner() is the clone's data-scope ID. For the first clone this is
+        # also the seller Telegram ID, but for additional clones it is the
+        # clone bot ID. Always authenticate editor uploads against the real
+        # seller account ID, while keeping storage scoped to owner().
+        if update.effective_user.id!=self.seller_account(context):
             return
         if context.user_data.get("wait_support_ar_media"):
             keyword=context.user_data["wait_support_ar_media"]
@@ -57,9 +61,10 @@ class CloneMediaHandlersMixin:
         if not user:
             return
 
-        # Payment settings belong to the clone owner/seller. Keep the original
-        # owner-only behavior rather than allowing ordinary clone users to write it.
-        if int(user.id) != int(owner):
+        # Payment settings belong to the seller. owner() is the per-clone
+        # data scope, so it must not be used as the seller's Telegram ID for
+        # additional clone bots.
+        if int(user.id) != int(self.seller_account(context)):
             return
 
         msg = update.effective_message
@@ -150,7 +155,7 @@ class CloneMediaHandlersMixin:
 
     async def forward_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
-        if update.effective_user.id!=owner or not context.user_data.get("wait_channel"): return
+        if update.effective_user.id!=self.seller_account(context) or not context.user_data.get("wait_channel"): return
         m=update.effective_message; chat=getattr(m,"forward_from_chat",None)
         if chat is None:
             origin=getattr(m,"forward_origin",None); chat=getattr(origin,"chat",None)
