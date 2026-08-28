@@ -53,6 +53,33 @@ class CloneRuntimeLifecycleMixin:
                 )
                 app = self.build_app(token, data_owner_id, seller_account_id, bot_id=bot_id)
                 await asyncio.wait_for(app.initialize(), timeout=25)
+
+                # Clone bots use long-polling only. A stale Telegram webhook
+                # on the same token makes getUpdates fail with a Conflict.
+                # Remove it before starting polling so restarts/redeploys can
+                # recover cleanly without requiring manual Bot API calls.
+                try:
+                    webhook_info = await asyncio.wait_for(app.bot.get_webhook_info(), timeout=10)
+                    webhook_url = str(getattr(webhook_info, "url", "") or "")
+                    if webhook_url:
+                        logger.warning(
+                            "Removing active webhook before clone polling bot_id=%s owner_id=%s url=%s",
+                            bot_id, data_owner_id, webhook_url,
+                        )
+                    # Always call delete_webhook, even when Telegram reports no
+                    # URL. This makes the polling startup deterministic after a
+                    # previous webhook deployment and is harmless when none is set.
+                    await asyncio.wait_for(
+                        app.bot.delete_webhook(drop_pending_updates=False),
+                        timeout=15,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not clear Telegram webhook before polling bot_id=%s owner_id=%s",
+                        bot_id, data_owner_id,
+                    )
+                    raise
+
                 await asyncio.wait_for(app.start(), timeout=15)
                 await asyncio.wait_for(
                     app.updater.start_polling(

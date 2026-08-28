@@ -159,7 +159,16 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, self.business_automation_media_handler), group=-4)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,self.welcome_media_handler),group=-1)
-        app.add_handler(MessageHandler(filters.PHOTO,self.photo_handler),group=0)
+        # Seller payment QR uploads must be handled before generic moderation
+        # and routing. The handler also accepts image documents, not only
+        # Telegram photo messages.
+        app.add_handler(
+            MessageHandler(
+                filters.PHOTO | filters.Document.IMAGE,
+                self.photo_handler,
+            ),
+            group=-111,
+        )
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.business_automation_text_handler), group=-1)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,self.text_handler))
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.route_live_support_message),group=-8)
