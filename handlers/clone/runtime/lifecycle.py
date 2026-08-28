@@ -73,6 +73,14 @@ class CloneRuntimeLifecycleMixin:
                         app.bot.delete_webhook(drop_pending_updates=False),
                         timeout=15,
                     )
+                    # Verify Telegram no longer has an active webhook before
+                    # polling starts. This prevents a stale webhook from
+                    # producing getUpdates Conflict after a restart.
+                    verify = await asyncio.wait_for(app.bot.get_webhook_info(), timeout=10)
+                    if str(getattr(verify, "url", "") or ""):
+                        raise RuntimeError(
+                            f"Telegram webhook is still active after deletion: {getattr(verify, 'url', '')}"
+                        )
                 except Exception:
                     logger.exception(
                         "Could not clear Telegram webhook before polling bot_id=%s owner_id=%s",
