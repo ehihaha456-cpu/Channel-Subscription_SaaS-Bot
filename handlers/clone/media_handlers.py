@@ -42,11 +42,55 @@ class CloneMediaHandlersMixin:
         context.user_data.clear(); await msg.reply_text("✅ Welcome media saved. Use 👀 Full Preview to check it.",reply_markup=self.welcome_media_menu(True))
         raise ApplicationHandlerStop
 
+    async def seller_qr_upload_handler(self, update:Update, context:ContextTypes.DEFAULT_TYPE):
+        """Handle seller Manual Payment QR uploads in a dedicated high-priority handler.
+
+        This state is intentionally isolated from the normal media/business/live-support
+        handlers so a QR upload cannot be consumed by another editor or router first.
+        Both Telegram photo messages and image documents are accepted.
+        """
+        if not context.user_data.get("wait_qr"):
+            return
+
+        owner = self.owner(context)
+        user = update.effective_user
+        if not user:
+            return
+
+        # Payment settings belong to the clone owner/seller. Keep the original
+        # owner-only behavior rather than allowing ordinary clone users to write it.
+        if int(user.id) != int(owner):
+            return
+
+        msg = update.effective_message
+        file_id = ""
+        if msg and msg.photo:
+            file_id = msg.photo[-1].file_id
+        elif msg and msg.document and str(msg.document.mime_type or "").lower().startswith("image/"):
+            file_id = msg.document.file_id
+
+        if not file_id:
+            if msg:
+                await msg.reply_text("❌ Send the QR code as a photo or image file.")
+            return
+
+        try:
+            await set_seller_setting(owner, "upi_qr_file_id", file_id)
+            context.user_data.pop("wait_qr", None)
+            gateway_cfg = await get_gateway_config("seller", owner, decrypt=True)
+            await msg.reply_text(
+                "✅ QR code saved successfully.",
+                reply_markup=self.manual_payment_menu(bool(gateway_cfg.get("manual_enabled", True))),
+            )
+            logger.info("Seller payment QR saved owner_id=%s", owner)
+        except Exception:
+            logger.exception("Failed to save seller payment QR owner_id=%s", owner)
+            await msg.reply_text("❌ QR code could not be saved. Please try again.")
+        raise ApplicationHandlerStop
+
     async def photo_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
 
-        if update.effective_user.id==owner and context.user_data.get("wait_qr"):
-            await set_seller_setting(owner,"upi_qr_file_id",update.effective_message.photo[-1].file_id); context.user_data.clear(); gateway_cfg=await get_gateway_config("seller",owner,decrypt=True); await update.effective_message.reply_text("✅ QR updated",reply_markup=self.manual_payment_menu(bool(gateway_cfg.get("manual_enabled",True)))); return
         if context.user_data.get("waiting_child_screenshot"):
             plan=context.user_data.get("selected_child_plan")
             if not plan: await update.effective_message.reply_text("Select a plan first"); return
