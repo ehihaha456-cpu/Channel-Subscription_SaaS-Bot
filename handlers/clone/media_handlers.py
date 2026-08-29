@@ -136,15 +136,35 @@ class CloneMediaHandlersMixin:
                 status="pending",
             )
 
-            await context.bot.send_photo(
-                owner,
-                p["screenshot_file_id"],
-                caption=caption,
-                reply_markup=kb,
-            )
+            # `owner` is the clone-specific data scope. For a seller with multiple
+            # clone bots it can be the clone bot ID, which is NOT the seller's
+            # Telegram chat ID. Always deliver the approval notification to the
+            # actual seller account while keeping the payment itself stored under
+            # the clone-specific owner/data scope.
+            seller_account_id = self.seller_account(context)
+            try:
+                await context.bot.send_photo(
+                    seller_account_id,
+                    p["screenshot_file_id"],
+                    caption=caption,
+                    reply_markup=kb,
+                )
+            except TelegramError:
+                # The payment is already safely stored as pending. Do not leave
+                # the user without confirmation if the live notification fails.
+                logger.exception(
+                    "Manual payment saved but seller notification failed: "
+                    "seller_account_id=%s data_owner_id=%s payment_id=%s",
+                    seller_account_id, owner, p.get("payment_id"),
+                )
+                await update.effective_message.reply_text(
+                    "✅ Payment screenshot submitted successfully. It is pending "
+                    "approval and the admin can review it from Pending Payments."
+                )
+                raise ApplicationHandlerStop
 
             await update.effective_message.reply_text(
-                "✅ Payment submitted. Waiting for approval."
+                "✅ Payment screenshot submitted successfully. Waiting for approval."
             )
             raise ApplicationHandlerStop
 
