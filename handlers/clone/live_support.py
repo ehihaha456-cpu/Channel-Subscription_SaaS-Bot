@@ -125,6 +125,8 @@ class CloneLiveSupportMixin:
         if is_business_update:
             return
         owner=self.owner(context)
+        # Database scope is clone-specific; seller identity is the real Telegram account.
+        seller_account=self.seller_account(context)
         support=await get_live_support_settings(owner)
 
         # Seller reply inside the connected topic group.
