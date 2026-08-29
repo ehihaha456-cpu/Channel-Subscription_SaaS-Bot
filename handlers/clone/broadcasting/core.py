@@ -590,7 +590,12 @@ class CloneBroadcastMixin:
                 await asyncio.sleep(0.05)
             await set_scheduled_status(job_id, "completed", {"success": success, "failed": failed})
             try:
-                await context.bot.send_message(owner, f"✅ Scheduled broadcast completed\nSuccess: {success}\nFailed: {failed}")
+                # Scheduled jobs are stored under the clone-specific data scope.
+                # Resolve the real seller Telegram account before sending a DM.
+                from database.seller_bots import get_bot_by_data_owner_id
+                bot_record = await get_bot_by_data_owner_id(owner)
+                seller_chat_id = int((bot_record or {}).get("seller_account_id") or (bot_record or {}).get("owner_id") or owner)
+                await context.bot.send_message(seller_chat_id, f"✅ Scheduled broadcast completed\nSuccess: {success}\nFailed: {failed}")
             except Exception:
                 logger.exception("Scheduled broadcast completion notice failed job_id=%s owner_id=%s", job_id, owner)
         except Exception as exc:
