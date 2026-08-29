@@ -309,7 +309,7 @@ class MessageModerationService:
                 seller_account_id=int(context.application.bot_data.get("seller_account_id") or -1)
                 sender_is_admin = (
                     anonymous_group_admin
-                    or (user_id is not None and user_id == int(self.owner_id))
+                    or (user_id is not None and user_id == int(self.seller_id))
                     or (user_id is not None and user_id == seller_account_id)
                     or await is_group_admin()
                 )
@@ -329,7 +329,7 @@ class MessageModerationService:
                         return ModerationDecision(True,"command","commands_deleted")
 
         if user_id is not None:
-            if settings.get("ignore_owner",True) and user_id==self.owner_id: return ModerationDecision(False)
+            if settings.get("ignore_owner",True) and user_id==self.seller_id: return ModerationDecision(False)
             if user_id in {int(x) for x in settings.get("whitelisted_user_ids",[])}: return ModerationDecision(False)
             if settings.get("ignore_admins",True) and await is_group_admin(): return ModerationDecision(False)
 
@@ -406,7 +406,8 @@ async def moderate_seller_message(
     if effective_message is not None and getattr(effective_message, "new_chat_members", None):
         return False
 
-    deleted = await MessageModerationService(int(resolved_owner)).moderate(update, context)
+    seller_id = context.application.bot_data.get("seller_account_id")
+    deleted = await MessageModerationService(int(resolved_owner), int(seller_id) if seller_id is not None else None).moderate(update, context)
     if deleted:
         raise ApplicationHandlerStop
     return False
