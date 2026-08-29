@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+import hashlib
 from database.mongo import get_database
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -13,6 +14,19 @@ class BotOwnershipError(RuntimeError):
 
 def seller_bots_collection():
     return get_database()[COLLECTION]
+
+
+def make_clone_data_scope_id(seller_id: int, bot_id: int) -> int:
+    """Return a stable numeric DB scope derived from seller + clone bot ID.
+
+    MongoDB's existing data collections use integer owner_id fields, so the
+    composite identity is encoded deterministically into a positive int64.
+    Existing records keep their stored data_owner_id forever for backward
+    compatibility; only newly registered clone records get the composite scope.
+    """
+    raw = f"{int(seller_id)}:{int(bot_id)}".encode("utf-8")
+    # 15 decimal digits safely fits MongoDB/Python signed integer range.
+    return int(hashlib.sha256(raw).hexdigest()[:15], 16)
 
 
 async def initialize_seller_bot_indexes():
@@ -38,7 +52,11 @@ async def initialize_seller_bot_indexes():
     async for record in cursor:
         await col.update_one(
             {"_id": record["_id"]},
-            {"$set": {"data_owner_id": int(record["owner_id"])}}
+            {"$set": {
+                "data_owner_id": int(record["owner_id"]),
+                "data_scope_key": f"{int(record['owner_id'])}:{int(record.get('bot_id') or 0)}",
+                "seller_account_id": int(record["owner_id"]),
+            }}
         )
 
 
@@ -105,14 +123,26 @@ async def save_bot(owner_id: int, bot_id: int, bot_name: str, bot_username: str,
     if existing and int(existing.get("owner_id", 0)) != owner_id:
         raise BotOwnershipError("This bot is already connected to another seller.")
 
-    # First bot keeps old owner_id scope so existing plans/users/settings remain intact.
+    # Preserve an existing record's exact data scope forever. If an older build
+    # already deleted the seller_bots record, recover the old scope from the
+    # seller_settings collection when possible before creating a new scope.
     first_bot = await get_bot(owner_id)
-    data_owner_id = (
-        int(existing.get("data_owner_id"))
-        if existing and existing.get("data_owner_id") is not None
-        else owner_id if not first_bot
-        else bot_id
-    )
+    if existing and existing.get("data_owner_id") is not None:
+        data_owner_id = int(existing["data_owner_id"])
+    else:
+        settings_col = get_database()["seller_settings"]
+        legacy_at_bot_scope = await settings_col.find_one({"owner_id": bot_id}, {"_id": 1})
+        legacy_at_seller_scope = await settings_col.find_one({"owner_id": owner_id}, {"_id": 1})
+        if legacy_at_bot_scope:
+            # Old multi-clone builds used bot_id as the second-clone scope.
+            # Reusing it restores that clone's existing plans/users/settings.
+            data_owner_id = bot_id
+        elif not first_bot:
+            # First clone keeps the original seller scope for backward compatibility.
+            data_owner_id = owner_id
+        else:
+            data_owner_id = make_clone_data_scope_id(owner_id, bot_id)
+    data_scope_key = f"{owner_id}:{bot_id}"
 
     query = {
         "bot_id": bot_id,
@@ -129,6 +159,8 @@ async def save_bot(owner_id: int, bot_id: int, bot_name: str, bot_username: str,
                 "$set": {
                     "owner_id": owner_id,
                     "data_owner_id": data_owner_id,
+                    "data_scope_key": data_scope_key,
+                    "seller_account_id": owner_id,
                     "bot_id": bot_id,
                     "bot_name": bot_name,
                     "bot_username": bot_username,
@@ -297,11 +329,28 @@ async def recovery_allowed(record: dict, now=None) -> bool:
 
 
 async def delete_bot(owner_id: int, bot_id: int | None = None):
+    """Disconnect clone bot without deleting its identity/data-scope record.
+
+    Clone data lives in other collections keyed by data_owner_id.  Deleting
+    the seller_bots record would make a later reconnect generate a new scope
+    and could make the bot appear reset.  Keep the record and mark it removed;
+    save_bot() reactivates the same record when the same token/bot is connected.
+    """
     query = {"owner_id": int(owner_id)}
     if bot_id is not None:
         query["bot_id"] = int(bot_id)
-        return await seller_bots_collection().delete_one(query)
-    return await seller_bots_collection().delete_many(query)
+    now = datetime.now(timezone.utc)
+    return await seller_bots_collection().update_many(
+        query,
+        {"$set": {
+            "active": False,
+            "status": "removed",
+            "runtime_status": "removed",
+            "runtime_error": None,
+            "next_recovery_at": None,
+            "updated_at": now,
+        }, "$unset": {"recovery_claimed_at": ""}},
+    )
 
 
 async def bot_exists(owner_id: int):
