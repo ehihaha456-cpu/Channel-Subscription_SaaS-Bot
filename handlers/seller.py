@@ -872,6 +872,35 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = int(q.from_user.id)
     action = q.data
 
+    # Fallback for Open Admin Panel when a clone username is unavailable.
+    # A Telegram deep-link cannot be constructed without a public bot username,
+    # so handle this callback explicitly instead of leaving the button dead.
+    if action.startswith("seller_open_admin_"):
+        try:
+            bot_id = int(action.rsplit("_", 1)[1])
+        except (TypeError, ValueError):
+            await q.answer("Invalid clone bot.", show_alert=True)
+            return
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id:
+            await q.answer("Clone bot not found.", show_alert=True)
+            return
+        username = str(record.get("bot_username") or "").lstrip("@")
+        if not username:
+            await q.answer(
+                "This clone bot does not have a Telegram username, so its Admin Panel cannot be opened by deep link yet.",
+                show_alert=True,
+            )
+            return
+        await q.answer()
+        await q.edit_message_text(
+            "🛠 Open Admin Panel\n\nTap the button below to open this clone bot directly.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🛠 Open Admin Panel", url=f"https://t.me/{username}?start=admin_panel")
+            ], [InlineKeyboardButton("⬅ Back", callback_data=f"seller_select_{bot_id}")]]),
+        )
+        return
+
     # Selected clone-bot management pages stay inside the main SaaS bot.
     if action.startswith("seller_selected_help_"):
         bot_id = int(action.rsplit("_", 1)[1])
@@ -2501,7 +2530,7 @@ def _decision_result_text(purchase: dict) -> str:
 
 def seller_handlers():
     return [
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace_\d+|pause_\d+|resume_\d+|remove_\d+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace_\d+|pause_\d+|resume_\d+|remove_\d+|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
         MessageHandler(filters.PHOTO | filters.VIDEO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]
