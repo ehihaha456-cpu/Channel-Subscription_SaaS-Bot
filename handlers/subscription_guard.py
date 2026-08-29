@@ -113,9 +113,10 @@ async def _edit(query, text, markup):
 async def subscription_guard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     owner_id = int(context.application.bot_data.get("seller_owner_id") or 0)
-    if not query or not owner_id:
+    seller_id = int(context.application.bot_data.get("seller_account_id") or 0)
+    if not query or not owner_id or not seller_id:
         return
-    if query.from_user.id != owner_id:
+    if query.from_user.id != seller_id:
         await query.answer("Only the clone bot seller/admin can use this panel.", show_alert=True)
         return
     action = query.data or ""
