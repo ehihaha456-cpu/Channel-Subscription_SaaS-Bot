@@ -177,7 +177,7 @@ async def anti_flood_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Only regular users are subject to anti-flood.
     if await _is_chat_admin(context.bot,chat.id,user.id):
         return
-    if int(user.id)==owner or int(user.id) in {int(x) for x in (ADMIN_IDS or [])}:
+    if int(user.id)==int(context.application.bot_data.get("seller_account_id") or 0) or int(user.id) in {int(x) for x in (ADMIN_IDS or [])}:
         return
     cache_key=(owner,int(user.id)); now=time.monotonic(); cached=STAFF_CACHE.get(cache_key)
     if cached and now-cached[0] < 30:
@@ -283,7 +283,7 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     # Group admins, bot/global admins and seller staff are exempt from Anti-Flood.
     if await _is_chat_admin(context.bot,chat.id,user.id):
         return
-    bot_admin=int(user.id)==owner or int(user.id) in {int(x) for x in (ADMIN_IDS or [])}
+    bot_admin=int(user.id)==int(context.application.bot_data.get("seller_account_id") or 0) or int(user.id) in {int(x) for x in (ADMIN_IDS or [])}
     if not bot_admin:
         cache_key=(owner,int(user.id)); now=time.monotonic(); cached=STAFF_CACHE.get(cache_key)
         if cached and now-cached[0] < 30:

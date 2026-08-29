@@ -21,7 +21,10 @@ class CloneCommonUtilsMixin:
         if stars < 0 or stars > 2500: raise ValueError("Stars must be between 0 and 2500")
         return p[0],p[1].lower(),cls.parse_duration(p[1]),float(p[2]),stars
 
-    def owner(self,context): return int(context.application.bot_data["seller_owner_id"])
+    def owner(self,context):
+        # owner() is the clone-specific persistent data scope. Seller identity
+        # is always available separately through seller_account().
+        return int(context.application.bot_data.get("data_owner_id") or context.application.bot_data["seller_owner_id"])
 
     def seller_account(self,context): return int(context.application.bot_data.get("seller_account_id", self.owner(context)))
 

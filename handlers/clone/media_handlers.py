@@ -6,10 +6,6 @@ from handlers.common.clone_context import *
 class CloneMediaHandlersMixin:
     async def welcome_media_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
-        # owner() is the clone's data-scope ID. For the first clone this is
-        # also the seller Telegram ID, but for additional clones it is the
-        # clone bot ID. Always authenticate editor uploads against the real
-        # seller account ID, while keeping storage scoped to owner().
         if update.effective_user.id!=self.seller_account(context):
             return
         if context.user_data.get("wait_support_ar_media"):
@@ -61,9 +57,8 @@ class CloneMediaHandlersMixin:
         if not user:
             return
 
-        # Payment settings belong to the seller. owner() is the per-clone
-        # data scope, so it must not be used as the seller's Telegram ID for
-        # additional clone bots.
+        # Payment settings belong to the clone owner/seller. Keep the original
+        # owner-only behavior rather than allowing ordinary clone users to write it.
         if int(user.id) != int(self.seller_account(context)):
             return
 
