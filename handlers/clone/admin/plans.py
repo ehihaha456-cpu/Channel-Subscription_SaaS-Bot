@@ -8,11 +8,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await q.edit_message_text('📦 Plan Management', reply_markup=self.plans_admin_menu())
         return True
     if a == 'a_plan_add':
-        plan_cfg, _ = await effective_plan(owner)
+        plan_cfg, _ = await effective_plan(self.seller_account(context))
         existing = len(await get_plans(owner))
         limit = int(plan_cfg.get('plan_limit', 2))
         if limit >= 0 and existing >= limit:
-            await q.edit_message_text(await plan_limit_warning(owner), reply_markup=self.limit_keyboard('a_plans'))
+            await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard('a_plans'))
             return True
         context.user_data.clear()
         context.user_data['wait_plan_add'] = True

@@ -10,7 +10,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_seller_profile':
         timezone_name = await self.seller_timezone(owner)
-        plan, assignment = await effective_plan(owner)
+        seller_account_id = self.seller_account(context)
+        plan, assignment = await effective_plan(seller_account_id)
         usage = await stats(owner)
         bot_record = await get_bot_by_data_owner_id(owner) or {}
         expiry = (assignment or {}).get('expiry_date')
@@ -35,10 +36,10 @@ async def handle(self, update, context, q, owner, staff, a, role):
             except Exception:
                 return str(value)
         username_text = f'@{q.from_user.username}' if q.from_user.username else 'Not set'
-        text = f"👤 Seller Profile\n\n🆔 Seller ID: {owner}\n👤 Name: {q.from_user.full_name or 'Unknown'}\n📝 Username: {username_text}"
-        referral_data = await seller_referral_stats(owner)
+        text = f"👤 Seller Profile\n\n🆔 Seller ID: {seller_account_id}\n👤 Name: {q.from_user.full_name or 'Unknown'}\n📝 Username: {username_text}"
+        referral_data = await seller_referral_stats(seller_account_id)
         main_bot_username = os.getenv('MAIN_BOT_USERNAME', 'Subscripti0n_Manage_bot').lstrip('@')
-        referral_link = f'https://t.me/{main_bot_username}?start=refseller_{owner}'
+        referral_link = f'https://t.me/{main_bot_username}?start=refseller_{seller_account_id}'
 
         text += f"\n\n💎 Plan Details\nPlan: {plan.get('name', 'Free')}\nStatus: {status}\nExpiry: {self.format_dt(expiry, timezone_name)}\nRemaining: {remaining_text}\n\n📊 Usage & Limits\n🤖 Clone Bots: {(1 if bot_record else 0)} / {lim(plan.get('bot_limit', 1))}\n👥 Active Subscribers: {usage.get('active', 0)} / {lim(plan.get('active_subscriber_limit', 25))}\n📢 Channels / Groups: {usage.get('channels', 0)} / {lim(plan.get('channel_limit', 1))}\n📦 Subscription Plans: {usage.get('plans', 0)} / {lim(plan.get('plan_limit', 2))}\n\n👥 Total Users: {usage.get('users', 0)}\n💳 Pending Payments: {usage.get('pending', 0)}\n💰 Revenue: ₹{usage.get('revenue', 0):g}"
         text += (

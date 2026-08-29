@@ -160,14 +160,15 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer(f'Payment status: {latest_status}', show_alert=True)
             return True
         try:
-            plan_cfg, _ = await effective_plan(owner)
+            seller_account_id = self.seller_account(context)
+            plan_cfg, _ = await effective_plan(seller_account_id)
             active_now = await active_subscriptions(owner)
             already_active = any((int(x.get('user_id')) == int(p['user_id']) for x in active_now))
             sub_limit = int(plan_cfg.get('active_subscriber_limit', 25))
             if not already_active and sub_limit >= 0 and (len(active_now) >= sub_limit):
                 await release_processing_payment(owner, pid, 'seller subscriber limit reached')
                 await q.answer('Seller plan limit reached', show_alert=True)
-                await context.bot.send_message(owner, await plan_limit_warning(owner), reply_markup=self.limit_keyboard('a_pending'))
+                await context.bot.send_message(seller_account_id, await plan_limit_warning(seller_account_id), reply_markup=self.limit_keyboard('a_pending'))
                 return True
             previous_sub = await get_subscription(owner, p['user_id'])
             now = datetime.now(timezone.utc)

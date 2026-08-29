@@ -8,11 +8,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await q.edit_message_text('📢 Channels / Groups', reply_markup=self.channels_menu())
         return True
     if a == 'a_channel_add':
-        plan_cfg, _ = await effective_plan(owner)
+        plan_cfg, _ = await effective_plan(self.seller_account(context))
         existing = len(await get_channels(owner))
         limit = int(plan_cfg.get('channel_limit', 1))
         if limit >= 0 and existing >= limit:
-            await q.edit_message_text(await plan_limit_warning(owner), reply_markup=self.limit_keyboard('a_channels'))
+            await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard('a_channels'))
             return True
         context.user_data.clear()
         context.user_data['wait_channel'] = True

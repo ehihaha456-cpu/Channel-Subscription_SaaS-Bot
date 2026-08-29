@@ -73,12 +73,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not plan:
             await q.edit_message_text('❌ Plan not found.', reply_markup=self.back(f'a_user_view_{user_id}'))
             return True
-        plan_cfg, _ = await effective_plan(owner)
+        plan_cfg, _ = await effective_plan(self.seller_account(context))
         active_now = await active_subscriptions(owner)
         already_active = any((int(x.get('user_id')) == user_id for x in active_now))
         sub_limit = int(plan_cfg.get('active_subscriber_limit', 25))
         if not already_active and sub_limit >= 0 and (len(active_now) >= sub_limit):
-            await q.edit_message_text(await plan_limit_warning(owner), reply_markup=self.limit_keyboard(f'a_user_view_{user_id}'))
+            await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard(f'a_user_view_{user_id}'))
             return True
         await activate_subscription(owner, user_id, plan['name'], plan['duration_minutes'], amount=plan.get('price'), duration_text=plan.get('duration_text'))
         delivery = await self.deliver_subscription_access(owner, user_id)
