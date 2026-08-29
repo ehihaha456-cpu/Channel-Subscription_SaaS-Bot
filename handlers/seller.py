@@ -17,6 +17,7 @@ from telethon.errors import (
     PasswordHashInvalidError,
 )
 from telethon.sessions import StringSession
+from handlers.clone.help_center import HELP_PAGES, HELP_LABELS
 
 from database.seller_bots import (
     BotOwnershipError,
@@ -559,19 +560,26 @@ async def clone_list_markup(owner_id: int):
 
 
 def selected_bot_markup(record):
+    """Main-bot seller dashboard for one selected clone bot."""
     bot_id = int(record["bot_id"])
     active = bool(record.get("active"))
+    username = str(record.get("bot_username") or "").lstrip("@")
+    open_admin = (
+        InlineKeyboardButton("🛠 Open Admin Panel", url=f"https://t.me/{username}?start=admin_panel")
+        if username else InlineKeyboardButton("🛠 Open Admin Panel", callback_data=f"seller_open_admin_{bot_id}")
+    )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👤 Seller Profile", callback_data=f"seller_selected_profile_{bot_id}")],
-        [InlineKeyboardButton("⏸ Pause Bot" if active else "▶️ Resume Bot", callback_data=f"seller_{'pause' if active else 'resume'}_{bot_id}")],
-        [InlineKeyboardButton("🔄 Replace Token", callback_data=f"seller_replace_{bot_id}")],
+        [open_admin],
+        [
+            InlineKeyboardButton("⏸ Pause Bot" if active else "▶️ Resume Bot", callback_data=f"seller_{'pause' if active else 'resume'}_{bot_id}"),
+            InlineKeyboardButton("🔄 Replace Token", callback_data=f"seller_replace_{bot_id}"),
+        ],
         [InlineKeyboardButton("🗑 Remove Bot", callback_data=f"seller_remove_{bot_id}")],
-        [InlineKeyboardButton("💳 Payment Settings", callback_data=f"seller_selected_payment_{bot_id}")],
-        [InlineKeyboardButton("⚙️ Bot Settings", callback_data=f"seller_selected_settings_{bot_id}")],
         [InlineKeyboardButton("📊 Statistics", callback_data=f"seller_selected_stats_{bot_id}")],
-        [InlineKeyboardButton("📢 Channels / Groups", callback_data=f"seller_selected_channels_{bot_id}")],
         [InlineKeyboardButton("🤝 Seller Referral", callback_data=f"seller_selected_referral_{bot_id}")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data=f"seller_selected_terms_{bot_id}")],
+        [InlineKeyboardButton("🆘 Help & Commands", callback_data=f"seller_selected_help_{bot_id}")],
         [InlineKeyboardButton("⬅ Clone Bot List", callback_data="seller_bots_list")],
     ])
 
@@ -737,32 +745,48 @@ def channels_markup(bot_id: int):
 
 
 async def selected_panel_text(owner_id: int, record, user) -> str:
+    """Compact clone-specific dashboard header shown in the main bot."""
+    scope_id = int(record.get("data_owner_id") or owner_id)
     plan, _ = await effective_plan(owner_id)
-    db = get_database()
-    now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
-    bot_limit = int(plan.get('bot_limit', 1))
-    user_limit = int(plan.get('subscriber_limit', plan.get('user_limit', 0) or 0))
-    channel_limit = int(plan.get('channel_limit', 1))
-    plan_limit = int(plan.get('plan_limit', 2))
-    bots_used = await count_owner_bots(owner_id)
-    users_used = await db['seller_subscriptions'].count_documents({'owner_id': owner_id, 'active': True, 'expiry_date': {'$gt': now}})
-    channels_used = await db['seller_channels'].count_documents({'owner_id': owner_id, 'active': True})
-    plans_used = await db['seller_plans'].count_documents({'owner_id': owner_id})
-    def lim(v): return 'Unlimited' if int(v) < 0 else str(int(v))
-    seller = f"@{user.username}" if getattr(user, 'username', None) else getattr(user, 'full_name', str(owner_id))
-    runtime = str(record.get('runtime_status') or 'stopped').lower()
-    running = runtime == 'running'
-    status = '🟢 Active' if record.get('active') else '🟡 Paused'
-    runtime_text = '🟢 Running' if running else ('🟡 Stopped' if not record.get('runtime_error') else '🔴 Error')
+    data = await seller_stats(scope_id)
+    seller = f"@{user.username}" if getattr(user, "username", None) else getattr(user, "full_name", str(owner_id))
+    username = record.get("bot_username") or record.get("bot_id")
+    runtime = str(record.get("runtime_status") or "stopped").lower()
+    online = runtime == "running" and bool(record.get("active"))
+    status = "🟢 Online" if online else ("⏸ Paused" if not record.get("active") else "🔴 Offline")
     return (
-        f"🤖 @{record.get('bot_username') or record.get('bot_id')}\n\n"
-        f"Status: {status}\nRuntime: {runtime_text}\n\n"
-        f"👤 Seller: {seller}\n💎 Plan: {plan.get('name','Free')}\n"
-        f"🤖 Clone Bots: {bots_used}/{lim(bot_limit)}\n"
-        f"👥 Active Subscribers: {users_used}/{lim(user_limit)}\n"
-        f"📢 Channels / Groups: {channels_used}/{lim(channel_limit)}\n"
-        f"📦 Subscription Plans: {plans_used}/{lim(plan_limit)}"
+        f"👤 Seller: {seller}\n"
+        f"🤖 Clone Bot: @{username}\n"
+        f"📦 Plan: {plan.get('name', 'Free')}\n"
+        f"{status}\n\n"
+        f"Total Users: {int(data.get('total_users', data.get('users', 0))):,}\n"
+        f"Active Today: {int(data.get('active_today', data.get('active', 0))):,}\n"
+        f"Active Subscribers: {int(data.get('active_subscribers', 0)):,}\n"
+        f"Plans: {int(data.get('plans', 0)):,}\n"
+        f"Channels/Groups: {int(data.get('channels', 0)):,}\n"
+        f"Pending Payments: {int(data.get('pending', 0)):,}\n"
+        f"Today Revenue: ₹{_money(data.get('today_revenue', 0))}\n"
+        f"Total Revenue: ₹{_money(data.get('total_revenue', data.get('revenue', 0)))}"
     )
+
+
+def selected_help_keyboard(bot_id: int):
+    order = list(HELP_LABELS.items())
+    rows = []
+    for index in range(0, len(order), 2):
+        row = [InlineKeyboardButton(order[index][1], callback_data=f"seller_help_{bot_id}_{order[index][0]}")]
+        if index + 1 < len(order):
+            row.append(InlineKeyboardButton(order[index + 1][1], callback_data=f"seller_help_{bot_id}_{order[index + 1][0]}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"seller_select_{bot_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def selected_help_page_keyboard(bot_id: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Help Center", callback_data=f"seller_selected_help_{bot_id}")],
+        [InlineKeyboardButton("⬅ Back", callback_data=f"seller_select_{bot_id}")],
+    ])
 
 
 def _business_mtproto_ready() -> bool:
@@ -849,6 +873,29 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = q.data
 
     # Selected clone-bot management pages stay inside the main SaaS bot.
+    if action.startswith("seller_selected_help_"):
+        bot_id = int(action.rsplit("_", 1)[1])
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id:
+            await q.answer("Clone bot not found.", show_alert=True); return
+        await q.edit_message_text(
+            "🆘 Help & Commands\n\n"
+            "Welcome to the Clone Bot Help Center.\n\n"
+            "Select a section to learn what each feature does, where to find it and how to configure it.",
+            reply_markup=selected_help_keyboard(bot_id),
+        )
+        return
+
+    if action.startswith("seller_help_"):
+        raw = action.replace("seller_help_", "", 1)
+        bot_raw, key = raw.split("_", 1)
+        bot_id = int(bot_raw)
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id or key not in HELP_PAGES:
+            await q.answer("Help page not found.", show_alert=True); return
+        await q.edit_message_text(HELP_PAGES[key], reply_markup=selected_help_page_keyboard(bot_id))
+        return
+
     if action.startswith("seller_selected_profile_"):
         bot_id = int(action.rsplit("_", 1)[1])
         record = await get_bot_by_bot_id(bot_id)
@@ -879,12 +926,29 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ); return
 
     if action.startswith("seller_selected_stats_"):
-        bot_id = int(action.rsplit("_", 1)[1]); data = await seller_stats(owner_id)
+        bot_id = int(action.rsplit("_", 1)[1]); record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id:
+            await q.answer("Clone bot not found.", show_alert=True); return
+        scope_id = int(record.get("data_owner_id") or owner_id)
+        data = await seller_stats(scope_id)
+        plan, _ = await effective_plan(owner_id)
+        usage = await seller_usage(owner_id)
         await q.edit_message_text(
             "📊 Statistics\n\n"
-            f"Users: {data.get('users',0)}\nPlans: {data.get('plans',0)}\n"
-            f"Channels/Groups: {data.get('channels',0)}\nPending Payments: {data.get('pending',0)}\n"
-            f"Revenue: ₹{data.get('revenue',0):g}",
+            f"👥 Total Users: {data.get('total_users', data.get('users',0))}\n"
+            f"📅 Active Today: {data.get('active_today', data.get('active',0))}\n"
+            f"👤 Active Subscribers: {data.get('active_subscribers',0)}\n"
+            f"📦 Plans: {data.get('plans',0)}\n"
+            f"📢 Channels/Groups: {data.get('channels',0)}\n"
+            f"💳 Pending Payments: {data.get('pending',0)}\n"
+            f"💰 Today Revenue: ₹{_money(data.get('today_revenue',0))}\n"
+            f"💰 Total Revenue: ₹{_money(data.get('total_revenue', data.get('revenue',0)))}\n\n"
+            "📦 Plan & Limitations\n"
+            f"Plan: {plan.get('name','Free')}\n"
+            f"Clone Bots: {usage.get('bot_count',0)} / {_limit_display(plan.get('bot_limit',1))}\n"
+            f"Active Subscribers Limit: {_limit_display(plan.get('active_subscriber_limit', plan.get('subscriber_limit',25)))}\n"
+            f"Channels/Groups Limit: {_limit_display(plan.get('channel_limit',1))}\n"
+            f"Plans Limit: {_limit_display(plan.get('plan_limit',2))}",
             reply_markup=selected_back(bot_id),
         ); return
 
