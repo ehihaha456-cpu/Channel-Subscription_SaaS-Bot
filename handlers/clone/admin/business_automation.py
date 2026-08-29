@@ -921,8 +921,6 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
 
 async def handle_text(self, update, context):
     owner = self.owner(context)
-    # owner() is the clone data scope; seller_account() is the actual seller
-    # Telegram user. This distinction is required for the 2nd+ clone.
     if int(update.effective_user.id) != int(self.seller_account(context)):
         return False
     text = (update.effective_message.text or "").strip()
@@ -1071,8 +1069,6 @@ async def handle_text(self, update, context):
 
 async def handle_media(self, update, context):
     owner = self.owner(context)
-    # Authenticate the upload as the seller, but save it under this clone's
-    # owner/data scope so different clone bots remain isolated.
     if int(update.effective_user.id) != int(self.seller_account(context)):
         return False
     editor = context.user_data.get("ba_editor") or {}
