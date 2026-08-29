@@ -527,14 +527,15 @@ class CloneLiveSupportMixin:
                     )
                     return
 
-                plan_cfg, _ = await effective_plan(owner)
+                seller_account_id = self.seller_account(context)
+                plan_cfg, _ = await effective_plan(seller_account_id)
                 active_now = await active_subscriptions(owner)
                 already_active = any(int(x.get("user_id")) == user_id for x in active_now)
                 sub_limit = int(plan_cfg.get("active_subscriber_limit", 25))
                 if not already_active and sub_limit >= 0 and len(active_now) >= sub_limit:
                     context.user_data.clear()
                     await update.effective_message.reply_text(
-                        await plan_limit_warning(owner),
+                        await plan_limit_warning(seller_account_id),
                         reply_markup=self.limit_keyboard(f"a_user_view_{user_id}"),
                     )
                     return
