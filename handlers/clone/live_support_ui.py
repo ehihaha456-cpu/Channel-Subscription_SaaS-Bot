@@ -153,7 +153,7 @@ class CloneLiveSupportUIMixin:
             [InlineKeyboardButton("1 Minute",callback_data=f"a_tpl_ad_60_{command}"),InlineKeyboardButton("5 Minutes",callback_data=f"a_tpl_ad_300_{command}")],
             [InlineKeyboardButton("10 Minutes",callback_data=f"a_tpl_ad_600_{command}"),InlineKeyboardButton("30 Minutes",callback_data=f"a_tpl_ad_1800_{command}")],
             [InlineKeyboardButton("1 Hour",callback_data=f"a_tpl_ad_3600_{command}"),InlineKeyboardButton("⌨️ Custom",callback_data=f"a_tpl_ad_custom_{command}")],
-            [InlineKeyboardButton(f"Current: {current}",callback_data="noop")],
+            [InlineKeyboardButton(f"Current: {current}",callback_data="a_noop")],
             [InlineKeyboardButton("⬅ Back",callback_data=f"a_support_tpl_view_{command}")],
         ])
 

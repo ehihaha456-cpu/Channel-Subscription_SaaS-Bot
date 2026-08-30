@@ -15,6 +15,10 @@ class CloneAdminCallbacksMixin:
             await q.edit_message_text("❌ Not authorized")
             return
         action = q.data
+        # Informational/status buttons intentionally perform no navigation.
+        # They still need a registered callback path so Telegram's spinner closes.
+        if action == "a_noop":
+            return
         role = staff_record.get("role", "moderator")
         if role == "moderator":
             allowed_prefixes = ("a_home", "a_users", "a_user_", "a_pending", "a_pay_", "a_live_support", "a_help")

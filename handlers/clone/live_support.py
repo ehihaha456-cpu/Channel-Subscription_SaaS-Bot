@@ -221,16 +221,21 @@ class CloneLiveSupportMixin:
                             context, topic, chat.id, message.message_id,
                         )
                 else:
+                    # Telegram delivery must target the actual seller account.
+                    # `owner` is only the clone-specific database scope and may
+                    # be a composite ID for Clone 2/3/N.
                     await context.bot.send_message(
-                        owner,
+                        seller_account,
                         f"💬 Live Support\nUser: {user.full_name}\nID: {user.id}\nReply to the copied message below.",
                     )
                     copied=await context.bot.copy_message(
-                        chat_id=owner,
+                        chat_id=seller_account,
                         from_chat_id=chat.id,
                         message_id=message.message_id,
                     )
-                    await save_private_message_link(owner,owner,copied.message_id,user.id)
+                    # Keep the mapping clone-scoped, but store the real seller
+                    # chat ID so replies can be resolved for every clone.
+                    await save_private_message_link(owner,seller_account,copied.message_id,user.id)
 
                 if auto_reply:
                     try:
