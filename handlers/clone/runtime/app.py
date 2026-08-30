@@ -143,7 +143,16 @@ class CloneRuntimeAppMixin:
         app.add_handler(CallbackQueryHandler(forced_join_toggle_callback, pattern=r"^fj_toggle:"))
         app.add_handler(CallbackQueryHandler(forced_join_editor_callback, pattern=r"^fj_editor"))
         app.add_handler(CallbackQueryHandler(group_manager_special_callback, pattern=r"^gmsp"))
-        app.add_handler(CallbackQueryHandler(self.child_callback,pattern=r"^c_")); app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
+        # User callbacks include normal c_* actions, the seller current-plan button,
+        # and shared-editor w_* popup/alert/rules actions. Register all of them
+        # explicitly so generated buttons cannot become dead callbacks.
+        app.add_handler(
+            CallbackQueryHandler(
+                self.child_callback,
+                pattern=r"^(c_|seller_current_plan$|seller_upgrade_plan$|w_)",
+            )
+        )
+        app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
             app.add_handler(handler,group=-7)
