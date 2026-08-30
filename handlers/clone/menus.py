@@ -32,7 +32,14 @@ class CloneMenusMixin:
     async def admin_panel_text(self, owner_id:int, seller_user=None):
         """Build the final live summary shown above the clone-bot admin buttons."""
         try:
-            plan, _assignment = await effective_plan(owner_id)
+            # owner_id is the clone-specific data scope. Seller subscriptions
+            # belong to the real seller account, otherwise Clone 2+ can appear
+            # as Free even when the seller has an active paid plan.
+            seller_account_id = int(getattr(seller_user, "id", 0) or 0)
+            if not seller_account_id:
+                bot_record_for_seller = await get_bot_by_data_owner_id(owner_id) or {}
+                seller_account_id = int(bot_record_for_seller.get("seller_id") or owner_id)
+            plan, _assignment = await effective_plan(seller_account_id)
             bot_record = await get_bot_by_data_owner_id(owner_id) or {}
             settings = await get_seller_settings(owner_id)
             usage = await stats(owner_id)

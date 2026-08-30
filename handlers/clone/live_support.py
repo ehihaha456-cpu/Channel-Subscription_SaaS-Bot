@@ -616,7 +616,7 @@ class CloneLiveSupportMixin:
                 ); return
             if context.user_data.get("wait_referral_unlock_required"):
                 try:
-                    required=int((message.text or "").strip())
+                    required=int((update.effective_message.text or "").strip())
                     if required < 1 or required > 100:
                         raise ValueError
                 except ValueError:

@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.group_manager import get_group, update_welcome, get_auto_reply, get_template
+from database.group_manager import get_group, update_welcome, get_auto_reply, get_template, get_moderation
 from handlers.clone.group_manager_buttons import build_group_keyboard, find_button
 from database.seller_bots import get_bot_by_data_owner_id
 
