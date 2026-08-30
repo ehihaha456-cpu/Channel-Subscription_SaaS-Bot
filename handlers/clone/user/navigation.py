@@ -130,7 +130,11 @@ async def handle(self, update, context, q, owner, action):
             pass
     back_keyboard = self.back(feature_back_callback(context))
     if action == 'seller_current_plan':
-        await q.edit_message_text(await current_plan_text(owner), reply_markup=self.limit_keyboard('a_home'))
+        seller_account_id = self.seller_account(context)
+        await q.edit_message_text(
+            await current_plan_text(seller_account_id),
+            reply_markup=self.limit_keyboard('a_home'),
+        )
         return True
     if action == 'seller_upgrade_plan':
         cfg = await get_config()
