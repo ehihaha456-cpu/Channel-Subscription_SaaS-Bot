@@ -18,7 +18,10 @@ async def handle(self, update, context, q, owner, action):
             qr_file_id = str(s.get('upi_qr_file_id') or '')
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         gateways = gateway_cfg.get('gateways') or {}
+        currency = normalize_currency(s.get('currency')) or 'INR'
         enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get('enabled')]
+        if currency != 'INR':
+            enabled = []
         default_gateway = str(gateway_cfg.get('default_gateway') or '')
         if default_gateway in enabled:
             enabled.remove(default_gateway)
@@ -29,10 +32,10 @@ async def handle(self, update, context, q, owner, action):
         text = ''
         if enabled:
             gateway = enabled[0]
-            tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency='INR', purpose='child_subscription', reference_id=plan['plan_id'], metadata={'plan_id': plan['plan_id'], 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
+            tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency=currency, purpose='child_subscription', reference_id=plan['plan_id'], metadata={'plan_id': plan['plan_id'], 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
             try:
                 checkout = await create_checkout(tx)
-                text = f"💳 {gateway.title()} Payment\n\nPlan: {plan['name']}\nAmount: ₹{plan['price']:g}\nTransaction: {tx['transaction_id']}\n\nPayment successful hone ke baad plan automatically activate hoga."
+                text = f"💳 {gateway.title()} Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment successful hone ke baad plan automatically activate hoga."
                 rows.append([InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))])
             except GatewayError as exc:
                 text = f'❌ Gateway error: {exc}'
@@ -47,9 +50,12 @@ async def handle(self, update, context, q, owner, action):
                 f"💳 Payment\n\nPlan: {plan['name']}\n{stars_line}"
             )
         if manual_enabled:
-            manual_text = f"Plan: {plan['name']}\nAmount: {s.get('currency', 'INR')} {plan['price']:g}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay and upload your payment screenshot."
+            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay and upload your payment screenshot."
             text = f'{text}\n\n{manual_text}' if text else f'💳 Payment\n\n{manual_text}'
             rows.append([InlineKeyboardButton('📤 Upload Payment Screenshot', callback_data='c_upload')])
+        if not enabled and currency != 'INR':
+            notice = f'⚠️ Automatic checkout is currently unavailable for {currency} in this bot. Use Manual Payment or Telegram Stars.'
+            text = f'{text}\n\n{notice}' if text else notice
         if not enabled and (not manual_enabled) and not (stars_enabled and stars_price > 0):
             text = '⚠️ No payment method is currently available. Please contact support.'
         rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
@@ -91,13 +97,18 @@ async def handle(self, update, context, q, owner, action):
         if not plan:
             await q.answer('Plan not found', show_alert=True)
             return True
-        tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency='INR', purpose='child_subscription', reference_id=plan_id, metadata={'plan_id': plan_id, 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
+        s = await get_seller_settings(owner)
+        currency = normalize_currency(s.get('currency')) or 'INR'
+        if currency != 'INR':
+            await self.safe_query_message(q, f'⚠️ {gateway.title()} automatic checkout is currently configured for INR only. Current bot currency is {currency}. Use Manual Payment or change the currency to INR.', back_keyboard)
+            return True
+        tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency=currency, purpose='child_subscription', reference_id=plan_id, metadata={'plan_id': plan_id, 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
         try:
             checkout = await create_checkout(tx)
         except GatewayError as exc:
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
             return True
-        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: ₹{plan['price']:g}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
+        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True

@@ -39,7 +39,8 @@ async def handle(self, update, context, q, owner, action):
                 start_text = self.format_dt(start, timezone_name, '%d %b %Y, %I:%M %p %Z') if start else 'Unknown'
                 expiry_text = self.format_dt(expiry, timezone_name, '%d %b %Y, %I:%M %p %Z')
                 amount = sub.get('amount')
-                amount_text = f'₹{amount:g}' if isinstance(amount, (int, float)) else str(amount or '—')
+                currency = (await get_seller_settings(owner)).get('currency')
+                amount_text = format_currency(currency, amount) if isinstance(amount, (int, float)) else str(amount or '—')
                 lines.extend(['📌 Status: ✅ Active', f"💎 Plan: {sub.get('plan') or 'Unknown'}", f'💰 Amount: {amount_text}', f"⏳ Duration: {sub.get('duration_text') or '—'}", f'📅 Start Date: {start_text}', f'📅 Expiry: {expiry_text}', f'⏱ Time Left: {days}d {hours}h {minutes}m'])
             else:
                 lines.extend(['📌 Status: ❌ No Active Subscription', f"💎 Last Plan: {(sub or {}).get('plan') or '—'}", f"💰 Amount: {(sub or {}).get('amount') or '—'}", f"⏳ Duration: {(sub or {}).get('duration_text') or '—'}", f'📅 Expiry: {self.format_dt(expiry)}'])
