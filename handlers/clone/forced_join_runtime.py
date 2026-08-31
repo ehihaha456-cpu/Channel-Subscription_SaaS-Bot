@@ -59,14 +59,12 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
     item=await get_forced_join_editor(owner)
     if not item:
         return
+    # Editor status must use the stored template itself. Runtime variables
+    # ({first_name}, {username}, etc.) are rendered only when an actual user
+    # receives the approval message. Trying to resolve a user here caused the
+    # editor to crash because this admin callback has no `bot`/`user_id`.
     raw_text=item.get("text") or ""
-    try:
-        user = await bot.get_chat(int(user_id))
-    except Exception:
-        # Approval messages can be sent to join-request users before /start.
-        # Keep delivery working even if Telegram does not expose full profile data.
-        user = type("JoinRequestUser", (), {"id": user_id, "first_name": "", "last_name": "", "username": "", "language_code": ""})()
-    text=_render_forced_join_variables(raw_text, user)
+    text=raw_text
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     markup=_approval_markup(buttons)
