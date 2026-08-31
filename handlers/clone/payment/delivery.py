@@ -106,9 +106,11 @@ class ClonePaymentDeliveryMixin:
         safe_username = html.escape(f"@{username}" if username else "Not Set")
         mention = f'<a href="tg://user?id={user_id}">{safe_name}</a>'
         amount = float(details.get("amount") or 0)
+        settings = await get_seller_settings(owner_id)
+        currency = settings.get('currency')
         stars_amount = int(details.get("stars_amount") or 0)
         gateway = str(details.get("gateway") or "-").title()
-        amount_line = f"• Amount: ⭐{stars_amount}\n" if stars_amount else f"• Amount: ₹{amount:g}\n"
+        amount_line = f"• Amount: ⭐{stars_amount}\n" if stars_amount else f"• Amount: {format_currency(currency, amount)}\n"
 
         text = (
             "💰 <b>Automatic Payment Successful</b>\n\n"
@@ -368,7 +370,7 @@ class ClonePaymentDeliveryMixin:
                     success_amount_line = (
                         f"💰 Amount: ⭐{int(success_details.get('stars_amount') or 0)}\n"
                         if success_details.get('stars_amount')
-                        else f"💰 Amount: ₹{float(success_details.get('amount') or 0):g}\n"
+                        else f"💰 Amount: {format_currency((await get_seller_settings(owner_id)).get('currency'), float(success_details.get('amount') or 0))}\n"
                     )
                     text = (
                         "✅ Payment verified automatically\n"
