@@ -47,8 +47,23 @@ class CloneMenusMixin:
             settings = await get_seller_settings(owner_id)
             usage = await stats(owner_id)
 
-            seller_username = getattr(seller_user, "username", None)
-            seller_label = f"@{seller_username}" if seller_username else str(getattr(seller_user, "full_name", None) or owner_id)
+            # Always display the real seller who owns this clone. The user opening
+            # the panel can be a staff/admin, so seller_user must not be used as
+            # the seller identity here.
+            seller_record = await get_database()["sellers"].find_one({"owner_id": seller_account_id}) or {}
+            seller_username = seller_record.get("username")
+            seller_name = (
+                seller_record.get("full_name")
+                or seller_record.get("first_name")
+                or seller_record.get("name")
+                or None
+            )
+            if seller_username:
+                seller_label = f"@{seller_username}"
+            elif seller_name:
+                seller_label = str(seller_name)
+            else:
+                seller_label = str(seller_account_id)
             clone_username = (bot_record.get("bot_username") or "Not configured").lstrip("@")
             clone_label = f"@{clone_username}" if clone_username != "Not configured" else clone_username
             currency = settings.get("currency") or "INR"
