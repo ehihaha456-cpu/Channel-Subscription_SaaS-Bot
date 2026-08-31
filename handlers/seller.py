@@ -542,6 +542,14 @@ async def send_business_automation(message, owner_id: int):
         reply_markup=business_automation_keyboard(connected, enabled),
     )
 
+async def _clone_scope_for(owner_id: int, bot_id: int) -> int:
+    """Resolve a clone-specific data scope and verify seller ownership."""
+    record = await get_bot_by_bot_id(int(bot_id))
+    if not record or int(record.get("owner_id", 0)) != int(owner_id):
+        raise ValueError("Clone bot not found")
+    return int(record.get("data_owner_id") or owner_id)
+
+
 async def clone_list_markup(owner_id: int):
     bots = await get_bots(owner_id)
     rows = []
@@ -884,7 +892,10 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(bots) == 1:
                 selected_id = int(bots[0].get("bot_id") or 0)
         if not selected_id:
-            await q.answer("Please select a clone bot first.", show_alert=True)
+            await q.edit_message_text(
+                "🤖 Select a clone bot first.",
+                reply_markup=await clone_list_markup(owner_id),
+            )
             return
         action = f"{action}_{selected_id}"
 
@@ -954,7 +965,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action.startswith("seller_selected_payment_"):
-        bot_id = int(action.rsplit("_", 1)[1]); settings = await get_seller_settings(owner_id)
+        bot_id = int(action.rsplit("_", 1)[1]); scope_id = await _clone_scope_for(owner_id, bot_id); settings = await get_seller_settings(scope_id)
         await q.edit_message_text(
             f"💳 Payment Settings\n\nUPI Name: {settings.get('upi_name') or 'Not Set'}\n"
             f"UPI ID: {settings.get('upi_id') or 'Not Set'}\nQR: {'Added' if settings.get('upi_qr_file_id') else 'Not Added'}",
@@ -962,7 +973,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ); return
 
     if action.startswith("seller_selected_settings_"):
-        bot_id = int(action.rsplit("_", 1)[1]); settings = await get_seller_settings(owner_id)
+        bot_id = int(action.rsplit("_", 1)[1]); scope_id = await _clone_scope_for(owner_id, bot_id); settings = await get_seller_settings(scope_id)
         await q.edit_message_text(
             "⚙️ Bot Settings\n\n"
             f"Bot Name: {settings.get('bot_name') or '-'}\nSupport: {settings.get('support_username') or '-'}\n"
@@ -1032,7 +1043,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             context.user_data.update({"seller_edit_field": "timezone", "selected_clone_bot_id": bot_id})
             await q.edit_message_text(
-                timezone_guide((await get_seller_settings(owner_id)).get("timezone") or "Asia/Kolkata")
+                timezone_guide((await get_seller_settings(await _clone_scope_for(owner_id, bot_id))).get("timezone") or "Asia/Kolkata")
                 + "\n\nSend the timezone name now.",
                 reply_markup=selected_back(bot_id),
             )
@@ -1041,7 +1052,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not timezone_name:
             await q.answer("Invalid timezone selection.", show_alert=True)
             return
-        await set_seller_setting(owner_id, "timezone", timezone_name)
+        await set_seller_setting(await _clone_scope_for(owner_id, bot_id), "timezone", timezone_name)
         context.user_data.clear()
         await q.edit_message_text(
             f"✅ Timezone updated!\n\nTimezone: {timezone_name}",
@@ -1066,7 +1077,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_id = int(action.rsplit("_", 1)[1])
             context.user_data.clear(); context.user_data.update({"seller_edit_field": field, "selected_clone_bot_id": bot_id})
             if field == "timezone":
-                settings = await get_seller_settings(owner_id)
+                settings = await get_seller_settings(await _clone_scope_for(owner_id, bot_id))
                 await q.edit_message_text(
                     timezone_guide(settings.get("timezone") or "Asia/Kolkata"),
                     reply_markup=timezone_keyboard(f"seller_tz_{bot_id}_", f"seller_selected_settings_{bot_id}"),
@@ -1084,7 +1095,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Send channel/group in this format:\n-1001234567890 | Group Name", reply_markup=selected_back(bot_id)); return
 
     if action.startswith("seller_channel_list_"):
-        bot_id=int(action.rsplit("_",1)[1]); items=await get_channels(owner_id); lines=["📋 Channel / Group List",""]
+        bot_id=int(action.rsplit("_",1)[1]); scope_id=await _clone_scope_for(owner_id, bot_id); items=await get_channels(scope_id); lines=["📋 Channel / Group List",""]
         rows=[]
         if not items: lines.append("No channel or group connected.")
         for item in items:
@@ -1097,8 +1108,9 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = action.split("_")
         bot_id = int(parts[3])
         chat_id = int(parts[4])
-        async with _channel_lock(owner_id):
-            removed = await remove_channel(owner_id, chat_id)
+        scope_id = await _clone_scope_for(owner_id, bot_id)
+        async with _channel_lock(scope_id):
+            removed = await remove_channel(scope_id, chat_id)
         await q.edit_message_text(
             "✅ Channel/group removed." if removed else "ℹ️ Channel/group was already removed.",
             reply_markup=channels_markup(bot_id),
@@ -1115,19 +1127,20 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("⏳ Preparing invite links...")
 
         async def _run_resend():
-            async with _channel_lock(owner_id):
-                running = bot_manager.get_running(bot_id) or bot_manager.get_running(owner_id)
+            scope_id = int(record.get("data_owner_id") or owner_id)
+            async with _channel_lock(scope_id):
+                running = bot_manager.get_running(bot_id)
                 if not running:
                     return {"error": "not_running"}
 
-                channels = tuple(await get_channels(owner_id))
+                channels = tuple(await get_channels(scope_id))
                 if not channels:
                     return {"error": "no_channels"}
 
                 now = datetime.now(timezone.utc)
                 subs = await get_database()["seller_subscriptions"].find(
                     {
-                        "owner_id": owner_id,
+                        "owner_id": scope_id,
                         "active": True,
                         "expiry_date": {"$gt": now},
                     },
@@ -2181,9 +2194,10 @@ async def receive_seller_token(update: Update, context: ContextTypes.DEFAULT_TYP
             except ValueError:
                 await update.effective_message.reply_text("❌ Please send a valid whole number.")
                 return
-        await set_seller_setting(owner_id, field, value)
+        scope_id = await _clone_scope_for(owner_id, bot_id)
+        await set_seller_setting(scope_id, field, value)
         context.user_data.clear()
-        settings = await get_seller_settings(owner_id)
+        settings = await get_seller_settings(scope_id)
         await update.effective_message.reply_text(
             "✅ Setting updated.\n\n"
             f"Bot Name: {settings.get('bot_name') or '-'}\nSupport: {settings.get('support_username') or '-'}\n"
@@ -2245,8 +2259,9 @@ async def receive_seller_token(update: Update, context: ContextTypes.DEFAULT_TYP
             if not title:
                 title = "Telegram Channel/Group"
 
-            async with _channel_lock(owner_id):
-                await add_channel(owner_id, chat_id, title, chat.type)
+            scope_id = await _clone_scope_for(owner_id, bot_id)
+            async with _channel_lock(scope_id):
+                await add_channel(scope_id, chat_id, title, chat.type)
             context.user_data.clear()
             await update.effective_message.reply_text(
                 "✅ Channel/group verified and added successfully.",
@@ -2443,7 +2458,8 @@ async def receive_seller_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     owner_id=int(update.effective_user.id); bot_id=int(context.user_data.get("selected_clone_bot_id") or 0)
     file_id=update.effective_message.photo[-1].file_id
-    await set_seller_setting(owner_id,"upi_qr_file_id",file_id)
+    scope_id=await _clone_scope_for(owner_id, bot_id)
+    await set_seller_setting(scope_id,"upi_qr_file_id",file_id)
     context.user_data.clear()
     await update.effective_message.reply_text("✅ UPI QR updated.", reply_markup=payment_settings_markup(bot_id))
 

@@ -8,7 +8,7 @@ from telegram.error import RetryAfter, TelegramError
 
 from database.admins import is_admin, get_all_admins
 from database.payments import count_pending_payments, total_revenue
-from database.seller_bots import get_bot, get_bots, total_bots, set_bot_active, get_decrypted_bot_token
+from database.seller_bots import get_bot, get_bots, get_bot_by_bot_id, total_bots, set_bot_active, get_decrypted_bot_token
 from database.seller_data import (
     stats as seller_stats,
     get_channels as get_seller_channels,
@@ -1054,26 +1054,41 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = 0
         for seller in sellers:
             owner_id = int(seller["owner_id"])
-            record = await get_bot(owner_id)
-            if not record:
-                continue
-            count += 1
-            lines.append(
-                f"• @{record.get('bot_username')}\n"
-                f"  Seller: {owner_id} | "
-                f"{'Active' if record.get('active') else 'Paused'} | "
-                f"{record.get('runtime_status','unknown')}"
-            )
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🤖 @{record.get('bot_username')[:24]}",
-                    callback_data=f"main_seller_view_{owner_id}",
+            records = await get_bots(owner_id)
+            for record in records:
+                bot_id = int(record.get("bot_id") or 0)
+                if not bot_id:
+                    continue
+                count += 1
+                username = str(record.get("bot_username") or bot_id)
+                lines.append(
+                    f"• @{username}\n"
+                    f"  Seller: {owner_id} | "
+                    f"{'Active' if record.get('active') else 'Paused'} | "
+                    f"{record.get('runtime_status','unknown')}"
                 )
-            ])
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"🤖 @{username[:24]}",
+                        callback_data=f"main_clone_view_{bot_id}",
+                    )
+                ])
         if count == 0:
             lines.append("No clone bots connected.")
         keyboard.append([InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")])
         await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if action.startswith("main_clone_view_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        bot_id = int(action.replace("main_clone_view_", ""))
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or not record.get("active") or record.get("status") == "removed":
+            await query.edit_message_text("❌ Clone bot not found or disconnected.")
+            return
+        await seller_owner_view(query, int(record["owner_id"]))
         return
 
     if action.startswith("main_seller_view_"):
