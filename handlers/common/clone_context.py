@@ -86,6 +86,70 @@ from database.seller_data import (
 
 logger=logging.getLogger(__name__)
 WELCOME_RUNTIME_VERSION="2026-07-13-main-role-dashboard-fix-13"
+
+# Clone-bot currency is a display/plan currency setting. Keep all UI formatting
+# centralized so changing the setting never leaves hard-coded INR symbols behind.
+CURRENCY_INFO = {
+    "INR": ("₹", "Indian Rupee"),
+    "USD": ("$", "US Dollar"),
+    "EUR": ("€", "Euro"),
+    "GBP": ("£", "British Pound"),
+    "AED": ("د.إ", "UAE Dirham"),
+    "CAD": ("CA$", "Canadian Dollar"),
+    "AUD": ("A$", "Australian Dollar"),
+    "SGD": ("S$", "Singapore Dollar"),
+    "JPY": ("¥", "Japanese Yen"),
+    "BDT": ("৳", "Bangladeshi Taka"),
+    "NPR": ("रु", "Nepalese Rupee"),
+    "MYR": ("RM", "Malaysian Ringgit"),
+    "THB": ("฿", "Thai Baht"),
+    "IDR": ("Rp", "Indonesian Rupiah"),
+}
+
+def normalize_currency(value) -> str:
+    code = str(value or "INR").strip().upper()
+    return code if code in CURRENCY_INFO else ""
+
+def currency_symbol(value) -> str:
+    code = normalize_currency(value) or "INR"
+    return CURRENCY_INFO[code][0]
+
+def currency_name(value) -> str:
+    code = normalize_currency(value) or "INR"
+    return CURRENCY_INFO[code][1]
+
+def format_currency(value, amount, *, spaced=False) -> str:
+    code = normalize_currency(value) or "INR"
+    symbol = currency_symbol(code)
+    try:
+        number = f"{float(amount):g}"
+    except (TypeError, ValueError):
+        number = str(amount if amount is not None else 0)
+    # Prefix symbols are conventional for the supported UI currencies.
+    return f"{symbol}{' ' if spaced else ''}{number}"
+
+def currency_settings_text(current) -> str:
+    code = normalize_currency(current) or "INR"
+    symbol = currency_symbol(code)
+    name = currency_name(code)
+    supported = ", ".join(CURRENCY_INFO.keys())
+    return (
+        "💱 Currency Settings\n\n"
+        f"Current Currency: {symbol} {code} — {name}\n\n"
+        "📌 What this setting changes:\n"
+        "• Plan price display\n"
+        "• Plan management and edit screens\n"
+        "• Manual payment amount display\n"
+        "• Payment history, receipts and profile amounts\n"
+        "• Clone dashboard revenue display\n\n"
+        "⚠️ Important:\n"
+        "• Changing currency does NOT convert existing prices. Example: 199 stays 199; only its currency label changes.\n"
+        "• Telegram Stars are always ⭐ and are not converted.\n"
+        "• In this bot, Indian payment gateways are treated as INR-only. For a non-INR currency, use Manual Payment or configure a gateway that supports that currency before enabling automatic checkout.\n\n"
+        f"Supported codes: {supported}\n\n"
+        "Send one 3-letter currency code, for example: USD"
+    )
+
 MAIN_BOT_USERNAME=os.getenv("MAIN_BOT_USERNAME","Local_supplier3_bot").lstrip("@")
 
 
