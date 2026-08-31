@@ -127,32 +127,54 @@ async def owner_dashboard_text():
 
 
 async def seller_dashboard_text(user_id: int):
-    record = await get_bot(user_id)
+    """Seller dashboard summary across all active clone bots.
 
-    if not record:
+    Never resolve a seller dashboard through ``get_bot(user_id)`` because that
+    returns one arbitrary/first clone in a multi-clone account.
+    """
+    records = await get_bots(user_id)
+    records = [r for r in records if r.get("active") and r.get("status") != "removed"]
+    if not records:
         return (
             "🏪 Seller Dashboard\n\n"
-            "No child bot connected yet.\n\n"
+            "No clone bot connected yet.\n\n"
             "Tap “Create / Connect clone Bot”, create a bot from @BotFather, "
             "then send its token securely."
         ), None
 
-    child_stats = await performance_runtime.cached(
-        f"seller_dashboard:{user_id}", 15, lambda: seller_stats(user_id)
-    )
+    db = get_database()
+    total = {"users": 0, "plans": 0, "channels": 0, "pending": 0, "revenue": 0.0}
+    lines = []
+    for index, record in enumerate(records, 1):
+        scope = int(record.get("data_owner_id") or user_id)
+        users = await db["seller_users"].count_documents({"owner_id": scope})
+        plans = await db["seller_plans"].count_documents({"owner_id": scope})
+        channels = await db["seller_channels"].count_documents({"owner_id": scope, "active": {"$ne": False}})
+        pending = await db["seller_payments"].count_documents({"owner_id": scope, "status": "pending"})
+        rows = await db["seller_payments"].aggregate([
+            {"$match": {"owner_id": scope, "status": "approved"}},
+            {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+        ]).to_list(length=1)
+        revenue = float(rows[0].get("total", 0) or 0) if rows else 0.0
+        total["users"] += users; total["plans"] += plans; total["channels"] += channels
+        total["pending"] += pending; total["revenue"] += revenue
+        lines.append(
+            f"• Clone {index}: @{record.get('bot_username','-')} — "
+            f"{'🟢 Active' if record.get('active') else '⏸ Paused'}"
+        )
+
     return (
         "🏪 Seller Dashboard\n\n"
-        f"🤖 Bot: @{record.get('bot_username','-')}\n"
-        f"📌 Status: {'🟢 Active' if record.get('active') else '⏸ Paused'}\n"
-        f"⚙ Runtime: {record.get('runtime_status','unknown')}\n\n"
-        f"👥 Users: {child_stats.get('users',0)}\n"
-        f"📦 Plans: {child_stats.get('plans',0)}\n"
-        f"📢 Channels/Groups: {child_stats.get('channels',0)}\n"
-        f"📨 Pending Payments: {child_stats.get('pending',0)}\n"
-        f"💰 Revenue: ₹{child_stats.get('revenue',0):g}\n\n"
-        "Open your clone bot and send /admin for plan, payment, user, "
-        "broadcast and channel controls."
-    ), record
+        f"🤖 Connected Clone Bots: {len(records)}\n"
+        + "\n".join(lines)
+        + "\n\n"
+        f"👥 Total Users: {total['users']}\n"
+        f"📦 Plans: {total['plans']}\n"
+        f"📢 Channels/Groups: {total['channels']}\n"
+        f"📨 Pending Payments: {total['pending']}\n"
+        f"💰 Total Revenue: ₹{total['revenue']:g}\n\n"
+        "Open a clone bot and send /admin for clone-specific controls."
+    ), records[0]
 
 
 def _aware_utc(value):
@@ -174,10 +196,22 @@ def _limit_display(value):
 async def seller_profile_text(user):
     owner_id=int(user.id)
     seller=await get_or_create_seller(user)
-    record=await get_bot(owner_id)
+    records=await get_bots(owner_id)
+    records=[r for r in records if r.get("active") and r.get("status") != "removed"]
+    record=records[0] if records else None
     plan,assignment=await effective_plan(owner_id)
     usage=await seller_usage(owner_id)
-    child_stats=await seller_stats(owner_id)
+    db=get_database()
+    child_stats={"users":0,"pending":0,"revenue":0.0}
+    for clone in records:
+        scope=int(clone.get("data_owner_id") or owner_id)
+        child_stats["users"] += await db["seller_users"].count_documents({"owner_id":scope})
+        child_stats["pending"] += await db["seller_payments"].count_documents({"owner_id":scope,"status":"pending"})
+        rows=await db["seller_payments"].aggregate([
+            {"$match":{"owner_id":scope,"status":"approved"}},
+            {"$group":{"_id":None,"total":{"$sum":{"$ifNull":["$amount",0]}}}},
+        ]).to_list(length=1)
+        child_stats["revenue"] += float(rows[0].get("total",0) or 0) if rows else 0.0
 
     expiry=_aware_utc((assignment or {}).get("expiry_date"))
     now=datetime.now(timezone.utc)
@@ -221,9 +255,9 @@ async def seller_profile_text(user):
         except (TypeError,ValueError,ZeroDivisionError):
             pass
 
-    bot_username=f"@{record.get('bot_username')}" if record and record.get("bot_username") else "Not connected"
-    bot_status=("🟢 Active" if record and record.get("active") else "⏸ Paused / Not connected")
-    runtime=(record or {}).get("runtime_status","-")
+    bot_username=(f"{len(records)} active clone bot(s)" if records else "Not connected")
+    bot_status=("🟢 Active" if records else "⏸ Paused / Not connected")
+    runtime="Multiple runtimes" if len(records)>1 else ((record or {}).get("runtime_status","-"))
 
     text=(
         "👤 Seller Profile\n\n"
@@ -379,12 +413,16 @@ async def _owner_access_link_for_channel(bot_record: dict, channel: dict) -> str
                 pass
 
 
-async def _seller_owner_details(owner_id: int):
+async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = None):
     seller = await get_seller(owner_id)
     if not seller:
         return None, None
 
     bots = await get_bots(owner_id)
+    if selected_bot_id is not None:
+        bots = [b for b in bots if int(b.get("bot_id") or 0) == int(selected_bot_id)]
+        if not bots:
+            return None, None
     plan, assignment = await effective_plan(owner_id)
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -509,8 +547,8 @@ async def _seller_owner_details(owner_id: int):
     mention = f'<a href="tg://user?id={int(owner_id)}">{name}</a>'
     suspended = bool(seller.get("suspended"))
     text = (
-        "🏪 <b>Seller Details</b>\n\n"
-        "👤 <b>Seller Profile</b>\n"
+        ("🤖 <b>Selected Clone Details</b>\n\n" if selected_bot_id is not None else "🏪 <b>Seller Details</b>\n\n")
+        + "👤 <b>Seller Profile</b>\n"
         f"🆔 Seller ID: <code>{owner_id}</code>\n"
         f"👤 Name: {name}\n"
         f"📝 Username: {username}\n"
@@ -561,8 +599,8 @@ async def _seller_owner_details(owner_id: int):
     return text, InlineKeyboardMarkup(keyboard)
 
 
-async def seller_owner_view(query, owner_id: int):
-    text, keyboard = await _seller_owner_details(owner_id)
+async def seller_owner_view(query, owner_id: int, selected_bot_id: int | None = None):
+    text, keyboard = await _seller_owner_details(owner_id, selected_bot_id)
     if text is None:
         await query.edit_message_text("❌ Seller not found.", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")]
@@ -856,7 +894,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Owner access only.")
             return
         clone_bot_id=int(action.replace("owner_broadcast_pick_",""))
-        record=await get_database()["seller_bots"].find_one({"bot_id": clone_bot_id})
+        record=await get_database()["seller_bots"].find_one({"bot_id": clone_bot_id, "active": True, "status": {"$ne": "removed"}})
         if not record:
             await query.edit_message_text("❌ Clone Bot not found.")
             return
@@ -1095,7 +1133,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not record or not record.get("active") or record.get("status") == "removed":
             await query.edit_message_text("❌ Clone bot not found or disconnected.")
             return
-        await seller_owner_view(query, int(record["owner_id"]))
+        await seller_owner_view(query, int(record["owner_id"]), bot_id)
         return
 
     if action.startswith("main_seller_view_"):
