@@ -175,20 +175,10 @@ class CloneRuntimeLifecycleMixin:
     async def stop_bot(self, bot_id: int, runtime_status="paused"):
         bot_id = int(bot_id)
         async with self._lock_for(bot_id):
+            # Runtime lifecycle is strictly keyed by the unique clone bot ID.
+            # Never fall back to owner/seller IDs here: one seller can own multiple
+            # clones, so such a fallback could stop the wrong clone.
             running = self._running.pop(bot_id, None)
-            if running is None:
-                matched_id = next(
-                    (
-                        rid
-                        for rid, item in self._running.items()
-                        if int(item.owner_id) == bot_id
-                        or int(item.application.bot_data.get("seller_account_id", -1)) == bot_id
-                    ),
-                    None,
-                )
-                if matched_id is not None:
-                    bot_id = int(matched_id)
-                    running = self._running.pop(bot_id, None)
             if running:
                 await self._safe_shutdown(running.application)
             await set_runtime_status(bot_id, runtime_status, None)
