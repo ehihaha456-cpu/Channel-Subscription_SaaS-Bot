@@ -85,9 +85,12 @@ class CloneMediaHandlersMixin:
             if not saved:
                 raise RuntimeError(f"Clone bot record not found: {bot_id}")
 
-            # Preserve the legacy first-bot storage as well. Existing first-bot
-            # data continues to work, while every newer clone gets its own QR.
-            await set_seller_setting(owner, "upi_qr_file_id", file_id)
+            # Only the original legacy-scope clone may mirror its QR into the
+            # old seller_settings location. Newer clones must never overwrite
+            # that shared legacy value.
+            clone_record = await get_bot_by_bot_id(bot_id)
+            if clone_record and int(clone_record.get("data_owner_id") or 0) == int(owner):
+                await set_seller_setting(owner, "upi_qr_file_id", file_id)
 
             # Verify the exact clone record before confirming success.
             if await get_bot_payment_qr(bot_id) != file_id:
