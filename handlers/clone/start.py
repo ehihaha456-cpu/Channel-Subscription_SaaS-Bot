@@ -92,7 +92,7 @@ class CloneStartMixin:
                     "⚙️ Bot Settings\n\n"
                     f"Bot Name: {settings.get('bot_name') or '-'}\n"
                     f"Support: {settings.get('support_username') or '-'}\n"
-                    f"Currency: {settings.get('currency') or 'INR'}\n"
+                    f"Currency: {currency_symbol(settings.get('currency'))} {normalize_currency(settings.get('currency')) or 'INR'} — {currency_name(settings.get('currency'))}\n"
                     f"Timezone: {settings.get('timezone') or 'Asia/Kolkata'}",
                     reply_markup=self.settings_menu(),
                 )
@@ -100,11 +100,12 @@ class CloneStartMixin:
                 await update.effective_message.reply_text("📢 Channels / Groups", reply_markup=self.channels_menu())
             elif target == "admin_stats":
                 data = await stats(owner)
+                settings = await get_seller_settings(owner)
                 await update.effective_message.reply_text(
                     "📊 Statistics\n\n"
                     f"Users: {data.get('users',0)}\nPlans: {data.get('plans',0)}\n"
                     f"Channels/Groups: {data.get('channels',0)}\n"
-                    f"Pending Payments: {data.get('pending',0)}\nRevenue: ₹{data.get('revenue',0):g}",
+                    f"Pending Payments: {data.get('pending',0)}\nRevenue: {format_currency(settings.get('currency'), data.get('revenue',0))}",
                     reply_markup=self.admin_menu(),
                 )
             elif target == "admin_terms":

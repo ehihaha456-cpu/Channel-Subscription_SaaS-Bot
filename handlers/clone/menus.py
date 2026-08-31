@@ -67,7 +67,7 @@ class CloneMenusMixin:
             clone_username = (bot_record.get("bot_username") or "Not configured").lstrip("@")
             clone_label = f"@{clone_username}" if clone_username != "Not configured" else clone_username
             currency = settings.get("currency") or "INR"
-            symbol = "₹" if str(currency).upper() == "INR" else f"{currency} "
+            symbol = currency_symbol(currency)
             runtime_status = str(bot_record.get("runtime_status") or "").lower()
             online = self.is_running(int(bot_record.get("bot_id") or 0)) or runtime_status in {"running", "online", "started"}
             status_text = "🟢 Online" if online else "🔴 Offline"

@@ -445,7 +445,23 @@ class CloneLiveSupportMixin:
                 gateway_cfg=await get_gateway_config("seller",owner,decrypt=True)
                 await update.effective_message.reply_text("✅ Updated",reply_markup=self.manual_payment_menu(bool(gateway_cfg.get("manual_enabled",True))))
                 return
-            mapping=[("wait_bot_name","bot_name",text,self.settings_menu()),("wait_support","support_username",text if text.startswith("@") else "@"+text,self.settings_menu()),("wait_currency","currency",text.upper(),self.settings_menu())]
+            if context.user_data.get("wait_currency"):
+                code = normalize_currency(text)
+                if not code:
+                    supported = ", ".join(CURRENCY_INFO.keys())
+                    await update.effective_message.reply_text(
+                        f"❌ Unsupported currency code.\n\nSupported: {supported}\n\nSend one code, for example: USD",
+                        reply_markup=self.back("a_settings"),
+                    )
+                    return
+                await set_seller_setting(owner, "currency", code)
+                context.user_data.clear()
+                await update.effective_message.reply_text(
+                    f"✅ Currency Updated\n\nNew currency: {currency_symbol(code)} {code} — {currency_name(code)}\n\n📌 All plan screens and manual-payment displays now use this currency label. Existing numeric prices were not converted.",
+                    reply_markup=self.settings_menu(),
+                )
+                return
+            mapping=[("wait_bot_name","bot_name",text,self.settings_menu()),("wait_support","support_username",text if text.startswith("@") else "@"+text,self.settings_menu())]
             for state,key,val,kb in mapping:
                 if context.user_data.get(state): await set_seller_setting(owner,key,val); context.user_data.clear(); await update.effective_message.reply_text("✅ Updated",reply_markup=kb); return
             if context.user_data.get("wait_welcome_text"):

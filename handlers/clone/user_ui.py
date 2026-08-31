@@ -93,7 +93,7 @@ class CloneUserUIMixin:
 
         for plan in plans:
             kb.append([InlineKeyboardButton(
-                f"{plan['name']} — {plan['duration_text']} — ₹{plan['price']:g}",
+                f"{plan['name']} — {plan['duration_text']} — {format_currency((await get_seller_settings(owner)).get('currency'), plan['price'])}",
                 callback_data=f"a_user_apply_manage_{user_id}_{plan['plan_id']}",
             )])
 
@@ -147,7 +147,7 @@ class CloneUserUIMixin:
             f"📝 Username: {username}",
             f"📦 Plan: {payment.get('plan')}",
             f"⏳ Duration: {payment.get('duration_text') or '-'}",
-            f"💰 Amount: ₹{payment.get('amount',0):g}",
+            f"💰 Amount: {format_currency((await get_seller_settings(owner)).get('currency'), payment.get('amount',0))}",
             f"📅 Submitted: {created_text}",
             f"📌 Status: {current_status.title()}",
         ]
