@@ -596,7 +596,8 @@ async def owner_broadcast_menu(query):
 
 async def owner_clone_bot_list(query):
     records = await get_database()["seller_bots"].find(
-        {}, {"owner_id": 1, "bot_id": 1, "data_owner_id": 1, "bot_name": 1, "bot_username": 1, "active": 1, "runtime_status": 1}
+        {"active": True, "status": {"$ne": "removed"}},
+        {"owner_id": 1, "bot_id": 1, "data_owner_id": 1, "bot_name": 1, "bot_username": 1, "active": 1, "runtime_status": 1, "status": 1}
     ).sort("updated_at", -1).to_list(length=50)
     if not records:
         await query.edit_message_text(
@@ -762,10 +763,16 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             payload=await _prepare_cross_bot_payload(message,context.bot)
             if target.startswith("selected:"):
                 selected_bot_id=int(target.split(":",1)[1])
-                records=[await get_database()["seller_bots"].find_one({"bot_id": selected_bot_id})]
+                records=[await get_database()["seller_bots"].find_one({
+                    "bot_id": selected_bot_id,
+                    "active": True,
+                    "status": {"$ne": "removed"},
+                })]
             else:
-                records=await get_database()["seller_bots"].find({}).to_list(length=None)
-            records=[r for r in records if r and r.get("bot_id")]
+                records=await get_database()["seller_bots"].find(
+                    {"active": True, "status": {"$ne": "removed"}}
+                ).to_list(length=None)
+            records=[r for r in records if r and r.get("bot_id") and r.get("active", True) and str(r.get("status") or "").lower() != "removed"]
             total=0
             for clone_record in records:
                 clone_bot_id=int(clone_record["bot_id"])
