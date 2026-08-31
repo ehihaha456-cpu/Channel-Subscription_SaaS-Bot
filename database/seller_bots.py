@@ -61,20 +61,28 @@ async def initialize_seller_bot_indexes():
 
 
 async def get_bot(owner_id: int):
-    """Backward-compatible: return seller's first/oldest clone bot."""
+    """Backward-compatible: return seller's first active clone bot.
+
+    Soft-removed records are intentionally preserved for reconnect/data restore,
+    but must never consume an active clone slot or become the default clone.
+    """
     return await seller_bots_collection().find_one(
-        {"owner_id": int(owner_id)}, sort=[("created_at", 1)]
+        {"owner_id": int(owner_id), "active": True, "status": {"$ne": "removed"}},
+        sort=[("created_at", 1)],
     )
 
 
 async def get_bots(owner_id: int):
+    """Return only currently connected clones for normal UI/quota/runtime use."""
     return await seller_bots_collection().find(
-        {"owner_id": int(owner_id)}
+        {"owner_id": int(owner_id), "active": True, "status": {"$ne": "removed"}}
     ).sort("created_at", 1).to_list(length=None)
 
 
 async def count_owner_bots(owner_id: int):
-    return await seller_bots_collection().count_documents({"owner_id": int(owner_id)})
+    return await seller_bots_collection().count_documents(
+        {"owner_id": int(owner_id), "active": True, "status": {"$ne": "removed"}}
+    )
 
 
 async def get_bot_by_bot_id(bot_id: int):
@@ -199,10 +207,9 @@ async def save_bot(owner_id: int, bot_id: int, bot_name: str, bot_username: str,
 
 
 async def get_decrypted_bot_token(bot_id: int):
-    record = await get_bot_by_bot_id(bot_id)
-    if not record:
-        record = await get_bot(bot_id)
-    if not record:
+    # Token lookup is clone-runtime identity only; seller IDs are not bot IDs.
+    record = await get_bot_by_bot_id(int(bot_id))
+    if not record or record.get("status") == "removed":
         return None
     encrypted = record.get("bot_token_encrypted")
     return decrypt_secret(encrypted) if encrypted else None
@@ -358,4 +365,7 @@ async def bot_exists(owner_id: int):
 
 
 async def total_bots():
-    return await seller_bots_collection().count_documents({})
+    """Count currently connected clone bots, excluding preserved removed records."""
+    return await seller_bots_collection().count_documents(
+        {"active": True, "status": {"$ne": "removed"}}
+    )
