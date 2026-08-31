@@ -59,10 +59,14 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
     item=await get_forced_join_editor(owner)
     if not item:
         return
-    # Editor setup page must show the stored template exactly as configured.
-    # Runtime variables (e.g. {first_name}) are rendered only when the approval
-    # message is actually delivered to a real user.
-    text=item.get("text") or ""
+    raw_text=item.get("text") or ""
+    try:
+        user = await bot.get_chat(int(user_id))
+    except Exception:
+        # Approval messages can be sent to join-request users before /start.
+        # Keep delivery working even if Telegram does not expose full profile data.
+        user = type("JoinRequestUser", (), {"id": user_id, "first_name": "", "last_name": "", "username": "", "language_code": ""})()
+    text=_render_forced_join_variables(raw_text, user)
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     markup=_approval_markup(buttons)
@@ -404,14 +408,9 @@ async def forced_join_message_editor(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     item=await get_forced_join_editor(owner)
     enabled=await get_forced_join_editor_enabled(owner)
-    raw_text=item.get("text") or ""
-    try:
-        user = await bot.get_chat(int(user_id))
-    except Exception:
-        # Approval messages can be sent to join-request users before /start.
-        # Keep delivery working even if Telegram does not expose full profile data.
-        user = type("JoinRequestUser", (), {"id": user_id, "first_name": "", "last_name": "", "username": "", "language_code": ""})()
-    text=_render_forced_join_variables(raw_text, user)
+    # Editor page has no target user. Keep configured variables untouched here;
+    # they are resolved only when the approval message is actually delivered.
+    text=item.get("text") or ""
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     button_count=sum(1 for row in buttons for b in row if b.get("type") in {"url","callback"})
