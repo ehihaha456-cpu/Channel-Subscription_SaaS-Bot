@@ -1,5 +1,6 @@
 import re
 import html
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
@@ -7,6 +8,8 @@ from telegram.ext import ContextTypes
 from database.group_manager import get_group, update_welcome, get_auto_reply, get_template, get_moderation
 from handlers.clone.group_manager_buttons import build_group_keyboard, find_button
 from database.seller_bots import get_bot_by_data_owner_id
+
+logger = logging.getLogger(__name__)
 
 
 async def vars_text(text, user, chat, bot):
@@ -50,13 +53,28 @@ async def vars_text(text, user, chat, bot):
     return text
 
 async def _send(bot,chat_id,item,text,markup,reply_to=None):
-    media=item.get('media') or []; common={'chat_id':chat_id,'parse_mode':'HTML','reply_markup':markup}
-    if reply_to: common['reply_to_message_id']=reply_to
-    if not media: return await bot.send_message(text=text,**common)
-    e=media[0]; typ=e.get('type'); fid=e.get('file_id'); common['caption']=text
-    if typ=='photo': return await bot.send_photo(photo=fid,**common)
-    if typ=='video': return await bot.send_video(video=fid,**common)
-    return await bot.send_document(document=fid,**common)
+    """Send a configured group-manager item without dropping button-only setups."""
+    media = item.get('media') or []
+    common = {'chat_id': chat_id, 'parse_mode': 'HTML', 'reply_markup': markup}
+    if reply_to:
+        common['reply_to_message_id'] = reply_to
+
+    if not media:
+        # Telegram cannot send an empty text message. A Welcome configured with
+        # only inline buttons is still a valid setup, so keep the buttons and
+        # provide a minimal fallback message instead of silently doing nothing.
+        return await bot.send_message(text=text or '👋 Welcome!', **common)
+
+    entry = media[0]
+    typ = entry.get('type')
+    fid = entry.get('file_id')
+    if text:
+        common['caption'] = text
+    if typ == 'photo':
+        return await bot.send_photo(photo=fid, **common)
+    if typ == 'video':
+        return await bot.send_video(video=fid, **common)
+    return await bot.send_document(document=fid, **common)
 
 async def _markup(owner,item,item_key):
     return build_group_keyboard(item.get('buttons'),item_key=item_key)
@@ -89,36 +107,66 @@ async def _delete_join_service_after_welcome(context, chat_id: int, message_id: 
 
 
 async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    m=update.effective_message
-    if not m or m.chat.type not in {'group','supergroup'}: return
-    owner=int(context.application.bot_data.get('seller_owner_id') or 0); doc=await get_group(owner,m.chat.id,m.chat.title or 'Group'); item=doc.get('welcome') or {}
-    if not item.get('enabled') or not (item.get('text') or item.get('media')): return
-    markup=await _markup(owner,item,'w')
-    for user in m.new_chat_members or []:
-        if user.is_bot: continue
+    """Send the selected group's Welcome to every newly joined human member.
 
-        # Subscription Guard is intentionally executed before this handler.
-        # Send the welcome only if the user survived that guard and is still
-        # a member of the group.
-        if not await _subscription_guard_allows_welcome(
-            context, m.chat.id, user.id
-        ):
+    The runtime must treat text, media and buttons as independent Welcome
+    components. Previously a buttons-only Welcome was rejected before sending,
+    which made the editor show configured buttons while no message appeared in
+    the actual group.
+    """
+    m = update.effective_message
+    if not m or m.chat.type not in {'group', 'supergroup'}:
+        return
+
+    owner = int(
+        context.application.bot_data.get('data_owner_id')
+        or context.application.bot_data.get('seller_owner_id')
+        or 0
+    )
+    if not owner:
+        logger.warning('Group Welcome skipped: missing clone data owner chat_id=%s', m.chat.id)
+        return
+
+    doc = await get_group(owner, m.chat.id, m.chat.title or 'Group')
+    item = doc.get('welcome') or {}
+    configured = bool(item.get('text') or item.get('media') or item.get('buttons'))
+    if not item.get('enabled') or not configured:
+        return
+
+    try:
+        markup = await _markup(owner, item, 'w')
+    except Exception:
+        # A malformed legacy button must not disable the Welcome itself.
+        logger.exception('Group Welcome keyboard build failed owner=%s chat_id=%s', owner, m.chat.id)
+        markup = None
+
+    for user in m.new_chat_members or []:
+        if user.is_bot:
+            continue
+        if not await _subscription_guard_allows_welcome(context, m.chat.id, user.id):
             continue
 
         old_welcome_id = int(item.get('last_message_id') or 0) if item.get('delete_last_welcome') else 0
-        sent=await _send(context.bot,m.chat.id,item,await vars_text(item.get('text') or '', user, m.chat, context.bot),markup)
+        try:
+            rendered = await vars_text(item.get('text') or '', user, m.chat, context.bot)
+            sent = await _send(context.bot, m.chat.id, item, rendered, markup)
+        except Exception:
+            # Never let one failed user/message stop the remaining join batch.
+            logger.exception(
+                'Group Welcome send failed owner=%s chat_id=%s user_id=%s',
+                owner, m.chat.id, getattr(user, 'id', None),
+            )
+            continue
+
         if sent:
-            item['last_message_id']=sent.message_id
-            await update_welcome(owner,m.chat.id,last_message_id=sent.message_id)
+            item['last_message_id'] = sent.message_id
+            await update_welcome(owner, m.chat.id, last_message_id=sent.message_id)
             await _delete_join_service_after_welcome(context, m.chat.id, m.message_id, owner)
 
-            # Cleanup of the previous Welcome must never delay the new one.
             if old_welcome_id:
-                async def _delete_previous():
+                async def _delete_previous(message_id=old_welcome_id):
                     try:
-                        await context.bot.delete_message(
-                            chat_id=m.chat.id, message_id=old_welcome_id
-                        )
+                        await context.bot.delete_message(chat_id=m.chat.id, message_id=message_id)
                     except Exception:
                         pass
                 context.application.create_task(_delete_previous())
