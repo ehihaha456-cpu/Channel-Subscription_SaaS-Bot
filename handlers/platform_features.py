@@ -469,7 +469,7 @@ def handlers():
     return [
         CallbackQueryHandler(
             owner_feature_callback,
-            pattern=r"^owner_(seller_management_plus|backup_export|backup_restore|health|health_refresh|health_offline|audit|terms_policy)$",
+            pattern=r"^owner_(seller_management_plus|backup_export|backup_restore|health|health_refresh|health_offline|audit|terms_policy|performance|performance_refresh|performance_optimize)$",
         ),
         MessageHandler(filters.Document.ALL, owner_backup_document),
     ]

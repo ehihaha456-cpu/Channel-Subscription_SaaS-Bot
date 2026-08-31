@@ -872,6 +872,19 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = int(q.from_user.id)
     action = q.data
 
+    # Normalize legacy single-clone dashboard callbacks to the selected clone.
+    # New multi-clone callbacks already carry the bot_id suffix.
+    if action in {"seller_my_bot", "seller_pause", "seller_resume", "seller_replace", "seller_remove"}:
+        selected_id = int(context.user_data.get("selected_clone_bot_id") or 0)
+        if not selected_id:
+            bots = await get_bots(owner_id)
+            if len(bots) == 1:
+                selected_id = int(bots[0].get("bot_id") or 0)
+        if not selected_id:
+            await q.answer("Please select a clone bot first.", show_alert=True)
+            return
+        action = f"{action}_{selected_id}"
+
     # Fallback for Open Admin Panel when a clone username is unavailable.
     # A Telegram deep-link cannot be constructed without a public bot username,
     # so handle this callback explicitly instead of leaving the button dead.
@@ -2530,7 +2543,7 @@ def _decision_result_text(purchase: dict) -> str:
 
 def seller_handlers():
     return [
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace_\d+|pause_\d+|resume_\d+|remove_\d+|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
         MessageHandler(filters.PHOTO | filters.VIDEO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]

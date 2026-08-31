@@ -1023,7 +1023,7 @@ def admin_handlers():
         CommandHandler("removeadmin", remove_admin_command),
         CommandHandler("addchannel", add_channel_start),
         CommandHandler("removechannel", remove_channel_command),
-        CallbackQueryHandler(admin_buttons, pattern=r"^(admin_|user_|owner_su_|set_upi_|set_timezone$)"),
+        CallbackQueryHandler(admin_buttons, pattern=r"^(admin_|user_|owner_su_|set_upi_|set_timezone$|set_bot_name$|set_welcome_message$|set_support_username$|set_currency$|set_reminder_days$)"),
         MessageHandler(filters.FORWARDED, receive_channel_forward),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_text),
     ]
