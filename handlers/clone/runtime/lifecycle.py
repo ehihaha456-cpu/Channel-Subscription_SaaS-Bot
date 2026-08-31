@@ -15,10 +15,10 @@ class CloneRuntimeLifecycleMixin:
                     return True
                 self._running.pop(bot_id, None)
 
+            # Runtime lifecycle identity is always the unique Telegram clone bot_id.
+            # Never fall back to seller/owner ID: one seller may own many clones.
             record = await get_bot_by_bot_id(bot_id)
-            if not record:
-                record = await get_bot(bot_id)
-            if not record or not record.get("active"):
+            if not record or not record.get("active") or record.get("status") == "removed":
                 return False
 
             bot_id = int(record["bot_id"])
