@@ -2,6 +2,7 @@ import re
 import html
 import logging
 from datetime import datetime
+import time
 from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -106,70 +107,134 @@ async def _delete_join_service_after_welcome(context, chat_id: int, message_id: 
         pass
 
 
-async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    """Send the selected group's Welcome to every newly joined human member.
+def _welcome_join_seen(context, chat_id: int, user_id: int, *, ttl_seconds: int = 30) -> bool:
+    """Return True when this join was already welcomed recently.
 
-    The runtime must treat text, media and buttons as independent Welcome
-    components. Previously a buttons-only Welcome was rejected before sending,
-    which made the editor show configured buttons while no message appeared in
-    the actual group.
+    Telegram can deliver the same join as both a CHAT_MEMBER update and a
+    NEW_CHAT_MEMBERS service message. Keep a short per-clone dedupe window so
+    the fallback handler never creates duplicate welcomes.
     """
-    m = update.effective_message
-    if not m or m.chat.type not in {'group', 'supergroup'}:
-        return
+    now_ts = time.monotonic()
+    store = context.application.bot_data.setdefault("group_welcome_recent_joins", {})
+    # Cheap opportunistic cleanup; this dict stays small in normal groups.
+    stale = [key for key, ts in store.items() if now_ts - float(ts or 0) > ttl_seconds]
+    for key in stale:
+        store.pop(key, None)
+    key = (int(chat_id), int(user_id))
+    if key in store:
+        return True
+    store[key] = now_ts
+    return False
 
+
+async def _send_group_welcome_for_user(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat,
+    user,
+    service_message=None,
+) -> bool:
+    """Shared Welcome sender for NEW_CHAT_MEMBERS and CHAT_MEMBER updates."""
     owner = int(
         context.application.bot_data.get('data_owner_id')
         or context.application.bot_data.get('seller_owner_id')
         or 0
     )
-    if not owner:
-        logger.warning('Group Welcome skipped: missing clone data owner chat_id=%s', m.chat.id)
-        return
+    if not owner or not chat or not user or user.is_bot:
+        return False
 
-    doc = await get_group(owner, m.chat.id, m.chat.title or 'Group')
+    doc = await get_group(owner, chat.id, getattr(chat, 'title', None) or 'Group')
     item = doc.get('welcome') or {}
     configured = bool(item.get('text') or item.get('media') or item.get('buttons'))
     if not item.get('enabled') or not configured:
-        return
+        return False
+
+    if _welcome_join_seen(context, chat.id, user.id):
+        logger.debug('Group Welcome duplicate join ignored owner=%s chat_id=%s user_id=%s', owner, chat.id, user.id)
+        return False
+
+    if not await _subscription_guard_allows_welcome(context, chat.id, user.id):
+        return False
 
     try:
         markup = await _markup(owner, item, 'w')
     except Exception:
-        # A malformed legacy button must not disable the Welcome itself.
-        logger.exception('Group Welcome keyboard build failed owner=%s chat_id=%s', owner, m.chat.id)
+        logger.exception('Group Welcome keyboard build failed owner=%s chat_id=%s', owner, chat.id)
         markup = None
 
+    old_welcome_id = int(item.get('last_message_id') or 0) if item.get('delete_last_welcome') else 0
+    try:
+        rendered = await vars_text(item.get('text') or '', user, chat, context.bot)
+        sent = await _send(context.bot, chat.id, item, rendered, markup)
+    except Exception:
+        logger.exception(
+            'Group Welcome send failed owner=%s chat_id=%s user_id=%s',
+            owner, chat.id, getattr(user, 'id', None),
+        )
+        return False
+
+    if not sent:
+        return False
+
+    item['last_message_id'] = sent.message_id
+    await update_welcome(owner, chat.id, last_message_id=sent.message_id)
+
+    if service_message is not None:
+        await _delete_join_service_after_welcome(
+            context,
+            chat.id,
+            service_message.message_id,
+            owner,
+        )
+
+    if old_welcome_id:
+        async def _delete_previous(message_id=old_welcome_id, target_chat_id=chat.id):
+            try:
+                await context.bot.delete_message(chat_id=target_chat_id, message_id=message_id)
+            except Exception:
+                pass
+        context.application.create_task(_delete_previous())
+    return True
+
+
+async def group_manager_new_members(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    """Primary Welcome path for NEW_CHAT_MEMBERS service messages."""
+    m = update.effective_message
+    if not m or m.chat.type not in {'group', 'supergroup'}:
+        return
+
     for user in m.new_chat_members or []:
-        if user.is_bot:
-            continue
-        if not await _subscription_guard_allows_welcome(context, m.chat.id, user.id):
-            continue
+        await _send_group_welcome_for_user(
+            context,
+            chat=m.chat,
+            user=user,
+            service_message=m,
+        )
 
-        old_welcome_id = int(item.get('last_message_id') or 0) if item.get('delete_last_welcome') else 0
-        try:
-            rendered = await vars_text(item.get('text') or '', user, m.chat, context.bot)
-            sent = await _send(context.bot, m.chat.id, item, rendered, markup)
-        except Exception:
-            # Never let one failed user/message stop the remaining join batch.
-            logger.exception(
-                'Group Welcome send failed owner=%s chat_id=%s user_id=%s',
-                owner, m.chat.id, getattr(user, 'id', None),
-            )
-            continue
 
-        if sent:
-            item['last_message_id'] = sent.message_id
-            await update_welcome(owner, m.chat.id, last_message_id=sent.message_id)
-            await _delete_join_service_after_welcome(context, m.chat.id, m.message_id, owner)
+async def group_manager_chat_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback Welcome path for join events delivered only as CHAT_MEMBER.
 
-            if old_welcome_id:
-                async def _delete_previous(message_id=old_welcome_id):
-                    try:
-                        await context.bot.delete_message(chat_id=m.chat.id, message_id=message_id)
-                    except Exception:
-                        pass
-                context.application.create_task(_delete_previous())
+    Some groups/runtime configurations receive membership joins as chat_member
+    updates without a usable NEW_CHAT_MEMBERS service message. The old runtime
+    listened only to the latter, so the editor looked configured but nothing was
+    sent. This handler covers that update type while short-term dedupe prevents
+    double welcomes when Telegram sends both forms.
+    """
+    event = update.chat_member
+    if not event or getattr(event.chat, 'type', None) not in {'group', 'supergroup'}:
+        return
+
+    old_status = getattr(event.old_chat_member, 'status', '')
+    new_status = getattr(event.new_chat_member, 'status', '')
+    joined = old_status in {'left', 'kicked'} and new_status in {
+        'member', 'restricted', 'administrator', 'creator', 'owner'
+    }
+    if not joined:
+        return
+
+    user = event.new_chat_member.user
+    await _send_group_welcome_for_user(context, chat=event.chat, user=user)
 
 async def group_manager_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
     m=update.effective_message
