@@ -2,7 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
-from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_message, group_manager_special_callback
+from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_chat_member_welcome, group_manager_message, group_manager_special_callback
 from handlers.clone.group_manager_protection_runtime import group_manager_protection_message, anti_flood_message
 from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_info_callback, forced_join_message_editor, forced_join_editor_callback, forced_join_editor_text_input, forced_join_editor_media_input, forced_join_toggle_callback, connect_forced_join_command
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
@@ -163,6 +163,8 @@ class CloneRuntimeAppMixin:
         app.add_handler(ChatJoinRequestHandler(forced_join_request), group=-35)
         app.add_handler(ChatMemberHandler(forced_join_auto_approve, ChatMemberHandler.CHAT_MEMBER), group=-34)
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
+        # Fallback for joins delivered as CHAT_MEMBER updates; NEW_CHAT_MEMBERS below remains the primary path.
+        app.add_handler(ChatMemberHandler(group_manager_chat_member_welcome, ChatMemberHandler.CHAT_MEMBER), group=-28)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, subscription_guard_new_members), group=-29)
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_manager_new_members), group=-28)
         app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-21)
