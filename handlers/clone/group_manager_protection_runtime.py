@@ -367,14 +367,37 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
             )
             return
 
+    # Telegram Links: deletion and punishment are intentionally independent.
+    # "Penalty: Off" must disable only warn/mute/kick/ban; it must NOT disable
+    # link detection or "Delete Messages".  The previous action!=off guard made
+    # the UI show Deletion ON while Telegram deep-links (including ?startgroup=)
+    # were silently allowed.
     tg=spam.get("telegram_links") or {}
-    if tg.get("action","off")!="off" and text:
-        is_tg=bool(re.search(r"(?i)(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/",text))
-        if tg.get("username_antispam") and re.search(r"(?<!\w)@[A-Za-z0-9_]{5,}",text): is_tg=True
-        if tg.get("bots_antispam") and re.search(r"(?i)(?:t\.me/|@)[A-Za-z0-9_]*bot\b",text): is_tg=True
-        if is_tg:
-            if tg.get("delete",False): await _delete_ids(context.bot,chat.id,[m.message_id])
-            await _punish(context.bot,owner,chat.id,user,tg.get("action"),warn_cfg=warns,reason="Telegram link",reply_to=m.message_id)
+    if text:
+        is_tg=bool(re.search(
+            r"(?i)(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/",
+            text,
+        ))
+        if tg.get("username_antispam") and re.search(r"(?<!\w)@[A-Za-z0-9_]{5,}",text):
+            is_tg=True
+        if tg.get("bots_antispam") and re.search(r"(?i)(?:t\.me/|@)[A-Za-z0-9_]*bot\b",text):
+            is_tg=True
+
+        # Run when at least one Telegram protection action is configured.
+        # This keeps the feature dormant when everything is OFF, while allowing
+        # delete-only moderation with Penalty set to Off.
+        tg_action=str(tg.get("action","off") or "off").lower()
+        tg_delete=bool(tg.get("delete",False))
+        tg_enabled=bool(tg.get("username_antispam") or tg.get("bots_antispam") or tg_delete or tg_action!="off")
+        if tg_enabled and is_tg:
+            if tg_delete:
+                await _delete_ids(context.bot,chat.id,[m.message_id])
+            if tg_action!="off":
+                await _punish(
+                    context.bot,owner,chat.id,user,tg_action,
+                    warn_cfg=warns,reason="Telegram link",
+                    reply_to=None if tg_delete else m.message_id,
+                )
             return
 
     total=spam.get("total_links") or {}
