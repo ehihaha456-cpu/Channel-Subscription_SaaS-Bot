@@ -35,12 +35,15 @@ class CloneMenusMixin:
             # owner_id is the clone-specific data scope. Seller subscriptions
             # belong to the real seller account, otherwise Clone 2+ can appear
             # as Free even when the seller has an active paid plan.
-            seller_account_id = int(getattr(seller_user, "id", 0) or 0)
-            if not seller_account_id:
-                bot_record_for_seller = await get_bot_by_data_owner_id(owner_id) or {}
-                seller_account_id = int(bot_record_for_seller.get("seller_id") or owner_id)
-            plan, _assignment = await effective_plan(seller_account_id)
+            # owner_id is clone data scope. Always resolve the real seller from
+            # the clone record; seller_user may be a staff/admin user.
             bot_record = await get_bot_by_data_owner_id(owner_id) or {}
+            seller_account_id = int(
+                bot_record.get("seller_account_id")
+                or bot_record.get("owner_id")
+                or owner_id
+            )
+            plan, _assignment = await effective_plan(seller_account_id)
             settings = await get_seller_settings(owner_id)
             usage = await stats(owner_id)
 
@@ -51,7 +54,7 @@ class CloneMenusMixin:
             currency = settings.get("currency") or "INR"
             symbol = "₹" if str(currency).upper() == "INR" else f"{currency} "
             runtime_status = str(bot_record.get("runtime_status") or "").lower()
-            online = self.is_running(owner_id) or runtime_status in {"running", "online", "started"}
+            online = self.is_running(int(bot_record.get("bot_id") or 0)) or runtime_status in {"running", "online", "started"}
             status_text = "🟢 Online" if online else "🔴 Offline"
 
             return (
