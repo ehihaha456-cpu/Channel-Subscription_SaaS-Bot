@@ -69,9 +69,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_remove_qr':
         bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
+        clone_record = await get_bot_by_bot_id(bot_id) if bot_id else None
         if bot_id:
             await set_bot_payment_qr(bot_id, "")
-        await set_seller_setting(owner, 'upi_qr_file_id', '')
+        # Do not clear another clone's legacy QR. Only the original clone whose
+        # database scope is the seller account owns the old shared setting.
+        if clone_record and int(clone_record.get('data_owner_id') or 0) == int(owner):
+            await set_seller_setting(owner, 'upi_qr_file_id', '')
         settings = await get_seller_settings(owner)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         manual_enabled = bool(gateway_cfg.get('manual_enabled', True))
@@ -217,7 +221,6 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
             await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
             approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
-            approved_caption += f'\n📅 New Expiry: {expiry_text}\n➕ Remaining validity was preserved and the new plan duration was added.'
             await q.edit_message_caption(caption=approved_caption, reply_markup=None)
         except Exception as exc:
             logger.exception('Payment approval failed owner=%s payment=%s', owner, pid)
