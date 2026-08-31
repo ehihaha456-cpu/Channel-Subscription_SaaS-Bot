@@ -67,9 +67,10 @@ def _variable_values(user) -> dict[str, str]:
     user_id = str(getattr(user, "id", "") or "")
     mention = f"tg://user?id={user_id}" if user_id else ""
     return {
-        "{NAME}": name, "{FIRSTNAME}": first, "{SURNAME}": last,
+        "{NAME}": first or name, "{FIRSTNAME}": first, "{SURNAME}": last,
         "{NAMESURNAME}": name, "{ID}": user_id, "{USERNAME}": username,
-        "{MENTION}": mention, "{DATE}": now.strftime("%d %b %Y"),
+        "{MENTION}": mention, "{LANG}": str(getattr(user, "language_code", "") or ""),
+        "{DATE}": now.strftime("%d %b %Y"),
         "{TIME}": now.strftime("%I:%M %p"), "{WEEKDAY}": now.strftime("%A"),
     }
 

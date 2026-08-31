@@ -1,4 +1,6 @@
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
 from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
@@ -24,13 +26,47 @@ async def _required_status(bot, user_id, required):
     return True, None
 
 
+def _render_forced_join_variables(value: str, user) -> str:
+    """Render the same user/date variables advertised by the Forced Join editor."""
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    first = str(getattr(user, "first_name", "") or "")
+    last = str(getattr(user, "last_name", "") or "")
+    full_name = " ".join(x for x in (first, last) if x).strip() or str(getattr(user, "username", "") or "User")
+    username_raw = str(getattr(user, "username", "") or "").lstrip("@")
+    user_id = str(getattr(user, "id", "") or "")
+    values = {
+        "{ID}": user_id,
+        "{NAME}": first or full_name,
+        "{FIRSTNAME}": first,
+        "{SURNAME}": last,
+        "{NAMESURNAME}": full_name,
+        "{USERNAME}": f"@{username_raw}" if username_raw else "",
+        "{MENTION}": f"tg://user?id={user_id}" if user_id else "",
+        "{LANG}": str(getattr(user, "language_code", "") or ""),
+        "{DATE}": now.strftime("%d %b %Y"),
+        "{TIME}": now.strftime("%I:%M %p"),
+        "{WEEKDAY}": now.strftime("%A"),
+    }
+    rendered = str(value or "")
+    for token, replacement in values.items():
+        rendered = rendered.replace(token, replacement)
+    return rendered
+
+
 async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=None):
     if not await get_forced_join_editor_enabled(owner):
         return
     item=await get_forced_join_editor(owner)
     if not item:
         return
-    text=item.get("text") or ""
+    raw_text=item.get("text") or ""
+    try:
+        user = await bot.get_chat(int(user_id))
+    except Exception:
+        # Approval messages can be sent to join-request users before /start.
+        # Keep delivery working even if Telegram does not expose full profile data.
+        user = type("JoinRequestUser", (), {"id": user_id, "first_name": "", "last_name": "", "username": "", "language_code": ""})()
+    text=_render_forced_join_variables(raw_text, user)
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     markup=_approval_markup(buttons)
@@ -372,7 +408,14 @@ async def forced_join_message_editor(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     item=await get_forced_join_editor(owner)
     enabled=await get_forced_join_editor_enabled(owner)
-    text=item.get("text") or ""
+    raw_text=item.get("text") or ""
+    try:
+        user = await bot.get_chat(int(user_id))
+    except Exception:
+        # Approval messages can be sent to join-request users before /start.
+        # Keep delivery working even if Telegram does not expose full profile data.
+        user = type("JoinRequestUser", (), {"id": user_id, "first_name": "", "last_name": "", "username": "", "language_code": ""})()
+    text=_render_forced_join_variables(raw_text, user)
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     button_count=sum(1 for row in buttons for b in row if b.get("type") in {"url","callback"})
