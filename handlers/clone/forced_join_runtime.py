@@ -59,12 +59,10 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
     item=await get_forced_join_editor(owner)
     if not item:
         return
-    # Editor status must use the stored template itself. Runtime variables
-    # ({first_name}, {username}, etc.) are rendered only when an actual user
-    # receives the approval message. Trying to resolve a user here caused the
-    # editor to crash because this admin callback has no `bot`/`user_id`.
-    raw_text=item.get("text") or ""
-    text=raw_text
+    # Editor setup page must show the stored template exactly as configured.
+    # Runtime variables (e.g. {first_name}) are rendered only when the approval
+    # message is actually delivered to a real user.
+    text=item.get("text") or ""
     media=item.get("media") or []
     buttons=item.get("buttons") or []
     markup=_approval_markup(buttons)
