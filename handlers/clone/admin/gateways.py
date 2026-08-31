@@ -94,7 +94,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_pg_history':
         items = await gateway_history('seller', owner, 25)
-        text = '📜 Gateway History\n\n' + '\n'.join((f"• {x.get('gateway', '-').title()} ₹{x.get('amount', 0):g} — {x.get('status')}" for x in items))
+        settings = await get_seller_settings(owner)
+        currency = settings.get('currency')
+        text = '📜 Gateway History\n\n' + '\n'.join((f"• {x.get('gateway', '-').title()} {format_currency(currency, x.get('amount', 0))} — {x.get('status')}" for x in items))
         await q.edit_message_text(text if items else '📜 No gateway payments yet.', reply_markup=self.back('a_pg_home'))
         return True
     return False

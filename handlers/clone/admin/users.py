@@ -114,6 +114,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_stats':
         s = await stats(owner)
+        settings = await get_seller_settings(owner)
+        currency = settings.get('currency')
         text = (
             "📊 Statistics\n\n"
             f"👥 Total Users: {s.get('total_users', s.get('users', 0)):,}\n"
@@ -122,8 +124,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
             f"📦 Plans: {s.get('plans', 0):,}\n"
             f"📢 Channels / Groups: {s.get('channels', 0):,}\n"
             f"⏳ Pending Payments: {s.get('pending', 0):,}\n"
-            f"💰 Today Revenue: ₹{float(s.get('today_revenue', 0) or 0):,.2f}\n"
-            f"💵 Total Revenue: ₹{float(s.get('total_revenue', s.get('revenue', 0)) or 0):,.2f}"
+            f"💰 Today Revenue: {format_currency(currency, float(s.get('today_revenue', 0) or 0))}\n"
+            f"💵 Total Revenue: {format_currency(currency, float(s.get('total_revenue', s.get('revenue', 0)) or 0))}"
         )
         await q.edit_message_text(text, reply_markup=self.back('a_home'))
         return True
