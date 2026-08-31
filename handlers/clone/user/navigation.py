@@ -20,9 +20,10 @@ def _render_business_variables(value: str, user) -> str:
     username_raw = str(getattr(user, "username", "") or "").lstrip("@")
     user_id = str(getattr(user, "id", "") or "")
     values = {
-        "{NAME}": name, "{FIRSTNAME}": first, "{SURNAME}": last, "{NAMESURNAME}": name,
+        "{NAME}": first or name, "{FIRSTNAME}": first, "{SURNAME}": last, "{NAMESURNAME}": name,
         "{ID}": user_id, "{USERNAME}": f"@{username_raw}" if username_raw else "",
         "{MENTION}": f"tg://user?id={user_id}" if user_id else "",
+        "{LANG}": str(getattr(user, "language_code", "") or ""),
         "{DATE}": now.strftime("%d %b %Y"), "{TIME}": now.strftime("%I:%M %p"),
         "{WEEKDAY}": now.strftime("%A"),
     }
