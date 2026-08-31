@@ -552,8 +552,8 @@ async def _seller_owner_details(owner_id: int):
     ]
     if first_bot:
         keyboard.append([InlineKeyboardButton("⏸ Pause First Clone Bot" if first_bot.get("active") else "▶ Resume First Clone Bot",
-            callback_data=f"main_seller_pausebot_{owner_id}" if first_bot.get("active") else f"main_seller_resumebot_{owner_id}")])
-        keyboard.append([InlineKeyboardButton("⏹ Stop First Bot Runtime", callback_data=f"main_seller_stopbot_{owner_id}")])
+            callback_data=f"main_seller_pausebot_{owner_id}_{int(first_bot.get('bot_id') or 0)}" if first_bot.get("active") else f"main_seller_resumebot_{owner_id}_{int(first_bot.get('bot_id') or 0)}")])
+        keyboard.append([InlineKeyboardButton("⏹ Stop First Bot Runtime", callback_data=f"main_seller_stopbot_{owner_id}_{int(first_bot.get('bot_id') or 0)}")])
     keyboard += [
         [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")],
         [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
@@ -596,7 +596,7 @@ async def owner_broadcast_menu(query):
 
 async def owner_clone_bot_list(query):
     records = await get_database()["seller_bots"].find(
-        {}, {"owner_id": 1, "bot_name": 1, "bot_username": 1, "active": 1, "runtime_status": 1}
+        {}, {"owner_id": 1, "bot_id": 1, "data_owner_id": 1, "bot_name": 1, "bot_username": 1, "active": 1, "runtime_status": 1}
     ).sort("updated_at", -1).to_list(length=50)
     if not records:
         await query.edit_message_text(
@@ -608,7 +608,7 @@ async def owner_clone_bot_list(query):
     for record in records:
         owner_id=int(record["owner_id"])
         title=record.get("bot_name") or record.get("bot_username") or str(owner_id)
-        rows.append([InlineKeyboardButton(f"🤖 {title[:30]}", callback_data=f"owner_broadcast_pick_{owner_id}")])
+        rows.append([InlineKeyboardButton(f"🤖 {title[:30]}", callback_data=f"owner_broadcast_pick_{int(record.get('bot_id') or 0)}")])
     rows.append([InlineKeyboardButton("⬅ Broadcast Center", callback_data="owner_broadcast_menu")])
     await query.edit_message_text(
         "🤖 Select a Clone Bot\n\nChoose the Clone Bot whose registered users should receive the broadcast.",
@@ -657,12 +657,13 @@ async def _send_cross_bot(bot, chat_id, payload):
     raise ValueError("Unsupported broadcast type")
 
 
-async def _clone_runtime(owner_id):
-    running=bot_manager.get_running(int(owner_id))
+async def _clone_runtime(bot_id):
+    """Resolve one exact clone runtime by unique Telegram bot_id."""
+    running=bot_manager.get_running(int(bot_id))
     if running:
         return running.application.bot
-    started=await bot_manager.start_bot(int(owner_id))
-    running=bot_manager.get_running(int(owner_id)) if started else None
+    started=await bot_manager.start_bot(int(bot_id))
+    running=bot_manager.get_running(int(bot_id)) if started else None
     return running.application.bot if running else None
 
 
@@ -759,12 +760,19 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
     try:
         if target.startswith("selected:") or target=="clone_users":
             payload=await _prepare_cross_bot_payload(message,context.bot)
-            owner_ids=[int(target.split(":",1)[1])] if target.startswith("selected:") else [int(x) for x in await db["seller_bots"].distinct("owner_id") if x]
+            if target.startswith("selected:"):
+                selected_bot_id=int(target.split(":",1)[1])
+                records=[await get_database()["seller_bots"].find_one({"bot_id": selected_bot_id})]
+            else:
+                records=await get_database()["seller_bots"].find({}).to_list(length=None)
+            records=[r for r in records if r and r.get("bot_id")]
             total=0
-            for clone_owner in owner_ids:
-                users=[int(x) for x in await db["seller_users"].distinct("user_id",{"owner_id":clone_owner}) if x and int(x)!=update.effective_user.id]
+            for clone_record in records:
+                clone_bot_id=int(clone_record["bot_id"])
+                clone_scope=int(clone_record.get("data_owner_id") or clone_record.get("owner_id"))
+                users=[int(x) for x in await db["seller_users"].distinct("user_id",{"owner_id":clone_scope}) if x and int(x)!=update.effective_user.id]
                 total+=len(users)
-                clone_bot=await _clone_runtime(clone_owner)
+                clone_bot=await _clone_runtime(clone_bot_id)
                 if not clone_bot:
                     failed+=len(users)
                     continue
@@ -840,18 +848,23 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(user_id):
             await query.edit_message_text("❌ Owner access only.")
             return
-        clone_owner=int(action.replace("owner_broadcast_pick_",""))
-        record=await get_bot(clone_owner)
-        seller=await get_seller(clone_owner) or {}
-        members=await get_database()["seller_users"].count_documents({"owner_id":clone_owner})
+        clone_bot_id=int(action.replace("owner_broadcast_pick_",""))
+        record=await get_database()["seller_bots"].find_one({"bot_id": clone_bot_id})
+        if not record:
+            await query.edit_message_text("❌ Clone Bot not found.")
+            return
+        seller_id=int(record.get("seller_account_id") or record.get("owner_id"))
+        seller=await get_seller(seller_id) or {}
+        scope=int(record.get("data_owner_id") or seller_id)
+        members=await get_database()["seller_users"].count_documents({"owner_id":scope})
         await query.edit_message_text(
             "🤖 Clone Bot Broadcast\n\n"
             f"Seller: {seller.get('first_name') or '-'}\n"
-            f"Seller ID: {clone_owner}\n"
-            f"Bot: @{(record or {}).get('bot_username','-')}\n"
+            f"Seller ID: {seller_id}\n"
+            f"Bot: @{record.get('bot_username','-')}\n"
             f"Registered Users: {members}\n\nContinue and send a broadcast to this Clone Bot's users?",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Continue",callback_data=f"owner_broadcast_sendselected_{clone_owner}")],
+                [InlineKeyboardButton("✅ Continue",callback_data=f"owner_broadcast_sendselected_{clone_bot_id}")],
                 [InlineKeyboardButton("⬅ Select Another Bot",callback_data="owner_broadcast_selected")],
                 [InlineKeyboardButton("❌ Cancel",callback_data="owner_broadcast_menu")],
             ]),
@@ -862,9 +875,9 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(user_id):
             await query.edit_message_text("❌ Owner access only.")
             return
-        clone_owner=int(action.replace("owner_broadcast_sendselected_",""))
+        clone_bot_id=int(action.replace("owner_broadcast_sendselected_",""))
         context.user_data.clear()
-        context.user_data["owner_broadcast_target"]=f"selected:{clone_owner}"
+        context.user_data["owner_broadcast_target"]=f"selected:{clone_bot_id}"
         await query.edit_message_text(
             "📢 Send the broadcast message now.\n\nSupported: text, photo, video, document, voice, audio, GIF, sticker, and forwarded messages.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="owner_broadcast_menu")]]),
@@ -1076,7 +1089,9 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id = int(action.replace("main_seller_suspend_", ""))
         await suspend_seller(seller_id)
-        await bot_manager.stop_bot(seller_id, "seller_suspended")
+        for record in await get_bots(seller_id):
+            if record.get("bot_id"):
+                await bot_manager.stop_bot(int(record["bot_id"]), "seller_suspended")
         await seller_owner_view(query, seller_id)
         return
 
@@ -1086,9 +1101,9 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id = int(action.replace("main_seller_unsuspend_", ""))
         await unsuspend_seller(seller_id)
-        record = await get_bot(seller_id)
-        if record and record.get("active"):
-            await bot_manager.start_bot(seller_id)
+        for record in await get_bots(seller_id):
+            if record.get("active") and record.get("bot_id"):
+                await bot_manager.start_bot(int(record["bot_id"]))
         await seller_owner_view(query, seller_id)
         return
 
@@ -1096,9 +1111,10 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(user_id):
             await query.edit_message_text("❌ Owner access only.")
             return
-        seller_id=int(action.replace("main_seller_pausebot_",""))
-        await set_bot_active(seller_id,False)
-        await bot_manager.stop_bot(seller_id,"paused_by_owner")
+        seller_id_text, bot_id_text = action.replace("main_seller_pausebot_", "", 1).split("_", 1)
+        seller_id, bot_id = int(seller_id_text), int(bot_id_text)
+        await set_bot_active(bot_id,False)
+        await bot_manager.stop_bot(bot_id,"paused_by_owner")
         await seller_owner_view(query,seller_id)
         return
 
@@ -1106,9 +1122,10 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(user_id):
             await query.edit_message_text("❌ Owner access only.")
             return
-        seller_id=int(action.replace("main_seller_resumebot_",""))
-        await set_bot_active(seller_id,True)
-        await bot_manager.start_bot(seller_id)
+        seller_id_text, bot_id_text = action.replace("main_seller_resumebot_", "", 1).split("_", 1)
+        seller_id, bot_id = int(seller_id_text), int(bot_id_text)
+        await set_bot_active(bot_id,True)
+        await bot_manager.start_bot(bot_id)
         await seller_owner_view(query,seller_id)
         return
 
@@ -1116,8 +1133,9 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(user_id):
             await query.edit_message_text("❌ Owner access only.")
             return
-        seller_id = int(action.replace("main_seller_stopbot_", ""))
-        await bot_manager.stop_bot(seller_id, "stopped_by_owner")
+        seller_id_text, bot_id_text = action.replace("main_seller_stopbot_", "", 1).split("_", 1)
+        seller_id, bot_id = int(seller_id_text), int(bot_id_text)
+        await bot_manager.stop_bot(bot_id, "stopped_by_owner")
         await seller_owner_view(query, seller_id)
         return
 

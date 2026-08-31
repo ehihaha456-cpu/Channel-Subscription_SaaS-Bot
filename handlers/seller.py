@@ -622,7 +622,10 @@ def _money(value):
 
 async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str:
     seller = await get_or_create_seller(user)
-    plan, assignment = await effective_plan(owner_id)
+    # Seller plan is seller-account scoped; clone statistics are clone-data scoped.
+    seller_account_id = int(record.get("seller_account_id") or record.get("owner_id") or owner_id)
+    scope_id = int(record.get("data_owner_id") or seller_account_id)
+    plan, assignment = await effective_plan(seller_account_id)
     db = get_database()
     now = datetime.now(timezone.utc)
 
@@ -649,22 +652,22 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     joined = _aware_utc((seller or {}).get("created_at"))
     joined_text = joined.strftime("%d-%m-%Y") if joined else "-"
 
-    bots_used = await count_owner_bots(owner_id)
+    bots_used = await count_owner_bots(seller_account_id)
     active_subscribers = await db["seller_subscriptions"].count_documents({
-        "owner_id": owner_id, "active": True, "expiry_date": {"$gt": now}
+        "owner_id": scope_id, "active": True, "expiry_date": {"$gt": now}
     })
-    channels_used = await db["seller_channels"].count_documents({"owner_id": owner_id, "active": True})
-    plans_used = await db["seller_plans"].count_documents({"owner_id": owner_id})
-    total_users = await db["seller_users"].count_documents({"owner_id": owner_id})
-    pending = await db["seller_payments"].count_documents({"owner_id": owner_id, "status": "pending"})
+    channels_used = await db["seller_channels"].count_documents({"owner_id": scope_id, "active": True})
+    plans_used = await db["seller_plans"].count_documents({"owner_id": scope_id})
+    total_users = await db["seller_users"].count_documents({"owner_id": scope_id})
+    pending = await db["seller_payments"].count_documents({"owner_id": scope_id, "status": "pending"})
 
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_rows = await db["seller_payments"].aggregate([
-        {"$match": {"owner_id": owner_id, "status": "approved", "created_at": {"$gte": today_start}}},
+        {"$match": {"owner_id": scope_id, "status": "approved", "created_at": {"$gte": today_start}}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(length=1)
     total_rows = await db["seller_payments"].aggregate([
-        {"$match": {"owner_id": owner_id, "status": "approved"}},
+        {"$match": {"owner_id": scope_id, "status": "approved"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(length=1)
     today_revenue = today_rows[0].get("total", 0) if today_rows else 0
