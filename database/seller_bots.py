@@ -251,7 +251,7 @@ async def count_invalid_token_bots(owner_id: int | None = None):
 
 
 async def set_bot_active(bot_id: int, active: bool):
-    record = await get_bot_by_bot_id(bot_id) or await get_bot(bot_id)
+    record = await get_bot_by_bot_id(bot_id)
     query = {"bot_id": int(record["bot_id"])} if record else {"bot_id": int(bot_id)}
     await seller_bots_collection().update_one(
         query,
@@ -264,7 +264,7 @@ async def set_bot_active(bot_id: int, active: bool):
 
 
 async def set_runtime_status(bot_id: int, status: str, error=None):
-    record = await get_bot_by_bot_id(bot_id) or await get_bot(bot_id)
+    record = await get_bot_by_bot_id(bot_id)
     query = {"bot_id": int(record["bot_id"])} if record else {"bot_id": int(bot_id)}
     await seller_bots_collection().update_one(
         query,
