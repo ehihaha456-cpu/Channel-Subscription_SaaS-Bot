@@ -92,3 +92,58 @@ async def get_all_sellers():
 
 async def total_sellers():
     return await sellers_collection().count_documents({})
+
+async def find_seller_by_identifier(identifier):
+    """Find a seller by Telegram ID or username across current and legacy records.
+
+    Older records may contain numeric IDs as strings or use alternate field names,
+    so the owner search must not depend on one exact schema/type.
+    """
+    raw = str(identifier or "").strip()
+    if not raw:
+        return None
+
+    username = raw[1:] if raw.startswith("@") else raw
+    username = username.strip().lstrip("@").strip()
+    collection = sellers_collection()
+
+    # Telegram numeric ID: support both integer and string values plus legacy keys.
+    if raw.lstrip("+").isdigit():
+        try:
+            numeric_id = int(raw)
+        except (TypeError, ValueError):
+            numeric_id = None
+        if numeric_id is not None:
+            id_variants = [numeric_id, str(numeric_id)]
+            seller = await collection.find_one({
+                "$or": [
+                    {"owner_id": {"$in": id_variants}},
+                    {"user_id": {"$in": id_variants}},
+                    {"seller_id": {"$in": id_variants}},
+                    {"telegram_id": {"$in": id_variants}},
+                    {"telegram_user_id": {"$in": id_variants}},
+                    {"id": {"$in": id_variants}},
+                ]
+            })
+            if seller:
+                return seller
+
+    # Username search: accept @username / username, mixed case, and legacy fields.
+    if username and not any(ch.isspace() for ch in username):
+        import re
+        exact = {"$regex": f"^{re.escape(username)}$", "$options": "i"}
+        at_exact = {"$regex": f"^@?{re.escape(username)}$", "$options": "i"}
+        seller = await collection.find_one({
+            "$or": [
+                {"username": at_exact},
+                {"username_normalized": {"$regex": f"^{re.escape(username.lower())}$", "$options": "i"}},
+                {"telegram_username": at_exact},
+                {"user.username": at_exact},
+                {"profile.username": at_exact},
+            ]
+        })
+        if seller:
+            return seller
+
+    return None
+
