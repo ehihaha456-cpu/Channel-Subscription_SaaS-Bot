@@ -94,11 +94,14 @@ async def total_sellers():
     return await sellers_collection().count_documents({})
 
 async def find_seller_by_identifier(identifier):
-    """Find a seller by Telegram ID or username across current and legacy records.
+    """Find a seller by Telegram ID or username across all seller-related data.
 
-    Older records may contain numeric IDs as strings or use alternate field names,
-    so the owner search must not depend on one exact schema/type.
+    Some legacy sellers have a clone bot and platform user record but no document
+    in the ``sellers`` collection. Owner search must still find them, then repair
+    the missing seller record so future searches and Seller Details work normally.
     """
+    import re
+
     raw = str(identifier or "").strip()
     if not raw:
         return None
@@ -106,8 +109,40 @@ async def find_seller_by_identifier(identifier):
     username = raw[1:] if raw.startswith("@") else raw
     username = username.strip().lstrip("@").strip()
     collection = sellers_collection()
+    db = get_database()
 
-    # Telegram numeric ID: support both integer and string values plus legacy keys.
+    async def _repair_missing_seller(owner_id, profile=None):
+        try:
+            owner_id = int(owner_id)
+        except (TypeError, ValueError):
+            return None
+
+        existing = await collection.find_one({"owner_id": owner_id})
+        if existing:
+            return existing
+
+        profile = profile or {}
+        now = datetime.now(timezone.utc)
+        document = {
+            "owner_id": owner_id,
+            "first_name": profile.get("first_name") or profile.get("name") or "Unknown",
+            "username": profile.get("username") or profile.get("telegram_username"),
+            "active": True,
+            "approved": bool(profile.get("approved", True)),
+            "suspended": False,
+            "plan": None,
+            "expiry_date": None,
+            "created_at": profile.get("created_at") or profile.get("joined_at") or now,
+            "updated_at": now,
+        }
+        await collection.update_one(
+            {"owner_id": owner_id},
+            {"$setOnInsert": document},
+            upsert=True,
+        )
+        return await collection.find_one({"owner_id": owner_id})
+
+    # 1) Direct seller collection lookup. Support integer/string legacy IDs.
     if raw.lstrip("+").isdigit():
         try:
             numeric_id = int(raw)
@@ -128,10 +163,20 @@ async def find_seller_by_identifier(identifier):
             if seller:
                 return seller
 
-    # Username search: accept @username / username, mixed case, and legacy fields.
+            # Legacy/missing seller document: seller_bots is authoritative proof
+            # that this Telegram user is a seller.
+            bot_record = await db["seller_bots"].find_one({
+                "$or": [
+                    {"owner_id": {"$in": id_variants}},
+                    {"seller_account_id": {"$in": id_variants}},
+                ]
+            })
+            if bot_record:
+                profile = await db["users"].find_one({"user_id": numeric_id}) or {}
+                return await _repair_missing_seller(numeric_id, profile)
+
+    # 2) Username lookup in seller collection first.
     if username and not any(ch.isspace() for ch in username):
-        import re
-        exact = {"$regex": f"^{re.escape(username)}$", "$options": "i"}
         at_exact = {"$regex": f"^@?{re.escape(username)}$", "$options": "i"}
         seller = await collection.find_one({
             "$or": [
@@ -145,5 +190,24 @@ async def find_seller_by_identifier(identifier):
         if seller:
             return seller
 
-    return None
+        # 3) Fallback through platform users, but only accept it when that user
+        # actually owns a clone bot. This prevents ordinary users matching Seller
+        # Management search by accident.
+        user = await db["users"].find_one({"username": at_exact})
+        if user:
+            user_id = user.get("user_id")
+            try:
+                user_id = int(user_id)
+            except (TypeError, ValueError):
+                user_id = None
+            if user_id is not None:
+                bot_record = await db["seller_bots"].find_one({
+                    "$or": [
+                        {"owner_id": user_id},
+                        {"seller_account_id": user_id},
+                    ]
+                })
+                if bot_record:
+                    return await _repair_missing_seller(user_id, user)
 
+    return None
