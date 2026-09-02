@@ -78,6 +78,93 @@ class CloneRuntimeAppMixin:
         if connected:
             raise ApplicationHandlerStop
 
+    async def support_subscription_callback_guard(self, update, context):
+        """Handle Give/Extend from a Live Support topic without entering admin navigation."""
+        q = update.callback_query
+        if not q or not q.data:
+            return
+        data = q.data
+        if not (data.startswith("a_user_manage_") or data.startswith("support_extend_back_")):
+            return
+
+        owner = self.owner(context)
+        seller_account = self.seller_account(context)
+        if q.from_user.id != seller_account:
+            return
+
+        # Only intercept these callbacks when they are being used inside the
+        # connected Live Support topic. Normal User Management keeps its old flow.
+        support = await get_live_support_settings(owner)
+        if not support.get("enabled") or support.get("mode") != "topic":
+            return
+        support_group_id = support.get("support_group_id")
+        if not support_group_id or not q.message or int(q.message.chat_id) != int(support_group_id):
+            return
+        if not q.message.message_thread_id:
+            return
+
+        try:
+            user_id = int(data.rsplit("_", 1)[-1])
+        except (TypeError, ValueError):
+            return
+
+        if data.startswith("support_extend_back_"):
+            text = await self.support_user_details_text(owner, user_id)
+            await q.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=self.support_topic_keyboard(user_id, bool(await is_support_blocked(owner, user_id))),
+            )
+            context.user_data.pop("support_extend_mode", None)
+            context.user_data.pop("support_extend_prompt_message_id", None)
+            context.user_data.pop("wait_user_custom_duration", None)
+            return
+
+        # Enter the same custom-duration flow used by User Management, but keep
+        # its navigation inside this support topic.
+        context.user_data.clear()
+        context.user_data["wait_user_custom_duration"] = user_id
+        context.user_data["support_extend_mode"] = True
+        prompt = await q.edit_message_text(
+            "🎁 Give / Extend Clone Bot Subscription\n\n"
+            "Send a custom duration:\n"
+            "30m, 12h, 7d, 3mo or 1y.\n\n"
+            "Existing active validity will be preserved and the new duration will be added.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"support_extend_back_{user_id}")],
+            ]),
+        )
+        context.user_data["support_extend_prompt_message_id"] = int(prompt.message_id)
+        context.user_data["support_extend_chat_id"] = int(prompt.chat_id)
+        context.user_data["support_extend_thread_id"] = int(prompt.message_thread_id or q.message.message_thread_id or 0)
+
+    async def support_subscription_text_guard(self, update, context):
+        """Require Give/Extend duration input to be a reply to the prompt message."""
+        if not context.user_data.get("support_extend_mode"):
+            return
+        message = update.effective_message
+        user = update.effective_user
+        if not message or not user or user.id != self.seller_account(context):
+            return
+
+        prompt_id = int(context.user_data.get("support_extend_prompt_message_id") or 0)
+        reply = getattr(message, "reply_to_message", None)
+        reply_id = int(getattr(reply, "message_id", 0) or 0)
+
+        if reply_id != prompt_id:
+            # This is an ordinary seller message. Drop only the pending support
+            # extension state so the normal Live Support router can handle it.
+            context.user_data.pop("support_extend_mode", None)
+            context.user_data.pop("support_extend_prompt_message_id", None)
+            context.user_data.pop("support_extend_chat_id", None)
+            context.user_data.pop("support_extend_thread_id", None)
+            context.user_data.pop("wait_user_custom_duration", None)
+            return
+
+        # Reuse the existing, fully-tested custom duration implementation.
+        await self.text_handler(update, context)
+        raise ApplicationHandlerStop
+
     def build_app(self,token,data_owner_id,seller_account_id,bot_id=None):
         request = HTTPXRequest(
             connection_pool_size=48,
@@ -152,6 +239,7 @@ class CloneRuntimeAppMixin:
                 pattern=r"^(c_|seller_current_plan$|seller_upgrade_plan$|w_)",
             )
         )
+        app.add_handler(CallbackQueryHandler(self.support_subscription_callback_guard,pattern=r"^(a_user_manage_|support_extend_back_)"), group=-201)
         app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
@@ -177,6 +265,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.seller_qr_upload_handler), group=-130)
         app.add_handler(MessageHandler(filters.PHOTO,self.photo_handler),group=0)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.business_automation_text_handler), group=-1)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.support_subscription_text_guard), group=-9)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,self.text_handler))
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.route_live_support_message),group=-8)
         if app.job_queue: app.job_queue.run_repeating(self.expiry_job,interval=60,first=30,name=f"seller_expiry_{data_owner_id}")
