@@ -68,7 +68,7 @@ class CloneSupportCoreMixin:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("👤 Open Telegram Profile",url=f"tg://user?id={int(user_id)}")],
             [InlineKeyboardButton("📋 View User Details",callback_data=f"support_profile_{int(user_id)}")],
-            [InlineKeyboardButton("🎁 Give / Extend Subscription",callback_data=f"a_user_manage_{int(user_id)}")],
+            [InlineKeyboardButton("🎁 Give / Extend Subscription",callback_data=f"support_extend_{int(user_id)}")],
             [InlineKeyboardButton(
                 "✅ Unblock Support" if blocked else "🚫 Block Support",
                 callback_data=(f"support_unblock_{int(user_id)}" if blocked else f"support_block_{int(user_id)}"),
