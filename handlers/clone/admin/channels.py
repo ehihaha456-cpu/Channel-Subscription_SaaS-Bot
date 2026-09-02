@@ -30,12 +30,12 @@ async def _create_invite_with_retry(context, chat_id):
     )
 
 
-async def _send_message_with_retry(context, user_id, text):
+async def _send_message_with_retry(context, user_id, text, disable_web_page_preview=True):
     return await _telegram_retry(
         lambda: context.bot.send_message(
             chat_id=user_id,
             text=text,
-            disable_web_page_preview=True,
+            disable_web_page_preview=disable_web_page_preview,
         ),
         attempts=4,
         base_delay=1.0,
@@ -96,15 +96,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not channels:
             await q.edit_message_text('❌ Pehle kam se kam ek channel/group add karo.', reply_markup=self.channels_menu())
             return True
-        active_count = len(await active_subscriptions(owner))
+        active_count = len(await active_subscriptions(owner, limit=None))
         await q.edit_message_text(f'🔗 Group/Channel Invite Link Resend\n\nActive subscribers found: {active_count}\nChannels/Groups: {len(channels)}\n\nFresh invite links sabhi active subscribers ko bheje jayenge. Expired users ko message nahi jayega.\n\nContinue?', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('✅ Yes, Resend', callback_data='a_channel_resend_yes')], [InlineKeyboardButton('❌ No', callback_data='a_channels')]]))
         return True
     if a == 'a_channel_resend_yes':
         await q.edit_message_text('⏳ Invite links resend ho rahe hain...')
         channels = [channel for channel in await get_channels(owner) if channel.get('auto_invite_enabled', True) is not False]
-        subscriptions = await active_subscriptions(owner)
+        subscriptions = await active_subscriptions(owner, limit=None)
         sent = failed = invite_failed = 0
         now = datetime.now(timezone.utc)
+        logger.info('Starting active-subscriber invite resend owner=%s active=%s channels=%s', owner, len(subscriptions), len(channels))
         for sub in subscriptions:
             user_id = int(sub['user_id'])
             expiry = sub.get('expiry_date')
@@ -138,6 +139,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 await save_failed_delivery(owner, user_id, 'invite_resend', {'channels': [c.get('chat_id') for c in channels]}, str(exc))
                 logger.warning('Invite resend failed owner=%s user=%s: %s', owner, user_id, exc)
             await asyncio.sleep(0.75)
+        logger.info('Completed active-subscriber invite resend owner=%s active=%s sent=%s failed=%s invite_failed=%s', owner, len(subscriptions), sent, failed, invite_failed)
         await q.edit_message_text(f'✅ Invite Link Resend Completed\n\nActive subscribers: {len(subscriptions)}\nSuccessfully sent: {sent}\nFailed/blocked users: {failed}\nInvite creation failures: {invite_failed}\n\nExpired users ko message nahi bheja gaya.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔁 Retry Failed Users', callback_data='a_retry_failed')], [InlineKeyboardButton('⬅ Back', callback_data='a_channels')]]))
         return True
     if a == 'a_retry_failed':
