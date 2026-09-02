@@ -84,7 +84,9 @@ class CloneRuntimeAppMixin:
         if not q or not q.data:
             return
         data = q.data
-        if not (data.startswith("a_user_manage_") or data.startswith("support_extend_back_")):
+        # Live Support extension uses its own callback namespace so it can
+        # never fall through to the normal User Management router.
+        if not (data.startswith("support_extend_") or data.startswith("support_extend_back_")):
             return
 
         owner = self.owner(context)
@@ -118,7 +120,8 @@ class CloneRuntimeAppMixin:
             context.user_data.pop("support_extend_mode", None)
             context.user_data.pop("support_extend_prompt_message_id", None)
             context.user_data.pop("wait_user_custom_duration", None)
-            return
+            # Prevent admin_callback from handling this same click.
+            raise ApplicationHandlerStop
 
         # Enter the same custom-duration flow used by User Management, but keep
         # its navigation inside this support topic.
@@ -136,7 +139,12 @@ class CloneRuntimeAppMixin:
         )
         context.user_data["support_extend_prompt_message_id"] = int(prompt.message_id)
         context.user_data["support_extend_chat_id"] = int(prompt.chat_id)
-        context.user_data["support_extend_thread_id"] = int(prompt.message_thread_id or q.message.message_thread_id or 0)
+        context.user_data["support_extend_thread_id"] = int(
+            prompt.message_thread_id or q.message.message_thread_id or 0
+        )
+        # Prevent the generic a_user_manage handler from immediately replacing
+        # this prompt with the normal User Management flow.
+        raise ApplicationHandlerStop
 
     async def support_subscription_text_guard(self, update, context):
         """Require Give/Extend duration input to be a reply to the prompt message."""
@@ -239,7 +247,13 @@ class CloneRuntimeAppMixin:
                 pattern=r"^(c_|seller_current_plan$|seller_upgrade_plan$|w_)",
             )
         )
-        app.add_handler(CallbackQueryHandler(self.support_subscription_callback_guard,pattern=r"^(a_user_manage_|support_extend_back_)"), group=-201)
+        app.add_handler(
+            CallbackQueryHandler(
+                self.support_subscription_callback_guard,
+                pattern=r"^(support_extend_|support_extend_back_)",
+            ),
+            group=-201,
+        )
         app.add_handler(CallbackQueryHandler(self.admin_callback,pattern=r"^(a_|ba_|gm_)"))
         app.add_handler(CallbackQueryHandler(self.support_callback,pattern=r"^support_"))
         for handler in deleting_messages_handlers():
