@@ -145,26 +145,78 @@ class CloneMediaHandlersMixin:
             # actual seller account while keeping the payment itself stored under
             # the clone-specific owner/data scope.
             seller_account_id = self.seller_account(context)
+            recipients = {int(seller_account_id)}
             try:
-                await context.bot.send_photo(
-                    seller_account_id,
-                    p["screenshot_file_id"],
-                    caption=caption,
-                    reply_markup=kb,
-                )
-            except TelegramError:
-                # The payment is already safely stored as pending. Do not leave
-                # the user without confirmation if the live notification fails.
+                for staff_row in await list_staff(owner):
+                    if staff_row.get("status") != "active":
+                        continue
+                    permissions = staff_row.get("permissions") or []
+                    if "*" in permissions or "payments" in permissions:
+                        recipients.add(int(staff_row["user_id"]))
+            except Exception:
                 logger.exception(
-                    "Manual payment saved but seller notification failed: "
-                    "seller_account_id=%s data_owner_id=%s payment_id=%s",
-                    seller_account_id, owner, p.get("payment_id"),
+                    "Failed to load payment notification staff owner=%s payment=%s",
+                    owner, p.get("payment_id"),
                 )
-                await update.effective_message.reply_text(
-                    "✅ Payment screenshot submitted successfully. It is pending "
-                    "approval and the admin can review it from Pending Payments."
-                )
-                raise ApplicationHandlerStop
+
+            # A screenshot submission should be acknowledged immediately.
+            # Sending the staff fan-out (and saving message references) is done
+            # in the background so slow Telegram/DB operations cannot delay the
+            # user's confirmation message. Existing notification behavior is
+            # preserved; only the order/timing is optimized.
+            await update.effective_message.reply_text(
+                "✅ Payment screenshot submitted successfully. Waiting for approval."
+            )
+
+            async def _dispatch_manual_payment_notifications():
+                try:
+                    notification_messages = []
+                    for recipient_id in recipients:
+                        try:
+                            sent_message = await context.bot.send_photo(
+                                chat_id=recipient_id,
+                                photo=p["screenshot_file_id"],
+                                caption=caption,
+                                reply_markup=kb,
+                            )
+                            notification_messages.append({
+                                "chat_id": int(recipient_id),
+                                "message_id": int(sent_message.message_id),
+                            })
+                        except TelegramError:
+                            logger.exception(
+                                "Manual payment notification failed: owner=%s recipient=%s payment_id=%s",
+                                owner, recipient_id, p.get("payment_id"),
+                            )
+
+                    if notification_messages:
+                        await add_payment_notification_messages(
+                            owner, p["payment_id"], notification_messages
+                        )
+                    else:
+                        logger.error(
+                            "No payment notification recipient succeeded: owner=%s payment_id=%s",
+                            owner, p.get("payment_id"),
+                        )
+                except Exception:
+                    logger.exception(
+                        "Manual payment notification dispatch failed: owner=%s payment_id=%s",
+                        owner, p.get("payment_id"),
+                    )
+
+            # Do not await the staff notification fan-out.
+            context.application.create_task(
+                _dispatch_manual_payment_notifications(),
+                update=update,
+            )
+            await audit(
+                'child_payment_submitted',
+                update.effective_user.id,
+                owner,
+                {"payment_id": p.get("payment_id")},
+            )
+
+            raise ApplicationHandlerStop
 
             await update.effective_message.reply_text(
                 "✅ Payment screenshot submitted successfully. Waiting for approval."

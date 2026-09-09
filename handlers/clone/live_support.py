@@ -266,7 +266,7 @@ class CloneLiveSupportMixin:
         q=update.callback_query
         await q.answer()
         owner=self.owner(context)
-        if q.from_user.id!=self.seller_account(context):
+        if not await self.seller_or_admin(update, context):
             await q.answer("Not authorized",show_alert=True)
             return
         data=q.data
@@ -419,7 +419,12 @@ class CloneLiveSupportMixin:
                     code,ctype,value,limit=[x.strip() for x in text.split("|",3)]
                     if ctype not in {"percent","fixed"}: raise ValueError("type")
                     await create_coupon(owner,code,ctype,float(value),int(limit))
-                    context.user_data.clear(); await update.effective_message.reply_text("✅ Coupon saved",reply_markup=self.admin_menu())
+                    context.user_data.clear()
+                    staff = await self.staff_record(update, context)
+                    await update.effective_message.reply_text(
+                        "✅ Coupon saved",
+                        reply_markup=self.admin_menu((staff or {}).get("role", "seller")),
+                    )
                 except Exception:
                     await update.effective_message.reply_text("❌ Use: SAVE20 | percent | 20 | 100")
                 return

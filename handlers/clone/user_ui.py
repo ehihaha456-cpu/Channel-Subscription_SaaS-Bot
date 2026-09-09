@@ -138,6 +138,9 @@ class CloneUserUIMixin:
             "rejected":"❌",
         }.get(current_status,"ℹ️")
 
+        settings = await get_seller_settings(owner)
+        timezone_name = settings.get("timezone") or "Asia/Kolkata"
+
         lines=[
             f"{status_icon} Payment {current_status.title()}",
             "",
@@ -147,16 +150,21 @@ class CloneUserUIMixin:
             f"📝 Username: {username}",
             f"📦 Plan: {payment.get('plan')}",
             f"⏳ Duration: {payment.get('duration_text') or '-'}",
-            f"💰 Amount: {format_currency((await get_seller_settings(owner)).get('currency'), payment.get('amount',0))}",
+            f"💰 Amount: {format_currency(settings.get('currency'), payment.get('amount',0))}",
             f"📅 Submitted: {created_text}",
             f"📌 Status: {current_status.title()}",
         ]
 
-        if processed_by:
-            lines.extend([
-                f"👮 Processed By: {processed_by}",
-                f"🕒 Processed At: {self.format_dt(datetime.now(timezone.utc))}",
-            ])
+        audit_name = payment.get("processed_by_name")
+        audit_id = payment.get("admin_id")
+        if current_status == "approved" and (audit_name or audit_id):
+            lines.append(f"👮 Approved By: {audit_name or 'Unknown'} (ID: {audit_id or 'Unknown'})")
+            lines.append(f"🕒 Approved At: {self.format_dt(payment.get('approved_at') or payment.get('processed_at'), timezone_name)}")
+        elif current_status == "rejected" and (audit_name or audit_id):
+            lines.append(f"👮 Rejected By: {audit_name or 'Unknown'} (ID: {audit_id or 'Unknown'})")
+            lines.append(f"🕒 Rejected At: {self.format_dt(payment.get('rejected_at') or payment.get('processed_at'), timezone_name)}")
+        elif processed_by:
+            lines.append(f"👮 Processed By: {processed_by}")
 
         return "\n".join(lines)
 
