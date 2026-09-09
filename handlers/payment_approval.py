@@ -24,6 +24,13 @@ from services.subscription_service import fulfill_payment_subscription
 from services.channel_service import grant_channel_access
 
 
+def actor_name(user):
+    return " ".join(
+        value for value in [getattr(user, "first_name", None), getattr(user, "last_name", None)]
+        if value
+    ).strip() or (f'@{getattr(user, "username", "")}' if getattr(user, "username", None) else "Unknown")
+
+
 def format_ist(dt):
     return dt.astimezone(ZoneInfo("Asia/Kolkata")).strftime(
         "%d-%m-%Y %I:%M:%S %p IST"
@@ -321,6 +328,7 @@ async def approve_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TY
                 payment_id=payment_id,
                 status="approved",
                 admin_id=query.from_user.id,
+                admin_name=actor_name(query.from_user),
             )
             if decided is None:
                 payment = await get_payment(payment_id)
@@ -367,6 +375,7 @@ async def approve_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TY
         )
         if not result.get("notification_sent", True):
             success_text += "\n\n⚠️ User notification could not be sent."
+        success_text += f"\n\n👮 Approved By: {actor_name(query.from_user)} (ID: {query.from_user.id})"
         await safe_edit(query, success_text)
 
     except Exception as exc:
@@ -430,7 +439,7 @@ async def reject_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        await safe_edit(query, "❌ Payment Rejected")
+        await safe_edit(query, f"❌ Payment Rejected\n\n👮 Rejected By: {actor_name(query.from_user)} (ID: {query.from_user.id})")
 
         await context.bot.send_message(
             chat_id=user_id,
@@ -501,6 +510,7 @@ async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if not result.get("notification_sent", True):
             success_text += "\n\n⚠️ User notification could not be sent."
+        success_text += f"\n\n👮 Approved By: {actor_name(query.from_user)} (ID: {query.from_user.id})"
         await safe_edit(query, success_text)
 
     except Exception as exc:
@@ -542,7 +552,7 @@ async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await safe_edit(query, "❌ Payment Rejected")
+        await safe_edit(query, f"❌ Payment Rejected\n\n👮 Rejected By: {actor_name(query.from_user)} (ID: {query.from_user.id})")
 
         await context.bot.send_message(
             chat_id=user_id,
