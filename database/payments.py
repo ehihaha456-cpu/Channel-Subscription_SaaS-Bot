@@ -188,6 +188,7 @@ async def decide_latest_payment(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     payment = await payments_collection().find_one(
         {
@@ -205,6 +206,7 @@ async def decide_latest_payment(
         status=status,
         admin_id=admin_id,
         remarks=remarks,
+        admin_name=admin_name,
     )
 
 
@@ -213,6 +215,7 @@ async def update_payment_status(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     """Backward-compatible boolean wrapper for legacy callbacks."""
     payment = await decide_latest_payment(
@@ -220,6 +223,7 @@ async def update_payment_status(
         status=status,
         admin_id=admin_id,
         remarks=remarks,
+        admin_name=admin_name,
     )
     return payment is not None
 
@@ -229,6 +233,7 @@ async def decide_payment_by_id(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     """
     Atomically decide one pending payment.
@@ -252,8 +257,11 @@ async def decide_payment_by_id(
         "remarks": remarks,
         "updated_at": now,
         "processed_at": now,
+        "approved_at": now if status == "approved" else None,
+        "rejected_at": now if status == "rejected" else None,
         "decision_status": status,
         "decision_admin_id": admin_id,
+        "decision_admin_name": admin_name,
         "decision_at": now,
     }
 

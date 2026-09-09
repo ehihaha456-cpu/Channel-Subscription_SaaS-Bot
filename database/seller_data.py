@@ -675,8 +675,61 @@ async def remove_subscription(owner_id:int, user_id:int):
 
 
 async def create_payment(owner_id,user_id,plan,screenshot_file_id):
-    now=datetime.now(timezone.utc); doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now}
+    now=datetime.now(timezone.utc)
+    doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now,"notification_messages":[]}
     await c(PAYMENTS).insert_one(doc); return doc
+
+
+async def add_payment_notification_messages(owner_id, payment_id, messages):
+    """Store the exact Telegram message locations used for the pending-payment fan-out.
+
+    Each item is {chat_id, message_id}. These references let the first approving
+    or rejecting staff member update the same pending message in every notified
+    staff/seller chat.
+    """
+    clean=[]
+    for item in messages or []:
+        try:
+            chat_id=int(item.get("chat_id"))
+            message_id=int(item.get("message_id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        clean.append({"chat_id":chat_id,"message_id":message_id})
+    if not clean:
+        return False
+    # Merge with previously stored references. Multiple staff members can receive
+    # the same pending-payment notification, so replacing this list would make
+    # only the last recipient's message updatable after approval/rejection.
+    existing = await c(PAYMENTS).find_one(
+        {"owner_id":int(owner_id),"payment_id":str(payment_id)},
+        {"notification_messages":1},
+    )
+    merged = []
+    seen = set()
+    for item in ((existing or {}).get("notification_messages") or []) + clean:
+        try:
+            ref = {"chat_id": int(item.get("chat_id")), "message_id": int(item.get("message_id"))}
+        except (TypeError, ValueError, AttributeError):
+            continue
+        key = (ref["chat_id"], ref["message_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ref)
+
+    r=await c(PAYMENTS).update_one(
+        {"owner_id":int(owner_id),"payment_id":str(payment_id)},
+        {"$set":{"notification_messages":merged,"updated_at":datetime.now(timezone.utc)}},
+    )
+    return r.matched_count>0
+
+
+async def get_payment_notification_messages(owner_id, payment_id):
+    payment=await c(PAYMENTS).find_one(
+        {"owner_id":int(owner_id),"payment_id":str(payment_id)},
+        {"notification_messages":1},
+    )
+    return (payment or {}).get("notification_messages") or []
 
 async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,gateway_payment_id=""):
     now=datetime.now(timezone.utc)
@@ -698,7 +751,7 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
 async def get_payment(owner_id,payment_id): return await c(PAYMENTS).find_one({"owner_id":owner_id,"payment_id":payment_id})
 async def pending_payments(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":"pending"}).sort("created_at",-1).to_list(length=50)
 async def payment_history(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":{"$in":["approved","rejected"]}}).sort("updated_at",-1).to_list(length=50)
-async def set_payment_status(owner_id,payment_id,status,admin_id):
+async def set_payment_status(owner_id,payment_id,status,admin_id,admin_name=None):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
         {
@@ -710,7 +763,10 @@ async def set_payment_status(owner_id,payment_id,status,admin_id):
             "$set":{
                 "status":status,
                 "admin_id":admin_id,
+                "processed_by_name":admin_name,
                 "processed_at":now,
+                "approved_at": now if status == "approved" else None,
+                "rejected_at": now if status == "rejected" else None,
                 "updated_at":now,
             }
         },
@@ -738,7 +794,7 @@ async def claim_payment_for_processing(owner_id,payment_id,admin_id):
     return r.modified_count>0
 
 
-async def finalize_processed_payment(owner_id,payment_id,status,admin_id):
+async def finalize_processed_payment(owner_id,payment_id,status,admin_id,admin_name=None):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
         {
@@ -750,7 +806,10 @@ async def finalize_processed_payment(owner_id,payment_id,status,admin_id):
             "$set":{
                 "status":status,
                 "admin_id":admin_id,
+                "processed_by_name":admin_name,
                 "processed_at":now,
+                "approved_at": now if status == "approved" else None,
+                "rejected_at": now if status == "rejected" else None,
                 "updated_at":now,
             },
             "$unset":{
@@ -887,12 +946,11 @@ async def fulfill_subscription_payment(
         ]
     }
     base_expiry = {"$cond": [active_before, "$expiry_date", now]}
+    # Use MongoDB's date + milliseconds arithmetic instead of $dateAdd.
+    # This keeps the fulfillment pipeline compatible with older MongoDB
+    # deployments while preserving the same renewal semantics.
     new_expiry = {
-        "$dateAdd": {
-            "startDate": base_expiry,
-            "unit": "minute",
-            "amount": added_minutes,
-        }
+        "$add": [base_expiry, added_minutes * 60 * 1000]
     }
 
     set_fields = {
@@ -956,14 +1014,11 @@ async def fulfill_subscription_payment(
 
 async def active_subscriptions(owner_id, limit=5000):
     now=datetime.now(timezone.utc)
-    cursor = c(SUBS).find({
+    return await c(SUBS).find({
         "owner_id":owner_id,
         "active":True,
         "expiry_date":{"$gt":now},
-    })
-    if limit is None:
-        return [doc async for doc in cursor]
-    return await cursor.to_list(length=limit)
+    }).to_list(length=limit)
 
 
 async def expired_subscriptions(owner_id):
