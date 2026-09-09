@@ -3,6 +3,13 @@
 from handlers.common.clone_context import *
 
 
+def _actor_name(user):
+    return " ".join(
+        value for value in [getattr(user, "first_name", None), getattr(user, "last_name", None)]
+        if value
+    ).strip() or (f"@{user.username}" if getattr(user, "username", None) else "Unknown")
+
+
 async def _clone_qr_file_id(context, owner: int) -> str:
     bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
     qr = await get_bot_payment_qr(bot_id) if bot_id else ""
@@ -12,6 +19,83 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     # seller_settings.
     settings = await get_seller_settings(owner)
     return str(settings.get("upi_qr_file_id") or "")
+
+async def _update_payment_notification_messages(context, owner, payment_id, caption, current_message=None):
+    """Reliably replace every pending-payment notification with its final status."""
+    refs = list(await get_payment_notification_messages(owner, payment_id) or [])
+
+    # The callback message is the most important one. Edit the Message object
+    # directly first; this works even for older payments whose DB notification
+    # references were never stored.
+    if current_message is not None:
+        try:
+            await current_message.edit_caption(caption=caption, reply_markup=None)
+            refs.append({
+                "chat_id": int(current_message.chat_id),
+                "message_id": int(current_message.message_id),
+            })
+        except TelegramError as exc:
+            logger.warning(
+                "Direct payment notification edit failed owner=%s payment=%s: %s",
+                owner, payment_id, exc,
+            )
+            try:
+                await current_message.edit_text(text=caption, reply_markup=None)
+                refs.append({
+                    "chat_id": int(current_message.chat_id),
+                    "message_id": int(current_message.message_id),
+                })
+            except TelegramError:
+                pass
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    seen = set()
+    updated = 0
+    for ref in refs:
+        try:
+            chat_id = int(ref.get("chat_id"))
+            message_id = int(ref.get("message_id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        key = (chat_id, message_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # The current callback message may already have been edited above.
+        # Telegram will reject a second identical edit; skip it quietly.
+        if current_message is not None and key == (int(current_message.chat_id), int(current_message.message_id)):
+            updated += 1
+            continue
+
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=chat_id, message_id=message_id,
+                caption=caption, reply_markup=None,
+            )
+            updated += 1
+            continue
+        except TelegramError as exc:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id,
+                    text=caption, reply_markup=None,
+                )
+                updated += 1
+                continue
+            except TelegramError:
+                logger.warning(
+                    "Could not update payment notification owner=%s payment=%s chat=%s message=%s: %s",
+                    owner, payment_id, chat_id, message_id, exc,
+                )
+
+    logger.info(
+        "Payment notification status update owner=%s payment=%s updated=%s total_refs=%s",
+        owner, payment_id, updated, len(seen),
+    )
+    return updated
+
 
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_payment':
@@ -91,17 +175,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
         else:
             await q.edit_message_text(preview, reply_markup=preview_kb)
         return True
-    state = {'a_set_upi_id': ('wait_upi_id', 'Send UPI ID', 'a_manual_payment'), 'a_set_upi_name': ('wait_upi_name', 'Send UPI Name', 'a_manual_payment'), 'a_set_bot_name': ('wait_bot_name', 'Send Bot Name', 'a_settings'), 'a_set_support': ('wait_support', 'Send Support Username', 'a_settings'), 'a_set_currency': ('wait_currency', '__CURRENCY_GUIDE__', 'a_settings'), 'a_set_timezone': ('wait_timezone', '__TIMEZONE_PICKER__', 'a_settings'), 'a_set_reminder': ('wait_reminder', 'Send Reminder Days', 'a_settings'), 'a_set_referral_days': ('wait_referral_days', 'Send free reward days per successful referral', 'a_settings')}
+    state = {'a_set_upi_id': ('wait_upi_id', 'Send UPI ID', 'a_manual_payment'), 'a_set_upi_name': ('wait_upi_name', 'Send UPI Name', 'a_manual_payment'), 'a_set_bot_name': ('wait_bot_name', 'Send Bot Name', 'a_settings'), 'a_set_support': ('wait_support', 'Send Support Username', 'a_settings'), 'a_set_currency': ('wait_currency', 'Send Currency', 'a_settings'), 'a_set_timezone': ('wait_timezone', '__TIMEZONE_PICKER__', 'a_settings'), 'a_set_reminder': ('wait_reminder', 'Send Reminder Days', 'a_settings'), 'a_set_referral_days': ('wait_referral_days', 'Send free reward days per successful referral', 'a_settings')}
     if a in state:
         key, msg, back = state[a]
         context.user_data.clear()
         if a == 'a_set_timezone':
             settings = await get_seller_settings(owner)
             await q.edit_message_text(timezone_guide(settings.get('timezone') or 'Asia/Kolkata'), reply_markup=timezone_keyboard('a_tz_', 'a_settings'))
-        elif a == 'a_set_currency':
-            settings = await get_seller_settings(owner)
-            context.user_data['wait_currency'] = True
-            await q.edit_message_text(currency_settings_text(settings.get('currency') or 'INR'), reply_markup=self.back('a_settings'))
         else:
             context.user_data[key] = True
             await q.edit_message_text(msg, reply_markup=self.back(back))
@@ -115,14 +195,14 @@ async def handle(self, update, context, q, owner, staff, a, role):
         s = await get_seller_settings(owner)
         # Prefetch Welcome Message settings so its callbacks can render immediately.
         context.chat_data['_welcome_settings_cache'] = dict(s)
-        await q.edit_message_text(f"⚙️ Bot Settings\n\n🤖 Bot Name: {s.get('bot_name') or 'Not Set'}\n📞 Support: {s.get('support_username') or 'Not Set'}\n💱 Currency: {currency_symbol(s.get('currency') or 'INR')} {normalize_currency(s.get('currency')) or 'INR'} ({currency_name(s.get('currency') or 'INR')})\n🕒 Timezone: {s.get('timezone') or 'Asia/Kolkata'}\n🔔 Reminder: {s.get('reminder_days')} day(s)", reply_markup=self.settings_menu())
+        await q.edit_message_text(f"⚙ Bot Settings\n\nBot Name: {s.get('bot_name')}\nSupport: {s.get('support_username') or 'Not Set'}\nCurrency: {s.get('currency')}\nTimezone: {s.get('timezone')}\nReminder: {s.get('reminder_days')}", reply_markup=self.settings_menu())
         return True
     if a == 'a_pending':
         ps = await pending_payments(owner)
         lines = ['📨 Pending Payments\n']
         kb = []
         for p in ps:
-            lines.append(f"• {p['user_id']} | {format_currency((await get_seller_settings(owner)).get('currency'), p['amount'])} | {p['plan']}")
+            lines.append(f"• {p['user_id']} | ₹{p['amount']:g} | {p['plan']}")
             kb.append([InlineKeyboardButton(f"View {p['user_id']}", callback_data=f"a_pay_view_{p['payment_id']}")])
         kb.append([InlineKeyboardButton('⬅ Back', callback_data='a_home')])
         await q.edit_message_text('\n'.join(lines) if ps else '📨 No pending payments', reply_markup=InlineKeyboardMarkup(kb))
@@ -153,15 +233,39 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer(f'Already {current_status}', show_alert=True)
             return True
         if not approve:
-            changed = await set_payment_status(owner, pid, 'rejected', owner)
+            changed = await set_payment_status(owner, pid, 'rejected', q.from_user.id, _actor_name(q.from_user))
             if not changed:
                 await q.answer('Payment is already being processed', show_alert=True)
                 return True
-            await context.bot.send_message(p['user_id'], '❌ Payment rejected')
-            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=owner)
-            await q.edit_message_caption(caption=rejected_caption, reply_markup=None)
+            p = await get_payment(owner, pid) or p
+            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=q.from_user.id)
+            # The decision is already committed. Update the staff message first
+            # so the callback feels immediate; user notification follows.
+            await _update_payment_notification_messages(
+                context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
+            )
+            try:
+                await context.bot.send_message(p['user_id'], '❌ Payment rejected')
+            except Exception:
+                logger.exception('Rejected-payment user notification failed owner=%s payment=%s', owner, pid)
             return True
         claimed = await claim_payment_for_processing(owner, pid, owner)
+        if claimed:
+            # Remove the buttons and immediately acknowledge the callback in the
+            # staff chat while the existing fulfillment flow continues unchanged.
+            try:
+                processing_caption = await self.payment_details_caption(
+                    owner, p, status='pending'
+                )
+                await q.edit_message_caption(
+                    caption=processing_caption + '\n\n⏳ Approval is being processed...',
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.debug(
+                    'Could not show payment processing state owner=%s payment=%s',
+                    owner, pid, exc_info=True,
+                )
         if not claimed:
             latest = await get_payment(owner, pid)
             latest_status = (latest or {}).get('status', 'unknown')
@@ -213,7 +317,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     links.append(f"{ch.get('title')}: {inv.invite_link}")
                 except Exception as exc:
                     links.append(f"{ch.get('title')}: invite failed ({exc})")
-            finalized = await finalize_processed_payment(owner, pid, 'approved', owner)
+            finalized = await finalize_processed_payment(owner, pid, 'approved', q.from_user.id, _actor_name(q.from_user))
             if not finalized:
                 raise RuntimeError('Could not finalize payment status')
             expiry_text = self.format_dt(expiry)
@@ -223,9 +327,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 status_text = f'ℹ️ Your subscription was already active.\nYour new payment has been added to your existing subscription.\n\n📅 Previous Expiry: {self.format_dt(previous_expiry)}\n📅 New Expiry: {expiry_text}\n\n🔗 A fresh private invite link has been generated for you.'
             else:
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
-            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: {format_currency((await get_seller_settings(owner)).get('currency'), float(p.get('amount') or 0))}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
-            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
-            await q.edit_message_caption(caption=approved_caption, reply_markup=None)
+            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
+            p = await get_payment(owner, pid) or p
+            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=q.from_user.id)
+            await _update_payment_notification_messages(
+                context, owner, p.get('payment_id'), approved_caption, current_message=q.message
+            )
         except Exception as exc:
             logger.exception('Payment approval failed owner=%s payment=%s', owner, pid)
             await release_processing_payment(owner, pid, str(exc))
@@ -237,7 +344,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_history':
         ps = await payment_history(owner)
-        text = '📜 Payment History\n\n' + '\n'.join((f"{('✅' if p['status'] == 'approved' else '❌')} {p['user_id']} {format_currency((await get_seller_settings(owner)).get('currency'), p['amount'])} {p['plan']}" for p in ps[:20]))
+        text = '📜 Payment History\n\n' + '\n'.join((f"{('✅' if p['status'] == 'approved' else '❌')} {p['user_id']} ₹{p['amount']:g} {p['plan']}" for p in ps[:20]))
         await q.edit_message_text(text, reply_markup=self.back())
         return True
     return False
