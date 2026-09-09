@@ -4,7 +4,7 @@ from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
 from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_chat_member_welcome, group_manager_message, group_manager_special_callback
 from handlers.clone.group_manager_protection_runtime import group_manager_protection_message, anti_flood_message
-from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_info_callback, forced_join_message_editor, forced_join_editor_callback, forced_join_editor_text_input, forced_join_editor_media_input, forced_join_toggle_callback, connect_forced_join_command
+from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_my_chat_member, forced_join_info_callback, forced_join_message_editor, forced_join_editor_callback, forced_join_editor_text_input, forced_join_editor_media_input, forced_join_toggle_callback
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler, ChatMemberHandler
 from telegram.request import HTTPXRequest
@@ -345,7 +345,6 @@ class CloneRuntimeAppMixin:
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
         app.add_handler(CommandHandler("connectgroup",self.connect_group_command))
-        app.add_handler(CommandHandler("connectforcedjoin",lambda update,context: connect_forced_join_command(self,update,context)))
         app.add_handler(CommandHandler("connectsupport",self.connect_support_command))
         app.add_handler(CommandHandler("confirm", self.seller_broadcast_confirm_command))
         app.add_handler(CommandHandler("cancel", self.seller_broadcast_cancel_command))
@@ -388,6 +387,9 @@ class CloneRuntimeAppMixin:
             app.add_handler(handler,group=-7)
         for handler in subscription_guard_handlers():
             app.add_handler(handler,group=-7)
+        # MY_CHAT_MEMBER is specifically for the clone bot being added/promoted in a group/channel.
+        # It is intentionally separate from /connectgroup and user CHAT_MEMBER handling.
+        app.add_handler(ChatMemberHandler(forced_join_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER), group=-36)
         app.add_handler(ChatJoinRequestHandler(forced_join_request), group=-35)
         app.add_handler(ChatMemberHandler(forced_join_auto_approve, ChatMemberHandler.CHAT_MEMBER), group=-34)
         app.add_handler(ChatMemberHandler(subscription_guard_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-30)
