@@ -781,9 +781,11 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
 
         needle = raw.lstrip("@").strip().casefold()
         record = None
-        # Read the registry directly so every registered clone is searchable.
-        for candidate in await get_all_active_bots():
-            if candidate.get("status") == "removed" or not candidate.get("bot_id"):
+        # Search the preserved clone registry, including soft-deleted/removed bots.
+        # Removed records are intentionally retained so their original data_scope_id
+        # remains available for backup/restore after the bot is disconnected.
+        for candidate in await get_database()["seller_bots"].find({}).sort("created_at", 1).to_list(length=None):
+            if not candidate.get("bot_id"):
                 continue
             bot_id = str(candidate.get("bot_id") or "").strip()
             username = str(candidate.get("bot_username") or "").lstrip("@").strip()
@@ -1038,6 +1040,7 @@ async def _owner_clone_backup_form(record):
         "💎 <b>Seller Plan & Limits</b>",
         f"• Plan: {escape(str(plan.get('name') or 'Free'))}",
         f"• Status: {escape(plan_status)}",
+        f"• Clone Bot Status: {'Deleted / Disconnected' if str(record.get('status') or '').lower() == 'removed' else 'Connected'}",
         f"• Expiry: {fmt_dt(expiry) if expiry else 'No expiry'}",
         f"• Clone Bots: {seller_usage_live.get('bot_count', 0):,} / {lim(plan.get('bot_limit'), 1)}",
         f"• Active Subscribers: {clone_active_subscribers:,} / {lim(plan.get('active_subscriber_limit'), 25)}",
@@ -1232,11 +1235,12 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         record = await get_bot_by_bot_id(bot_id)
-        if not record or record.get("status") == "removed":
+        if not record:
             await query.answer("Clone bot not found.", show_alert=True)
             return
 
         # Directly show the registered-clone report after a clone is selected/search-matched.
+        # This also works for soft-deleted clones whose registry/data scope was preserved.
         if action.startswith("main_owner_clone_backup_") and not action.startswith("main_owner_clone_backup_create_"):
             text, markup = await _owner_clone_backup_form(record)
             await query.edit_message_text(
