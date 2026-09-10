@@ -713,6 +713,148 @@ async def _clone_runtime(bot_id):
     return running.application.bot if running else None
 
 
+
+async def _find_owner_clone_backup_record(search_value: str):
+    """Find a clone for owner backup, including legacy/deleted bots.
+
+    Current builds preserve removed records in seller_bots. Older builds could
+    have removed that registry record while leaving the clone's scoped data in
+    MongoDB. In that case, recover the bot identity/scope from clone data
+    documents so the latest remaining data can still be backed up.
+    """
+    raw = str(search_value or "").strip()
+    needle = raw.lstrip("@").strip()
+    if not needle:
+        return None
+
+    db = get_database()
+    registry = db["seller_bots"]
+
+    # 1) Prefer the canonical registry, including soft-deleted records.
+    candidates = await registry.find({}).sort("created_at", 1).to_list(length=None)
+    folded = needle.casefold()
+    for candidate in candidates:
+        bot_id = str(candidate.get("bot_id") or "").strip()
+        username = str(candidate.get("bot_username") or "").lstrip("@").strip()
+        bot_name = str(candidate.get("bot_name") or "").strip()
+        if folded in {bot_id.casefold(), username.casefold(), bot_name.casefold()}:
+            return candidate
+
+    # 2) Legacy fallback: recover a deleted bot whose seller_bots identity
+    # record is gone but its clone-scoped database records still exist.
+    # Only inspect documents carrying explicit bot identity fields; this avoids
+    # treating an arbitrary user/channel record as a clone identity.
+    try:
+        numeric_id = int(needle)
+    except (TypeError, ValueError):
+        numeric_id = None
+
+    identity_fields = (
+        "bot_id", "clone_bot_id",
+        "bot_username", "clone_bot_username",
+        "bot_name", "clone_bot_name",
+    )
+    collection_names = [
+        n for n in await db.list_collection_names()
+        if n not in {"seller_bots", "backup_restore_locks"} and not n.startswith("system.")
+    ]
+
+    matches = []
+    for name in collection_names:
+        col = db[name]
+        ors = [
+            {"bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+            {"clone_bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+            {"bot_name": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+            {"clone_bot_name": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+        ]
+        if numeric_id is not None:
+            ors.extend([
+                {"bot_id": numeric_id},
+                {"bot_id": str(numeric_id)},
+                {"clone_bot_id": numeric_id},
+                {"clone_bot_id": str(numeric_id)},
+            ])
+        else:
+            ors.extend([
+                {"bot_id": needle},
+                {"clone_bot_id": needle},
+            ])
+        try:
+            cursor = col.find(
+                {"$or": ors},
+                {"owner_id": 1, "data_owner_id": 1, "data_scope_id": 1,
+                 "bot_id": 1, "clone_bot_id": 1, "bot_username": 1,
+                 "clone_bot_username": 1, "bot_name": 1, "clone_bot_name": 1,
+                 "created_at": 1},
+            ).limit(20)
+            async for doc in cursor:
+                scope = doc.get("data_owner_id")
+                if scope is None:
+                    scope = doc.get("data_scope_id")
+                if scope is None:
+                    scope = doc.get("owner_id")
+                if scope is None:
+                    continue
+                try:
+                    scope = int(scope)
+                except (TypeError, ValueError):
+                    continue
+                matches.append((name, doc, scope))
+        except Exception:
+            continue
+
+    if not matches:
+        return None
+
+    # Prefer an exact bot-id match, then exact username/name, then earliest
+    # surviving record. This is only a recovery identity; backup data itself is
+    # still collected by the existing scope-based backup service.
+    def rank(item):
+        _, doc, _scope = item
+        bid = str(doc.get("bot_id") or doc.get("clone_bot_id") or "").strip()
+        bun = str(doc.get("bot_username") or doc.get("clone_bot_username") or "").lstrip("@").strip()
+        bname = str(doc.get("bot_name") or doc.get("clone_bot_name") or "").strip()
+        return (
+            0 if numeric_id is not None and bid == str(numeric_id) else
+            1 if bun.casefold() == folded else
+            2 if bname.casefold() == folded else 3,
+            doc.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        )
+
+    _, doc, scope = sorted(matches, key=rank)[0]
+    recovered_bot_id = doc.get("bot_id") or doc.get("clone_bot_id")
+    try:
+        recovered_bot_id = int(recovered_bot_id)
+    except (TypeError, ValueError):
+        recovered_bot_id = numeric_id or 0
+
+    recovered_username = str(
+        doc.get("bot_username") or doc.get("clone_bot_username") or ""
+    ).lstrip("@")
+    recovered_name = str(
+        doc.get("bot_name") or doc.get("clone_bot_name") or ""
+    )
+
+    # For legacy bot-id-scoped data, bot_id is also the historical scope.
+    # Otherwise use the discovered explicit data scope.
+    if not scope and recovered_bot_id:
+        scope = recovered_bot_id
+
+    return {
+        "bot_id": recovered_bot_id,
+        "bot_name": recovered_name or "Recovered Clone Bot",
+        "bot_username": recovered_username,
+        "owner_id": int(doc.get("owner_id") or 0),
+        "seller_account_id": int(doc.get("owner_id") or 0),
+        "data_owner_id": int(scope),
+        "status": "removed",
+        "active": False,
+        "created_at": doc.get("created_at"),
+        "_recovered_from_database": True,
+    }
+
+
 async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
     message = update.effective_message
@@ -779,24 +921,13 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             )
             raise ApplicationHandlerStop
 
-        needle = raw.lstrip("@").strip().casefold()
-        record = None
-        # Search the preserved clone registry, including soft-deleted/removed bots.
-        # Removed records are intentionally retained so their original data_scope_id
-        # remains available for backup/restore after the bot is disconnected.
-        for candidate in await get_database()["seller_bots"].find({}).sort("created_at", 1).to_list(length=None):
-            if not candidate.get("bot_id"):
-                continue
-            bot_id = str(candidate.get("bot_id") or "").strip()
-            username = str(candidate.get("bot_username") or "").lstrip("@").strip()
-            bot_name = str(candidate.get("bot_name") or "").strip()
-            if needle in {bot_id.casefold(), username.casefold(), bot_name.casefold()}:
-                record = candidate
-                break
+        record = await _find_owner_clone_backup_record(raw)
 
         if not record:
             await update.effective_message.reply_text(
-                "❌ Clone Bot not found.\\n\\nSend the registered Clone Bot username, Bot ID, or exact bot name and try again.",
+                "❌ Clone Bot not found.\n\n"
+                "Send the registered Clone Bot username, Bot ID, or exact bot name and try again.\n"
+                "Deleted/removed clones can also be found if their old database data is still preserved.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔍 Search Again", callback_data="main_owner_clone_backups")],
                     [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
@@ -1235,6 +1366,10 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         record = await get_bot_by_bot_id(bot_id)
+        if not record:
+            # Legacy/deleted fallback: the registry row may be gone while
+            # clone-scoped MongoDB data is still preserved.
+            record = await _find_owner_clone_backup_record(str(bot_id))
         if not record:
             await query.answer("Clone bot not found.", show_alert=True)
             return
