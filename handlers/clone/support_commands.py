@@ -1,66 +1,71 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+import re
 
 
 class CloneSupportCommandsMixin:
-    async def support_details_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Resend the Live Support user-details card in the current topic.
-
-        /details is intentionally limited to a connected Live Support topic so
-        it always targets the user represented by that topic.  The same
-        details text and the same action keyboard used for the automatic
-        support header are sent again.
-        """
-        message = update.effective_message
-        user = update.effective_user
-        chat = update.effective_chat
-        if not message or not user or not chat:
-            return
-
-        if not await self.seller_or_admin(update, context):
-            return
-
-        owner = self.owner(context)
-        support = await get_live_support_settings(owner)
-        if (
-            support.get("mode") != "topic"
-            or not support.get("enabled")
-            or not support.get("support_group_id")
-            or int(chat.id) != int(support["support_group_id"])
-            or not message.message_thread_id
-        ):
-            return
-
-        topic = await get_topic_by_thread(
-            owner, chat.id, message.message_thread_id
-        )
-        if not topic:
-            await message.reply_text(
-                "❌ /details can only be used inside a Live Support user topic."
-            )
-            raise ApplicationHandlerStop
-
-        target_user_id = int(topic["user_id"])
-        details = await self.support_user_details_text(owner, target_user_id)
-        blocked = bool(await is_support_blocked(owner, target_user_id))
-
-        await context.bot.send_message(
-            chat_id=int(chat.id),
-            message_thread_id=int(message.message_thread_id),
-            text=details,
-            parse_mode="HTML",
-            reply_markup=self.support_topic_keyboard(target_user_id, blocked),
-            disable_web_page_preview=True,
-        )
-        raise ApplicationHandlerStop
-
     async def support_template_command_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         message=update.effective_message; user=update.effective_user; chat=update.effective_chat
         if not message or not user or not await self.seller_or_admin(update, context) or not message.text:
             return
         owner=self.owner(context); support=await get_live_support_settings(owner)
         command=message.text.split()[0].split("@",1)[0].lstrip("/").lower()
+
+        # /details is a Live Support topic command, not a configurable
+        # template command.  It must work even for older support topics whose
+        # MongoDB topic mapping was created before the current mapping fields
+        # were introduced.
+        if command == "details":
+            if (
+                support.get("enabled")
+                and support.get("mode") == "topic"
+                and support.get("support_group_id")
+                and int(chat.id) == int(support["support_group_id"])
+                and message.message_thread_id
+            ):
+                topic = await get_topic_by_thread(owner, chat.id, message.message_thread_id)
+                target_user_id = int(topic["user_id"]) if topic and topic.get("user_id") else None
+
+                # Legacy/fallback: support topic names are created as
+                # "👤 <name> | <telegram_user_id>".  Recover the user ID from
+                # the thread's first/title message when the DB mapping is
+                # missing.  The ID is validated against the seller's user
+                # record before showing any details.
+                if not target_user_id:
+                    try:
+                        candidates = []
+                        for candidate in (
+                            getattr(message, "reply_to_message", None),
+                            getattr(message, "forum_topic_created", None),
+                        ):
+                            if candidate:
+                                candidates.append(getattr(candidate, "name", "") or getattr(candidate, "text", ""))
+                        for value in candidates:
+                            match = re.search(r"(?:\||\b)(\d{5,15})\s*$", str(value or ""))
+                            if match:
+                                candidate_id = int(match.group(1))
+                                if await get_user(owner, candidate_id):
+                                    target_user_id = candidate_id
+                                    break
+                    except Exception:
+                        logger.exception("Legacy support /details topic resolution failed owner=%s thread=%s", owner, message.message_thread_id)
+
+                if target_user_id:
+                    text = await self.support_user_details_text(owner, target_user_id)
+                    await message.reply_text(
+                        text,
+                        parse_mode="HTML",
+                        reply_markup=self.support_topic_keyboard(
+                            target_user_id,
+                            bool(await is_support_blocked(owner, target_user_id)),
+                        ),
+                        disable_web_page_preview=True,
+                    )
+                    raise ApplicationHandlerStop
+            # Never treat /details as a normal configurable support template.
+            return
+
         template=await get_support_template(owner,command)
         if not template or template.get("enabled", True) is False:
             return
