@@ -4,6 +4,57 @@ from handlers.common.clone_context import *
 
 
 class CloneSupportCommandsMixin:
+    async def support_details_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Resend the Live Support user-details card in the current topic.
+
+        /details is intentionally limited to a connected Live Support topic so
+        it always targets the user represented by that topic.  The same
+        details text and the same action keyboard used for the automatic
+        support header are sent again.
+        """
+        message = update.effective_message
+        user = update.effective_user
+        chat = update.effective_chat
+        if not message or not user or not chat:
+            return
+
+        if not await self.seller_or_admin(update, context):
+            return
+
+        owner = self.owner(context)
+        support = await get_live_support_settings(owner)
+        if (
+            support.get("mode") != "topic"
+            or not support.get("enabled")
+            or not support.get("support_group_id")
+            or int(chat.id) != int(support["support_group_id"])
+            or not message.message_thread_id
+        ):
+            return
+
+        topic = await get_topic_by_thread(
+            owner, chat.id, message.message_thread_id
+        )
+        if not topic:
+            await message.reply_text(
+                "❌ /details can only be used inside a Live Support user topic."
+            )
+            raise ApplicationHandlerStop
+
+        target_user_id = int(topic["user_id"])
+        details = await self.support_user_details_text(owner, target_user_id)
+        blocked = bool(await is_support_blocked(owner, target_user_id))
+
+        await context.bot.send_message(
+            chat_id=int(chat.id),
+            message_thread_id=int(message.message_thread_id),
+            text=details,
+            parse_mode="HTML",
+            reply_markup=self.support_topic_keyboard(target_user_id, blocked),
+            disable_web_page_preview=True,
+        )
+        raise ApplicationHandlerStop
+
     async def support_template_command_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         message=update.effective_message; user=update.effective_user; chat=update.effective_chat
         if not message or not user or not await self.seller_or_admin(update, context) or not message.text:
