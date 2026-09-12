@@ -2,6 +2,7 @@ import os
 import asyncio
 import io
 import logging
+import re
 import time
 from html import escape
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
@@ -10,7 +11,11 @@ from telegram.error import RetryAfter, TelegramError
 
 from database.admins import is_admin, get_all_admins
 from database.payments import count_pending_payments, total_revenue
-from database.seller_bots import get_bot, get_bots, get_bot_by_bot_id, get_all_active_bots, total_bots, set_bot_active, get_decrypted_bot_token
+from database.seller_bots import (
+    get_bot, get_bots, get_management_bots, get_bot_by_bot_id, get_all_active_bots,
+    total_bots, set_bot_active, get_decrypted_bot_token, mark_bot_suspended,
+    restore_bot_from_suspension, clear_bot_suspension_marker,
+)
 from database.seller_data import (
     stats as seller_stats,
     get_channels as get_seller_channels,
@@ -425,7 +430,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     if not seller:
         return None, None
 
-    bots = await get_bots(owner_id)
+    bots = await get_management_bots(owner_id)
     if selected_bot_id is not None:
         bots = [b for b in bots if int(b.get("bot_id") or 0) == int(selected_bot_id)]
         if not bots:
@@ -585,7 +590,6 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         "🤖 Clone Bot Breakdown\n" + ("\n\n".join(bot_lines) if bot_lines else "No clone bots connected.")
     )
 
-    first_bot = bots[0] if bots else None
     keyboard = [
         [InlineKeyboardButton("⏳ Extend Subscription", callback_data=f"sub_mgmt_extend_{owner_id}")],
         [InlineKeyboardButton("✅ Unsuspend Seller" if suspended else "🚫 Suspend Seller",
@@ -595,10 +599,18 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         [InlineKeyboardButton("📜 Subscription History", callback_data=f"sub_mgmt_history_{owner_id}")],
         [InlineKeyboardButton("💰 Seller Revenue", callback_data="sub_mgmt_revenue")],
     ]
-    if first_bot:
-        keyboard.append([InlineKeyboardButton("⏸ Pause First Clone Bot" if first_bot.get("active") else "▶ Resume First Clone Bot",
-            callback_data=f"main_seller_pausebot_{owner_id}_{int(first_bot.get('bot_id') or 0)}" if first_bot.get("active") else f"main_seller_resumebot_{owner_id}_{int(first_bot.get('bot_id') or 0)}")])
-        keyboard.append([InlineKeyboardButton("⏹ Stop First Bot Runtime", callback_data=f"main_seller_stopbot_{owner_id}_{int(first_bot.get('bot_id') or 0)}")])
+    for bot in bots:
+        bot_id = int(bot.get("bot_id") or 0)
+        if not bot_id:
+            continue
+        bot_name = str(bot.get("bot_name") or bot.get("bot_username") or f"Bot {bot_id}")
+        if bot.get("active"):
+            label = f"⏸ Pause ({bot_name})"
+            callback = f"main_seller_pausebot_{owner_id}_{bot_id}"
+        else:
+            label = f"▶ Resume ({bot_name})"
+            callback = f"main_seller_resumebot_{owner_id}_{bot_id}"
+        keyboard.append([InlineKeyboardButton(label[:64], callback_data=callback)])
     keyboard += [
         [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")],
         [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
@@ -713,148 +725,6 @@ async def _clone_runtime(bot_id):
     return running.application.bot if running else None
 
 
-
-async def _find_owner_clone_backup_record(search_value: str):
-    """Find a clone for owner backup, including legacy/deleted bots.
-
-    Current builds preserve removed records in seller_bots. Older builds could
-    have removed that registry record while leaving the clone's scoped data in
-    MongoDB. In that case, recover the bot identity/scope from clone data
-    documents so the latest remaining data can still be backed up.
-    """
-    raw = str(search_value or "").strip()
-    needle = raw.lstrip("@").strip()
-    if not needle:
-        return None
-
-    db = get_database()
-    registry = db["seller_bots"]
-
-    # 1) Prefer the canonical registry, including soft-deleted records.
-    candidates = await registry.find({}).sort("created_at", 1).to_list(length=None)
-    folded = needle.casefold()
-    for candidate in candidates:
-        bot_id = str(candidate.get("bot_id") or "").strip()
-        username = str(candidate.get("bot_username") or "").lstrip("@").strip()
-        bot_name = str(candidate.get("bot_name") or "").strip()
-        if folded in {bot_id.casefold(), username.casefold(), bot_name.casefold()}:
-            return candidate
-
-    # 2) Legacy fallback: recover a deleted bot whose seller_bots identity
-    # record is gone but its clone-scoped database records still exist.
-    # Only inspect documents carrying explicit bot identity fields; this avoids
-    # treating an arbitrary user/channel record as a clone identity.
-    try:
-        numeric_id = int(needle)
-    except (TypeError, ValueError):
-        numeric_id = None
-
-    identity_fields = (
-        "bot_id", "clone_bot_id",
-        "bot_username", "clone_bot_username",
-        "bot_name", "clone_bot_name",
-    )
-    collection_names = [
-        n for n in await db.list_collection_names()
-        if n not in {"seller_bots", "backup_restore_locks"} and not n.startswith("system.")
-    ]
-
-    matches = []
-    for name in collection_names:
-        col = db[name]
-        ors = [
-            {"bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
-            {"clone_bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
-            {"bot_name": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
-            {"clone_bot_name": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
-        ]
-        if numeric_id is not None:
-            ors.extend([
-                {"bot_id": numeric_id},
-                {"bot_id": str(numeric_id)},
-                {"clone_bot_id": numeric_id},
-                {"clone_bot_id": str(numeric_id)},
-            ])
-        else:
-            ors.extend([
-                {"bot_id": needle},
-                {"clone_bot_id": needle},
-            ])
-        try:
-            cursor = col.find(
-                {"$or": ors},
-                {"owner_id": 1, "data_owner_id": 1, "data_scope_id": 1,
-                 "bot_id": 1, "clone_bot_id": 1, "bot_username": 1,
-                 "clone_bot_username": 1, "bot_name": 1, "clone_bot_name": 1,
-                 "created_at": 1},
-            ).limit(20)
-            async for doc in cursor:
-                scope = doc.get("data_owner_id")
-                if scope is None:
-                    scope = doc.get("data_scope_id")
-                if scope is None:
-                    scope = doc.get("owner_id")
-                if scope is None:
-                    continue
-                try:
-                    scope = int(scope)
-                except (TypeError, ValueError):
-                    continue
-                matches.append((name, doc, scope))
-        except Exception:
-            continue
-
-    if not matches:
-        return None
-
-    # Prefer an exact bot-id match, then exact username/name, then earliest
-    # surviving record. This is only a recovery identity; backup data itself is
-    # still collected by the existing scope-based backup service.
-    def rank(item):
-        _, doc, _scope = item
-        bid = str(doc.get("bot_id") or doc.get("clone_bot_id") or "").strip()
-        bun = str(doc.get("bot_username") or doc.get("clone_bot_username") or "").lstrip("@").strip()
-        bname = str(doc.get("bot_name") or doc.get("clone_bot_name") or "").strip()
-        return (
-            0 if numeric_id is not None and bid == str(numeric_id) else
-            1 if bun.casefold() == folded else
-            2 if bname.casefold() == folded else 3,
-            doc.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
-        )
-
-    _, doc, scope = sorted(matches, key=rank)[0]
-    recovered_bot_id = doc.get("bot_id") or doc.get("clone_bot_id")
-    try:
-        recovered_bot_id = int(recovered_bot_id)
-    except (TypeError, ValueError):
-        recovered_bot_id = numeric_id or 0
-
-    recovered_username = str(
-        doc.get("bot_username") or doc.get("clone_bot_username") or ""
-    ).lstrip("@")
-    recovered_name = str(
-        doc.get("bot_name") or doc.get("clone_bot_name") or ""
-    )
-
-    # For legacy bot-id-scoped data, bot_id is also the historical scope.
-    # Otherwise use the discovered explicit data scope.
-    if not scope and recovered_bot_id:
-        scope = recovered_bot_id
-
-    return {
-        "bot_id": recovered_bot_id,
-        "bot_name": recovered_name or "Recovered Clone Bot",
-        "bot_username": recovered_username,
-        "owner_id": int(doc.get("owner_id") or 0),
-        "seller_account_id": int(doc.get("owner_id") or 0),
-        "data_owner_id": int(scope),
-        "status": "removed",
-        "active": False,
-        "created_at": doc.get("created_at"),
-        "_recovered_from_database": True,
-    }
-
-
 async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
     message = update.effective_message
@@ -921,13 +791,86 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             )
             raise ApplicationHandlerStop
 
-        record = await _find_owner_clone_backup_record(raw)
+        needle = raw.lstrip("@").strip().casefold()
+        record = None
+        db = get_database()
+
+        # First try direct indexed-style lookups.  This handles numeric Bot IDs
+        # reliably and does not depend on the clone being active.
+        try:
+            if needle.isdigit():
+                numeric_id = int(needle)
+                record = await db["seller_bots"].find_one({"bot_id": numeric_id})
+        except Exception:
+            record = None
+
+        if not record:
+            # Username/name lookup is case-insensitive through the normalized
+            # username field and exact stored name.
+            try:
+                record = await db["seller_bots"].find_one({
+                    "$or": [
+                        {"bot_username_normalized": needle},
+                        {"bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+                        {"bot_name": {"$regex": f"^{re.escape(raw.strip())}$", "$options": "i"}},
+                    ]
+                })
+            except Exception:
+                record = None
+
+        # Final fallback: search every non-system collection for a document
+        # carrying the Bot ID/username/name.  This is important for old/deleted
+        # clones when the seller_bots registry entry was removed but the clone's
+        # database scope is still preserved.  If a matching data document is
+        # found, recover its owner/data_owner scope and build a backup record.
+        if not record:
+            try:
+                collection_names = [
+                    name for name in await db.list_collection_names()
+                    if not name.startswith("system.")
+                ]
+                numeric_id = int(needle) if needle.isdigit() else None
+                for name in collection_names:
+                    if name == "seller_bots":
+                        continue
+                    query_parts = []
+                    if numeric_id is not None:
+                        query_parts.extend([
+                            {"bot_id": numeric_id},
+                            {"bot_id": str(numeric_id)},
+                        ])
+                    query_parts.extend([
+                        {"bot_username_normalized": needle},
+                        {"bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+                        {"bot_name": {"$regex": f"^{re.escape(raw.strip())}$", "$options": "i"}},
+                    ])
+                    if not query_parts:
+                        continue
+                    candidate = await db[name].find_one({"$or": query_parts})
+                    if not candidate:
+                        continue
+                    candidate_bot_id = candidate.get("bot_id") or numeric_id
+                    scope = candidate.get("data_owner_id") or candidate.get("owner_id")
+                    if candidate_bot_id and scope:
+                        record = {
+                            "bot_id": int(candidate_bot_id),
+                            "bot_name": candidate.get("bot_name") or raw.strip(),
+                            "bot_username": candidate.get("bot_username") or (raw.lstrip("@").strip() if not needle.isdigit() else ""),
+                            "owner_id": int(candidate.get("owner_id") or candidate.get("seller_account_id") or scope),
+                            "seller_account_id": int(candidate.get("seller_account_id") or candidate.get("owner_id") or scope),
+                            "data_owner_id": int(scope),
+                            "created_at": candidate.get("created_at"),
+                            "active": bool(candidate.get("active", False)),
+                            "status": candidate.get("status") or "removed",
+                            "_recovered_from_collection": name,
+                        }
+                        break
+            except Exception:
+                logger.exception("Owner clone backup database-wide search failed for %s", raw)
 
         if not record:
             await update.effective_message.reply_text(
-                "❌ Clone Bot not found.\n\n"
-                "Send the registered Clone Bot username, Bot ID, or exact bot name and try again.\n"
-                "Deleted/removed clones can also be found if their old database data is still preserved.",
+                "❌ Clone Bot not found.\\n\\nSend the registered Clone Bot username, Bot ID, or exact bot name and try again.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔍 Search Again", callback_data="main_owner_clone_backups")],
                     [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
@@ -1367,10 +1310,6 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         record = await get_bot_by_bot_id(bot_id)
         if not record:
-            # Legacy/deleted fallback: the registry row may be gone while
-            # clone-scoped MongoDB data is still preserved.
-            record = await _find_owner_clone_backup_record(str(bot_id))
-        if not record:
             await query.answer("Clone bot not found.", show_alert=True)
             return
 
@@ -1626,9 +1565,14 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id = int(action.replace("main_seller_suspend_", ""))
         await suspend_seller(seller_id)
-        for record in await get_bots(seller_id):
-            if record.get("bot_id"):
-                await bot_manager.stop_bot(int(record["bot_id"]), "seller_suspended")
+        for record in await get_management_bots(seller_id):
+            bot_id = int(record.get("bot_id") or 0)
+            if not bot_id:
+                continue
+            was_active = bool(record.get("active"))
+            await mark_bot_suspended(bot_id, was_active)
+            if was_active:
+                await bot_manager.stop_bot(bot_id, "seller_suspended")
         await seller_owner_view(query, seller_id)
         return
 
@@ -1638,9 +1582,16 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id = int(action.replace("main_seller_unsuspend_", ""))
         await unsuspend_seller(seller_id)
-        for record in await get_bots(seller_id):
-            if record.get("active") and record.get("bot_id"):
-                await bot_manager.start_bot(int(record["bot_id"]))
+        for record in await get_management_bots(seller_id):
+            bot_id = int(record.get("bot_id") or 0)
+            if not bot_id:
+                continue
+            restored = await restore_bot_from_suspension(bot_id)
+            if restored:
+                await bot_manager.start_bot(bot_id)
+            elif record.get("status") == "seller_suspended":
+                # This clone was already paused before suspension; keep it paused.
+                await clear_bot_suspension_marker(bot_id)
         await seller_owner_view(query, seller_id)
         return
 
@@ -1661,18 +1612,43 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id_text, bot_id_text = action.replace("main_seller_resumebot_", "", 1).split("_", 1)
         seller_id, bot_id = int(seller_id_text), int(bot_id_text)
-        await set_bot_active(bot_id,True)
-        await bot_manager.start_bot(bot_id)
-        await seller_owner_view(query,seller_id)
-        return
-
-    if action.startswith("main_seller_stopbot_"):
-        if not await is_admin(user_id):
-            await query.edit_message_text("❌ Owner access only.")
+        seller = await get_seller(seller_id)
+        if seller and seller.get("suspended"):
+            await query.answer("❌ Seller is suspended. Unsuspend the seller first.", show_alert=True)
+            await seller_owner_view(query, seller_id)
             return
-        seller_id_text, bot_id_text = action.replace("main_seller_stopbot_", "", 1).split("_", 1)
-        seller_id, bot_id = int(seller_id_text), int(bot_id_text)
-        await bot_manager.stop_bot(bot_id, "stopped_by_owner")
+        # Mark active only for the startup attempt. If Telegram/runtime rejects
+        # the start, roll the DB state back to paused so the owner keeps a
+        # reliable Resume button instead of a misleading Pause button.
+        await set_bot_active(bot_id, True)
+        try:
+            started = await bot_manager.start_bot(bot_id)
+        except Exception as exc:
+            started = False
+            logger.exception("Owner resume failed bot_id=%s seller_id=%s", bot_id, seller_id)
+            error_text = str(exc)
+        else:
+            error_text = ""
+
+        if not started:
+            await set_bot_active(bot_id, False)
+            record = await get_bot_by_bot_id(bot_id)
+            runtime_error = str((record or {}).get("runtime_error") or error_text or "").strip()
+            if runtime_error:
+                # Keep the alert short and hide any sensitive token-like text.
+                runtime_error = re.sub(r"(?i)(bot\d+:[A-Za-z0-9_-]+)", "[redacted]", runtime_error)
+                runtime_error = runtime_error[:220]
+                await query.answer(
+                    f"⚠️ Clone bot could not be resumed.\n\n{runtime_error}",
+                    show_alert=True,
+                )
+            else:
+                await query.answer(
+                    "⚠️ Clone bot could not be resumed. Please check the bot token, seller plan, and runtime status.",
+                    show_alert=True,
+                )
+        else:
+            await query.answer("✅ Clone bot resumed.", show_alert=False)
         await seller_owner_view(query, seller_id)
         return
 
