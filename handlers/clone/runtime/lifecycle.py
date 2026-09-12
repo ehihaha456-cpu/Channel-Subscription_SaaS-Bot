@@ -23,6 +23,10 @@ class CloneRuntimeLifecycleMixin:
 
             bot_id = int(record["bot_id"])
             seller_account_id = int(record["owner_id"])
+            seller = await get_seller(seller_account_id)
+            if seller and seller.get("suspended"):
+                await set_runtime_status(bot_id, "seller_suspended", "Seller account is suspended")
+                return False
             allowed, quota = await bot_runtime_allowed(seller_account_id, bot_id)
             if not allowed:
                 limit = quota.get("limit", 0)

@@ -40,6 +40,7 @@ class CloneRuntimeRecoveryMixin:
             "invalid_token",
             "token_missing",
             "plan_limit_paused",
+            "seller_suspended",
         }:
             return False
         if not await recovery_allowed(record):
