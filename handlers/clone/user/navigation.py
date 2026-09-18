@@ -5,10 +5,11 @@ from handlers.common.editor_engine import build_editor_keyboard
 from handlers.common.feature_navigation import capture_feature_origin, restore_feature_origin, feature_back_callback
 from database.business_automation import get_business_welcome
 from handlers.common.clone_context import MAIN_BOT_USERNAME
-from utils.branding import append_branding
+from utils.branding import append_seller_branding
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import hashlib
 
 
 
@@ -66,7 +67,7 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
     item = await get_business_welcome(owner)
     user = update.effective_user
     text = _render_business_variables(str(item.get("text") or "Welcome!"), user)
-    text = await append_branding(text)
+    text = await append_seller_branding(text, owner)
     bot_record = await get_bot_by_data_owner_id(owner) or {}
     markup = build_editor_keyboard(
         _render_business_buttons(item.get("buttons") or [], user),
@@ -112,6 +113,24 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
         await context.bot.send_document(document=file_id, **kwargs)
 
 
+async def _resolve_target_plan_button(owner: int, token: str) -> list[int] | None:
+    """Resolve a compact welcome-button token back to its saved chat IDs."""
+    settings = await get_seller_settings(owner)
+    for row in settings.get("welcome_buttons") or []:
+        for item in row or []:
+            if str(item.get("type") or "") != "plans":
+                continue
+            value = str(item.get("value") or "")
+            if hashlib.sha1(value.encode("utf-8")).hexdigest()[:12] != token:
+                continue
+            try:
+                ids = [int(x.strip()) for x in value.split(",") if x.strip()]
+            except (TypeError, ValueError):
+                return None
+            return list(dict.fromkeys(ids)) or None
+    return None
+
+
 async def handle(self, update, context, q, owner, action):
     if action == 'c_return_origin':
         if await restore_feature_origin(q, context):
@@ -123,12 +142,30 @@ async def handle(self, update, context, q, owner, action):
         except Exception:
             pass
         return True
-    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'}:
-        try:
-            capture_feature_origin(q, context)
-        except Exception:
-            # Back-navigation tracking is optional and must not block the feature itself.
-            pass
+    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'} or action.startswith('c_plans_target_') or action.startswith('c_plans_list_'):
+        # Do not replace the original Welcome/previous-page origin when the
+        # user is leaving an active/expired payment screen via Back. Otherwise
+        # the subsequent Plans -> Back navigation can point back to the payment
+        # QR instead of the actual page that opened the purchase flow.
+        payment_screen = False
+        if action in {'c_buy', 'c_plans'}:
+            message = getattr(q, 'message', None)
+            caption = str(getattr(message, 'caption', None) or '').lower()
+            text_value = str(getattr(message, 'text', None) or '').lower()
+            payment_markers = (
+                'razorpay upi payment',
+                'payment qr expired',
+                'cashfree payment',
+                'secure payment',
+                'transaction:',
+            )
+            payment_screen = any(marker in caption or marker in text_value for marker in payment_markers)
+        if not payment_screen:
+            try:
+                capture_feature_origin(q, context)
+            except Exception:
+                # Back-navigation tracking is optional and must not block the feature itself.
+                pass
     back_keyboard = self.back(feature_back_callback(context))
     if action == 'seller_current_plan':
         seller_account_id = self.seller_account(context)
@@ -158,10 +195,38 @@ async def handle(self, update, context, q, owner, action):
         settings = await ensure_seller_defaults(owner, (record or {}).get('bot_name', 'Subscription Bot'))
         await self.send_welcome(q.message, context, settings, q.from_user)
         return True
+    if action.startswith('c_plans_target_'):
+        token = action.replace('c_plans_target_', '', 1)
+        target_chat_ids = await _resolve_target_plan_button(owner, token)
+        if not target_chat_ids:
+            await q.answer('This subscription button is no longer configured.', show_alert=True)
+            return True
+        await self.show_plans(q, owner, True, context, target_chat_ids=target_chat_ids)
+        return True
+    if action.startswith('c_plans_list_'):
+        plan_list_id = action.replace('c_plans_list_', '', 1)
+        if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+            await q.answer('Invalid PLAN ID.', show_alert=True)
+            return True
+        groups = await get_plan_groups(owner)
+        group = next((g for g in groups if str(g.get('plan_list_id') or '') == plan_list_id), None)
+        if not group:
+            await q.answer('PLAN ID not found in this bot.', show_alert=True)
+            return True
+        await self.show_plans(q, owner, True, context, target_chat_ids=group.get('chat_ids') or [])
+        return True
     if action == 'c_plans':
-        await self.show_plans(q, owner, True, context)
+        payment_photo = bool(
+            getattr(q.message, 'photo', None)
+            and 'razorpay upi payment' in str(getattr(q.message, 'caption', '') or '').lower()
+        )
+        await self.show_plans(q, owner, True, context, force_new_message=payment_photo)
         return True
     if action in {'c_buy', 'c_renew'}:
-        await self.show_plans(q, owner, True, context)
+        payment_photo = bool(
+            getattr(q.message, 'photo', None)
+            and 'razorpay upi payment' in str(getattr(q.message, 'caption', '') or '').lower()
+        )
+        await self.show_plans(q, owner, True, context, force_new_message=payment_photo)
         return True
     return False
