@@ -138,9 +138,12 @@ async def save_paid_plan(plan: dict):
         plans.append(plan)
     else:
         plans[idx] = {**plans[idx], **plan}
-    # Branding is always ON on free and paid plans.
-    for p in plans:
-        p["branding_enabled"] = True
+    # New plans default to branding ON. Existing plans keep their current
+    # branding setting when edited so the Owner can control it independently.
+    if idx is None:
+        plan.setdefault("branding_enabled", True)
+    elif "branding_enabled" not in plan:
+        plan["branding_enabled"] = bool(plans[idx].get("branding_enabled", True))
     await update_config(paid_plans=plans)
     return plan
 
@@ -240,7 +243,8 @@ async def effective_plan(owner_id: int):
     if not paid or not paid.get("active", True):
         return free, assignment
     paid = dict(paid)
-    paid["branding_enabled"] = True
+    # Branding is a per-seller-plan setting. Do not force it ON here.
+    paid["branding_enabled"] = bool(paid.get("branding_enabled", True))
     return paid, assignment
 
 
