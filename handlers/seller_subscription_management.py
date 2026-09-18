@@ -130,6 +130,26 @@ async def _show_owner_manual_payment(q, cfg):
         await q.edit_message_text(text, reply_markup=markup)
 
 
+async def _show_paid_plan_manage(q, cfg):
+    rows=[]
+    lines=["💎 Plan Manage", ""]
+    for plan in cfg.get("paid_plans", []):
+        branding_on = bool(plan.get("branding_enabled", True))
+        lines.append(
+            f"• {plan.get('name','Plan')} — ₹{float(plan.get('price',0) or 0):g} / ⭐{int(plan.get('stars_price',0) or 0)} / {plan.get('duration_days',30)}d\n"
+            f"  Bots: {plan.get('bot_limit', 1)} | Subscribers: {plan.get('active_subscriber_limit', 0)} | "
+            f"Channels: {plan.get('channel_limit', 0)} | Plans: {plan.get('plan_limit', 0)} | Admins: {plan.get('admin_limit', 1)}\n"
+            f"  Branding tag: {'ON' if branding_on else 'OFF'}"
+        )
+        rows.append([
+            InlineKeyboardButton(f"✏ {plan.get('name','Plan')}", callback_data=f"sub_mgmt_paid_edit_{plan.get('plan_id')}"),
+            InlineKeyboardButton(f"🏷 {'ON' if branding_on else 'OFF'}", callback_data=f"sub_mgmt_paid_branding_{plan.get('plan_id')}"),
+            InlineKeyboardButton("🗑", callback_data=f"sub_mgmt_paid_del_{plan.get('plan_id')}"),
+        ])
+    rows += [[InlineKeyboardButton("➕ Add Custom Plan",callback_data="sub_mgmt_paid_add")],[InlineKeyboardButton("⬅ Back",callback_data="sub_mgmt_home")]]
+    await q.edit_message_text("\n".join(lines), reply_markup=kb(rows))
+
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q=update.callback_query; await q.answer(); a=q.data
     if not await is_admin(q.from_user.id): await q.answer("Owner only", show_alert=True); return
@@ -190,19 +210,25 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear(); context.user_data["sub_wait"]="free"
         await q.edit_message_text("Send: Bots | Subscribers | Channels | Plans | Admins", reply_markup=back("sub_mgmt_free")); return
     if a=="sub_mgmt_paid":
-        rows=[]; lines=["💎 Plan Manage\n"]
-        for p in cfg.get("paid_plans",[]):
-            lines.append(
-                f"• {p['name']} — ₹{p['price']:g} / ⭐{int(p.get('stars_price',0) or 0)} / {p['duration_days']}d\n"
-                f"  Bots: {p.get('bot_limit', 1)} | "
-                f"Subscribers: {p.get('active_subscriber_limit', 0)} | "
-                f"Channels: {p.get('channel_limit', 0)} | "
-                f"Plans: {p.get('plan_limit', 0)} | "
-                f"Admins: {p.get('admin_limit', 1)}"
-            )
-            rows.append([InlineKeyboardButton(f"✏ {p['name']}",callback_data=f"sub_mgmt_paid_edit_{p['plan_id']}"),InlineKeyboardButton("🗑",callback_data=f"sub_mgmt_paid_del_{p['plan_id']}")])
-        rows += [[InlineKeyboardButton("➕ Add Custom Plan",callback_data="sub_mgmt_paid_add")],[InlineKeyboardButton("⬅ Back",callback_data="sub_mgmt_home")]]
-        await q.edit_message_text("\n".join(lines),reply_markup=kb(rows)); return
+        await _show_paid_plan_manage(q, cfg)
+        return
+    if a.startswith("sub_mgmt_paid_branding_"):
+        plan_id = a.replace("sub_mgmt_paid_branding_", "", 1)
+        plans = list(cfg.get("paid_plans", []))
+        changed = False
+        for plan in plans:
+            if str(plan.get("plan_id")) == plan_id:
+                plan["branding_enabled"] = not bool(plan.get("branding_enabled", True))
+                changed = True
+                status = "ON" if plan["branding_enabled"] else "OFF"
+                break
+        if not changed:
+            await q.answer("Plan not found.", show_alert=True)
+            return
+        await update_config(paid_plans=plans)
+        cfg = await get_config(force_refresh=True)
+        await _show_paid_plan_manage(q, cfg)
+        return
     if a=="sub_mgmt_paid_add" or a.startswith("sub_mgmt_paid_edit_"):
         context.user_data.clear(); context.user_data["sub_wait"]="paid_add" if a.endswith("add") else "paid_edit"
         if a.startswith("sub_mgmt_paid_edit_"): context.user_data["sub_plan_id"]=a.replace("sub_mgmt_paid_edit_","")
@@ -481,7 +507,7 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
             duration=int(days)
             if duration < 1 or duration > 3650: raise ValueError("Duration must be between 1 and 3650 days")
             limits=validate_plan_limits(bots,subs,channels,plans,admins)
-            await save_paid_plan({"plan_id":pid,"name":name,"price":parsed_price,"stars_price":parsed_stars,"duration_days":duration,"bot_limit":limits[0],"active_subscriber_limit":limits[1],"channel_limit":limits[2],"plan_limit":limits[3],"admin_limit":limits[4],"broadcast_enabled":True,"coupon_enabled":True,"referral_enabled":True,"analytics_enabled":True,"branding_enabled":True,"active":True})
+            await save_paid_plan({"plan_id":pid,"name":name,"price":parsed_price,"stars_price":parsed_stars,"duration_days":duration,"bot_limit":limits[0],"active_subscriber_limit":limits[1],"channel_limit":limits[2],"plan_limit":limits[3],"admin_limit":limits[4],"broadcast_enabled":True,"coupon_enabled":True,"referral_enabled":True,"analytics_enabled":True,"active":True})
         elif mode=="trial":
             days,pid=[x.strip() for x in text.split("|",1)]
             trial_days=int(days)

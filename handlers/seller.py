@@ -44,6 +44,7 @@ from database.seller_subscriptions import (
     pending_plan_purchase,
 )
 from services.bot_manager import bot_manager
+from services.business_automation_runtime import business_automation_runtime
 from services.invite_resend_lock import resend_invites_safely
 from database.subscription_guard import get_active_invite, save_invite
 from database.seller_data import (
@@ -121,13 +122,33 @@ async def send_seller_upgrade_plan(message, owner_id: int) -> None:
     cfg = await get_config()
     plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
     rows = []
-    lines = ["💎 Buy / Change Seller Plan", ""]
+    lines = [
+        "💎 Buy / Change Seller Plan",
+        "",
+        "📊 Plan Limitations",
+        "• Clone Bots: seller-level limit",
+        "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
+        "",
+    ]
     current, _ = await effective_plan(owner_id)
     for plan in plans:
+        plan_name = plan.get('name', 'Plan')
+        price = plan.get('price', 0)
+        duration_days = plan.get('duration_days', 30)
         lines.append(
-            f"• {plan.get('name', 'Plan')} — ₹{plan.get('price', 0):g} / "
-            f"{plan.get('duration_days', 30)} days"
+            f"• {plan_name} — ₹{price:g} / {duration_days} days"
         )
+        lines.append(f"  🤖 Clone Bots: {_display_plan_limit(plan.get('bot_limit'))}")
+        lines.append(f"  👥 Active Subscribers: {_display_plan_limit(plan.get('active_subscriber_limit'))} / bot")
+        lines.append(f"  📢 Channels / Groups: {_display_plan_limit(plan.get('channel_limit'))} / bot")
+        lines.append(f"  📦 Subscription Plans: {_display_plan_limit(plan.get('plan_limit'))} / bot")
+        lines.append(f"  👨‍💼 Admins: {_display_plan_limit(plan.get('admin_limit'))} / bot")
+        if not bool(plan.get("branding_enabled", True)):
+            lines.append("  REMOVED BRAND TAG")
+        # Keep a clearly visible blank gap between every seller plan.
+        lines.append("")
+        lines.append("")
+        lines.append("")
         request_type = (
             "upgrade"
             if float(plan.get("price", 0)) >= float(current.get("price", 0))
@@ -321,6 +342,8 @@ def business_automation_keyboard(connected_count:int, enabled:bool):
     rows=[
         [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="seller_business_connect")],
         [InlineKeyboardButton(f"📱 Connected Accounts ({connected_count})", callback_data="seller_business_accounts")],
+        [InlineKeyboardButton("📢 Broadcast / Send Invite Link", callback_data="seller_business_broadcast")],
+        [InlineKeyboardButton("🔗 Resend Invite Links to Active Subscribers", callback_data="seller_business_resend_active")],
         [InlineKeyboardButton("👋 Welcome Message", callback_data="seller_business_welcome")],
         [InlineKeyboardButton("💬 Auto Reply & Reply Templates", callback_data="seller_business_replies")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="seller_business_settings")],
@@ -507,9 +530,13 @@ async def business_automation_text(owner_id:int):
     settings=await get_seller_settings(owner_id)
     connected=await count_business_accounts(owner_id)
     enabled=bool(settings.get("business_automation_enabled"))
+    accounts=await get_business_accounts(owner_id)
+    runtime_connected=sum(1 for item in accounts if business_automation_runtime.is_account_connected(owner_id, int(item.get("account_user_id") or 0)))
+    account_status = "🟢 Connected" if runtime_connected else "🔴 Not Connected"
     return (
         "💼 Business Automation\n\n"
         f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
+        f"MTProto Account: {account_status}\n"
         f"Connected Accounts: {connected}\n\n"
         "All connected Telegram accounts use one shared configuration:\n"
         "• Same welcome message and media\n"
@@ -1616,11 +1643,32 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg = await get_config()
         plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
         rows = []
-        lines = ["💎 Buy / Change Seller Plan", ""]
+        lines = [
+            "💎 Buy / Change Seller Plan",
+            "",
+            "📊 Plan Limitations",
+            "• Clone Bots: seller-level limit",
+            "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
+            "",
+        ]
         current, _ = await effective_plan(owner_id)
         for p in plans:
-            lines.append(f"• {p.get('name','Plan')} — ₹{p.get('price',0):g} / {p.get('duration_days',30)} days")
-            typ = "upgrade" if float(p.get("price", 0)) >= float(current.get("price", 0)) else "downgrade"
+            plan_name = p.get('name', 'Plan')
+            price = p.get('price', 0)
+            duration_days = p.get('duration_days', 30)
+            lines.append(f"• {plan_name} — ₹{price:g} / {duration_days} days")
+            lines.append(f"  🤖 Clone Bots: {_display_plan_limit(p.get('bot_limit'))}")
+            lines.append(f"  👥 Active Subscribers: {_display_plan_limit(p.get('active_subscriber_limit'))} / bot")
+            lines.append(f"  📢 Channels / Groups: {_display_plan_limit(p.get('channel_limit'))} / bot")
+            lines.append(f"  📦 Subscription Plans: {_display_plan_limit(p.get('plan_limit'))} / bot")
+            lines.append(f"  👨‍💼 Admins: {_display_plan_limit(p.get('admin_limit'))} / bot")
+            if not bool(p.get("branding_enabled", True)):
+                lines.append("  REMOVED BRAND TAG")
+            # Always keep a clear blank gap between each seller plan.
+            lines.append("")
+            lines.append("")
+            lines.append("")
+            typ = "upgrade" if float(price) >= float(current.get("price", 0)) else "downgrade"
             rows.append([InlineKeyboardButton(f"Select {p.get('name')}", callback_data=f"seller_buy_{typ}_{p.get('plan_id')}")])
         if action == "seller_upgrade_plan_profile":
             back_target = "main_seller_profile"
@@ -1760,6 +1808,36 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"   Status: {item.get('connection_status','connected').title()}"
                 )
         await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
+        return
+
+    if action in {"seller_business_broadcast", "seller_business_resend_active"}:
+        accounts=await get_business_accounts(owner_id)
+        if not accounts:
+            await q.answer("Connect a Telegram account first.", show_alert=True)
+            return
+        account=next((item for item in accounts if business_automation_runtime.is_account_connected(owner_id, int(item.get("account_user_id") or 0))), accounts[0])
+        account_id=int(account.get("account_user_id") or 0)
+        if action == "seller_business_broadcast":
+            result=await business_automation_runtime.broadcast_invite(owner_id, account_id)
+            title="📢 Broadcast / Send Invite Link"
+        else:
+            result=await business_automation_runtime.resend_invite_to_active_subscribers(owner_id, account_id)
+            title="🔗 Resend Invite Links to Active Subscribers"
+        if not result.get("ok"):
+            reason=str(result.get("reason") or "unknown")
+            message={
+                "not_connected":"The MTProto account is not connected.",
+                "bot_link_missing":"The new bot username/link is not configured.",
+                "runtime_error":"The operation could not be completed. Check the logs and try again.",
+            }.get(reason,"The operation could not be completed.")
+            await q.edit_message_text(f"{title}\n\n❌ {message}",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
+            return
+        username=str(account.get("username") or "Connected Account").lstrip("@")
+        lines=[title,"",f"Account: @{username}",f"Total: {int(result.get('total',0))}",f"Sent: {int(result.get('sent',0))}",f"Failed: {int(result.get('failed',0))}"]
+        if "skipped" in result:
+            lines.append(f"Skipped / Could Not Resolve: {int(result.get('skipped',0))}")
+        lines.extend(["","Telegram restrictions can prevent delivery to some users. Failed or unresolved users do not stop the operation."])
+        await q.edit_message_text("\n".join(lines),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Run Again",callback_data=action)],[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
         return
 
     if action == "seller_business_connect":
