@@ -3,10 +3,11 @@
 from handlers.common.clone_context import *
 from typing import Any, Iterable
 from urllib.parse import quote
+import hashlib
 
 from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
-from utils.branding import append_branding
+from utils.branding import append_seller_branding
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +54,12 @@ def welcome_url_buttons_header() -> str:
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
-        "plans, buy, profile, renew, referral, referral_unlock, support, home"
+        "plans, buy, profile, renew, referral, referral_unlock, support, home\n\n"
+        "• Show a separate plan list using its PLAN ID:\n"
+        "Button title - feature: plans_(PLAN_ID)\n"
+        "Example: Premium Channel - feature: plans_1001\n\n"
+        "Each connected group/channel bundle has its own 4-digit PLAN ID in Plan Management.\n"
+        "The PLAN ID works only inside this bot."
     )
 
 
@@ -70,10 +76,29 @@ def _parse_welcome_button_target(target: str, line_no: int, button_no: int) -> d
         return {"text_type": "url", "value": f"https://t.me/{username}"}
     if target.startswith("feature:"):
         feature = target.split(":", 1)[1].strip().lower()
+        if feature.startswith("plans_"):
+            plan_list_id = feature.split("_", 1)[1].strip()
+            if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+                raise ValueError(location + "PLAN ID must be exactly 4 digits. Example: feature: plans_1001")
+            return {"text_type": "callback", "value": f"c_plans_list_{plan_list_id}"}
         callback = WELCOME_FEATURE_CALLBACKS.get(feature)
         if not callback:
-            raise ValueError(location + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)}")
+            raise ValueError(location + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)} or plans_(PLAN_ID)")
         return {"text_type": "callback", "value": callback}
+    if target.startswith("plans:"):
+        raw_ids = target.split(":", 1)[1].strip()
+        if not raw_ids:
+            raise ValueError(location + "plans: requires at least one connected chat ID.")
+        chat_ids = []
+        for raw_id in raw_ids.split(","):
+            raw_id = raw_id.strip()
+            try:
+                chat_id = int(raw_id)
+            except (TypeError, ValueError):
+                raise ValueError(location + "plans: chat IDs must be numeric and comma-separated.")
+            if chat_id not in chat_ids:
+                chat_ids.append(chat_id)
+        return {"text_type": "plans", "value": ",".join(str(x) for x in chat_ids)}
     for prefix, action in (("popup:", "popup"), ("alert:", "alert"), ("share:", "share"), ("copy:", "copy")):
         if target.startswith(prefix):
             value = target[len(prefix):].strip()
@@ -123,6 +148,13 @@ def build_welcome_keyboard(rows: Iterable[Iterable[dict[str, Any]]] | None) -> I
                 built.append(InlineKeyboardButton(text, url=value))
             elif kind == "callback":
                 built.append(InlineKeyboardButton(text, callback_data=value or "c_home"))
+            elif kind == "plans":
+                # Keep callback_data short even when several Telegram chat IDs
+                # are configured. The original value remains in the saved
+                # button definition and is resolved from the seller settings
+                # when the user clicks it.
+                token = hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+                built.append(InlineKeyboardButton(text, callback_data=f"c_plans_target_{token}"))
             elif kind == "copy":
                 built.append(InlineKeyboardButton(text, copy_text=CopyTextButton(value[:256])))
             elif kind == "share":
@@ -225,8 +257,8 @@ class CloneWelcomeEditorMixin:
         else:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
 
-        # Platform branding is controlled only from the Owner Dashboard.
-        text=await append_branding(welcome_text)
+        # Platform branding is controlled by the seller's current plan.
+        text=await append_seller_branding(welcome_text, self.seller_account(context))
 
         # Seller ke welcome buttons fully removable hain. Empty list ka matlab
         # welcome message ke niche koi button nahi dikhana.
