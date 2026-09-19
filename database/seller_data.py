@@ -1,14 +1,18 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from uuid import uuid4
 from pymongo import ReturnDocument
 from database.mongo import get_database
 
-SETTINGS="seller_settings"; PLANS="seller_plans"; CHANNELS="seller_channels"; USERS="seller_users"
+SETTINGS="seller_settings"; PLANS="seller_plans"; PLAN_GROUPS="seller_plan_groups"; PLAN_GROUP_SUBS="seller_plan_group_subscriptions"; CHANNELS="seller_channels"; USERS="seller_users"
 PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_referrals"
 BUSINESS_ACCOUNTS="seller_business_accounts"; BUSINESS_CONTACTS="seller_business_contacts"
+PLAN_GROUP_COUNTERS="seller_plan_group_counters"
 
+
+logger = logging.getLogger(__name__)
 
 def c(name): return get_database()[name]
 
@@ -16,6 +20,12 @@ def c(name): return get_database()[name]
 async def initialize_seller_data_indexes():
     await c(SETTINGS).create_index("owner_id", unique=True)
     await c(PLANS).create_index([("owner_id",1),("plan_id",1)], unique=True)
+    await c(PLAN_GROUPS).create_index([("owner_id",1),("group_id",1)], unique=True)
+    await c(PLAN_GROUPS).create_index([("owner_id",1),("plan_list_id",1)], unique=True, sparse=True)
+    await c(PLANS).create_index([("owner_id",1),("group_id",1),("active",1)])
+    await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("user_id",1),("group_id",1)], unique=True)
+    await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("expiry_date",1),("active",1)])
+    await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("target_chat_ids",1),("active",1)])
     await c(CHANNELS).create_index([("owner_id",1),("chat_id",1)], unique=True)
     await c(USERS).create_index([("owner_id",1),("user_id",1)], unique=True)
     await c(PAYMENTS).create_index([("owner_id",1),("status",1),("created_at",-1)])
@@ -480,31 +490,264 @@ async def increment_business_account_stat(owner_id:int, account_user_id:int, fie
     return result.matched_count>0
 
 
-async def create_plan(owner_id, name, duration_text, duration_minutes, price, stars_price=0):
-    """Create a seller plan with optional Telegram Stars pricing.
+async def _next_plan_list_id(owner_id):
+    """Return the next four-digit plan-list ID for this bot only.
 
-    ``stars_price`` is optional so older callers remain compatible.
+    The counter is scoped by owner_id, so IDs are never universal across
+    clone bots.  Keep this allocation defensive because older installations
+    may not have the counter document yet.
     """
+    owner_id = int(owner_id)
+    try:
+        # Use an update pipeline here. A classic MongoDB update cannot safely
+        # combine $setOnInsert and $inc on the same field (last_id), which was
+        # causing ConflictingUpdateOperators on first Plan ID allocation.
+        doc = await c(PLAN_GROUP_COUNTERS).find_one_and_update(
+            {"_id": owner_id},
+            [
+                {
+                    "$set": {
+                        "owner_id": owner_id,
+                        "last_id": {
+                            "$add": [
+                                {"$ifNull": ["$last_id", 1000]},
+                                1,
+                            ]
+                        },
+                    }
+                }
+            ],
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        if doc and doc.get("last_id") is not None:
+            value = int(doc.get("last_id") or 0)
+            if 1001 <= value <= 9999:
+                return value
+    except Exception:
+        logger.exception("Plan ID counter allocation failed owner=%s", owner_id)
+
+    # Fallback for old/misconfigured counter collections: derive the next
+    # unused four-digit ID from this bot's active plan groups only.
+    groups = await c(PLAN_GROUPS).find(
+        {"owner_id": owner_id, "active": True},
+        {"plan_list_id": 1},
+    ).to_list(length=10000)
+    used = set()
+    for group in groups:
+        try:
+            value = int(group.get("plan_list_id"))
+            if 1001 <= value <= 9999:
+                used.add(value)
+        except (TypeError, ValueError):
+            continue
+    for value in range(1001, 10000):
+        if value not in used:
+            # Best-effort repair of the counter so the next allocation remains
+            # monotonic when the counter collection becomes available again.
+            try:
+                await c(PLAN_GROUP_COUNTERS).update_one(
+                    {"_id": owner_id},
+                    {"$max": {"last_id": value}, "$setOnInsert": {"owner_id": owner_id}},
+                    upsert=True,
+                )
+            except Exception:
+                pass
+            return value
+    raise ValueError("Plan ID limit reached. Only four-digit Plan IDs (1001-9999) are supported for this bot.")
+
+async def _ensure_plan_group_ids(owner_id, groups=None):
+    """Backfill four-digit plan-list IDs for old bundles without changing their group IDs."""
+    owner_id = int(owner_id)
+    if groups is None:
+        groups = await c(PLAN_GROUPS).find({"owner_id": owner_id, "active": True}).sort("created_at", 1).to_list(length=100)
+    missing = [g for g in groups if not str(g.get("plan_list_id") or "").isdigit()]
+    if not missing:
+        return groups
+
+    # Bring the counter forward to the highest already-assigned ID, if any.
+    assigned = [int(g["plan_list_id"]) for g in groups if str(g.get("plan_list_id") or "").isdigit() and 1001 <= int(g["plan_list_id"]) <= 9999]
+    if assigned:
+        counter = await c(PLAN_GROUP_COUNTERS).find_one({"_id": owner_id})
+        if counter is None:
+            await c(PLAN_GROUP_COUNTERS).update_one(
+                {"_id": owner_id},
+                {"$setOnInsert": {"owner_id": owner_id, "last_id": max(assigned)}},
+                upsert=True,
+            )
+        else:
+            await c(PLAN_GROUP_COUNTERS).update_one(
+                {"_id": owner_id},
+                {"$max": {"last_id": max(assigned)}},
+            )
+
+    for group in missing:
+        plan_list_id = await _next_plan_list_id(owner_id)
+        result = await c(PLAN_GROUPS).update_one(
+            {"owner_id": owner_id, "group_id": str(group["group_id"]), "active": True, "plan_list_id": {"$exists": False}},
+            {"$set": {"plan_list_id": plan_list_id, "updated_at": datetime.now(timezone.utc)}},
+        )
+        if result.modified_count:
+            group["plan_list_id"] = plan_list_id
+    return groups
+
+
+async def create_plan_group(owner_id, chat_ids):
+    """Create one plan-target bundle containing one or more connected chats."""
+    owner_id = int(owner_id)
+    clean_ids = []
+    for value in (chat_ids or []):
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in clean_ids:
+            clean_ids.append(cid)
+    if not clean_ids:
+        raise ValueError("Select at least one connected group/channel")
+
+    channels = await c(CHANNELS).find({
+        "owner_id": owner_id,
+        "chat_id": {"$in": clean_ids},
+        "active": True,
+    }).to_list(length=100)
+    by_id = {int(x["chat_id"]): x for x in channels}
+    missing = [cid for cid in clean_ids if cid not in by_id]
+    if missing:
+        raise ValueError("One or more selected chats are no longer connected")
+
+    now = datetime.now(timezone.utc)
+    group_id = uuid4().hex[:12]
+    plan_list_id = await _next_plan_list_id(owner_id)
+    targets = [
+        {
+            "chat_id": int(cid),
+            "title": str(by_id[cid].get("title") or cid),
+            "chat_type": str(by_id[cid].get("chat_type") or "group"),
+        }
+        for cid in clean_ids
+    ]
+    doc = {
+        "owner_id": owner_id,
+        "group_id": group_id,
+        "plan_list_id": plan_list_id,
+        "chat_ids": clean_ids,
+        "targets": targets,
+        "active": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await c(PLAN_GROUPS).insert_one(doc)
+    return doc
+
+async def get_plan_group(owner_id, group_id):
+    return await c(PLAN_GROUPS).find_one({"owner_id": int(owner_id), "group_id": str(group_id), "active": True})
+
+
+async def update_plan_group(owner_id, group_id, chat_ids):
+    """Update an existing plan-target bundle while preserving its group_id and plans."""
+    owner_id = int(owner_id)
+    group_id = str(group_id)
+    clean_ids = []
+    for value in (chat_ids or []):
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in clean_ids:
+            clean_ids.append(cid)
+    if not clean_ids:
+        raise ValueError("Select at least one connected group/channel")
+
+    channels = await c(CHANNELS).find({
+        "owner_id": owner_id,
+        "chat_id": {"$in": clean_ids},
+        "active": True,
+    }).to_list(length=100)
+    by_id = {int(x["chat_id"]): x for x in channels}
+    missing = [cid for cid in clean_ids if cid not in by_id]
+    if missing:
+        raise ValueError("One or more selected chats are no longer connected")
+
+    targets = [
+        {
+            "chat_id": int(cid),
+            "title": str(by_id[cid].get("title") or cid),
+            "chat_type": str(by_id[cid].get("chat_type") or "group"),
+        }
+        for cid in clean_ids
+    ]
+    now = datetime.now(timezone.utc)
+    result = await c(PLAN_GROUPS).update_one(
+        {"owner_id": owner_id, "group_id": group_id, "active": True},
+        {"$set": {
+            "chat_ids": clean_ids,
+            "targets": targets,
+            "updated_at": now,
+        }}
+    )
+    if not result.matched_count:
+        raise ValueError("Plan target group not found")
+
+    # Keep every plan in this bundle synchronized with the edited target set.
+    await c(PLANS).update_many(
+        {"owner_id": owner_id, "group_id": group_id},
+        {"$set": {"target_chat_ids": clean_ids, "updated_at": now}},
+    )
+    return await get_plan_group(owner_id, group_id)
+
+
+async def get_plan_groups(owner_id):
+    groups = await c(PLAN_GROUPS).find({"owner_id": int(owner_id), "active": True}).sort("created_at", 1).to_list(length=100)
+    return await _ensure_plan_group_ids(owner_id, groups)
+
+async def delete_plan_group(owner_id, group_id):
+    owner_id = int(owner_id)
+    group_id = str(group_id)
+    result = await c(PLAN_GROUPS).update_one(
+        {"owner_id": owner_id, "group_id": group_id, "active": True},
+        {"$set": {"active": False, "updated_at": datetime.now(timezone.utc)}}
+    )
+    # Plans belong to this target bundle. Hide them atomically from future plan selection.
+    if result.modified_count:
+        await c(PLANS).update_many(
+            {"owner_id": owner_id, "group_id": group_id},
+            {"$set": {"active": False, "updated_at": datetime.now(timezone.utc)}}
+        )
+    return result.modified_count > 0
+
+async def create_plan(owner_id, name, duration_text, duration_minutes, price, stars_price=0, group_id=None):
+    """Create a subscription plan, optionally scoped to a plan-target bundle."""
     clean_name = str(name or "").strip()
     if not clean_name:
         raise ValueError("Plan name is required")
-
     minutes = int(duration_minutes)
     if minutes <= 0:
         raise ValueError("Plan duration must be greater than 0")
-
     fiat_price = float(price)
     if fiat_price < 0:
         raise ValueError("Plan price cannot be negative")
-
     stars = int(stars_price or 0)
     if stars < 0:
         raise ValueError("Stars price cannot be negative")
 
+    owner_id = int(owner_id)
+    group_id = str(group_id or "").strip() or None
+    target_chat_ids = []
+    if group_id:
+        group = await get_plan_group(owner_id, group_id)
+        if not group:
+            raise ValueError("Plan target group not found")
+        target_chat_ids = [int(x) for x in group.get("chat_ids") or []]
+        if not target_chat_ids:
+            raise ValueError("Plan target group has no connected chats")
+
     now = datetime.now(timezone.utc)
     doc = {
-        "owner_id": int(owner_id),
+        "owner_id": owner_id,
         "plan_id": uuid4().hex[:12],
+        "group_id": group_id,
+        "target_chat_ids": target_chat_ids,
         "name": clean_name,
         "duration_text": str(duration_text),
         "duration_minutes": minutes,
@@ -516,14 +759,25 @@ async def create_plan(owner_id, name, duration_text, duration_minutes, price, st
     }
     await c(PLANS).insert_one(doc)
     return doc
-async def get_plan(owner_id,plan_id): return await c(PLANS).find_one({"owner_id":owner_id,"plan_id":plan_id})
-async def get_plans(owner_id,active_only=False):
-    q={"owner_id":owner_id};
-    if active_only:q["active"]=True
+
+async def get_plan(owner_id, plan_id):
+    return await c(PLANS).find_one({"owner_id": int(owner_id), "plan_id": str(plan_id)})
+
+async def get_plans(owner_id, active_only=False, group_id=None):
+    q={"owner_id":int(owner_id)}
+    if active_only:
+        q["active"]=True
+    if group_id is not None:
+        q["group_id"]=str(group_id)
     return await c(PLANS).find(q).sort("price",1).to_list(length=100)
-async def update_plan(owner_id,plan_id,**values):
-    values["updated_at"]=datetime.now(timezone.utc); r=await c(PLANS).update_one({"owner_id":owner_id,"plan_id":plan_id},{"$set":values}); return r.matched_count>0
-async def delete_plan(owner_id,plan_id): return (await c(PLANS).delete_one({"owner_id":owner_id,"plan_id":plan_id})).deleted_count>0
+
+async def update_plan(owner_id, plan_id, **values):
+    values["updated_at"]=datetime.now(timezone.utc)
+    r=await c(PLANS).update_one({"owner_id":int(owner_id),"plan_id":str(plan_id)},{"$set":values})
+    return r.matched_count>0
+
+async def delete_plan(owner_id,plan_id):
+    return (await c(PLANS).delete_one({"owner_id":int(owner_id),"plan_id":str(plan_id)})).deleted_count>0
 
 
 async def add_channel(owner_id,chat_id,title,chat_type):
@@ -674,9 +928,55 @@ async def remove_subscription(owner_id:int, user_id:int):
     return result.matched_count>0
 
 
+async def remove_plan_group_subscriptions(owner_id:int, user_id:int):
+    """Remove all Plan Group subscriptions for one user and return their targets.
+
+    Plan Group access is stored separately from the clone-wide subscription.
+    Manual removal must therefore deactivate these records separately and give
+    the caller the exact target chats from which Telegram access must be removed.
+    """
+    owner_id = int(owner_id)
+    user_id = int(user_id)
+    now = datetime.now(timezone.utc)
+
+    rows = await c(PLAN_GROUP_SUBS).find({
+        "owner_id": owner_id,
+        "user_id": user_id,
+        "active": True,
+    }, {
+        "group_id": 1,
+        "target_chat_ids": 1,
+    }).to_list(length=5000)
+
+    if not rows:
+        return {"removed": False, "target_chat_ids": []}
+
+    await c(PLAN_GROUP_SUBS).update_many(
+        {"owner_id": owner_id, "user_id": user_id, "active": True},
+        {"$set": {
+            "active": False,
+            "removed_by_admin": True,
+            "removed_at": now,
+            "updated_at": now,
+        }},
+    )
+
+    target_ids = []
+    for row in rows:
+        for value in row.get("target_chat_ids") or []:
+            try:
+                target_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    return {
+        "removed": True,
+        "target_chat_ids": list(dict.fromkeys(target_ids)),
+    }
+
+
 async def create_payment(owner_id,user_id,plan,screenshot_file_id):
     now=datetime.now(timezone.utc)
-    doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now,"notification_messages":[]}
+    doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"group_id":str(plan.get("group_id") or ""),"target_chat_ids":[int(x) for x in (plan.get("target_chat_ids") or [])],"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now,"notification_messages":[]}
     await c(PAYMENTS).insert_one(doc); return doc
 
 
@@ -737,6 +1037,8 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
         "owner_id":int(owner_id),"payment_id":str(transaction_id),"user_id":int(user_id),
         "plan_id":plan["plan_id"],"plan":plan["name"],"amount":float(plan["price"]),
         "duration_text":plan["duration_text"],"duration_minutes":int(plan["duration_minutes"]),
+        "group_id":str(plan.get("group_id") or ""),
+        "target_chat_ids":[int(x) for x in (plan.get("target_chat_ids") or [])],
         "payment_method":gateway,"gateway_payment_id":str(gateway_payment_id or ""),
         "status":"approved","admin_id":0,"processed_at":now,"created_at":now,"updated_at":now,
     }
@@ -1010,6 +1312,148 @@ async def fulfill_subscription_payment(
         "subscription": result or {},
         "fulfillment_key": key,
     }
+
+
+async def get_plan_group_subscription(owner_id, user_id, group_id):
+    """Return one user's subscription for one Plan Group only."""
+    gid = str(group_id or "").strip()
+    if not gid:
+        return None
+    return await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": gid,
+    })
+
+
+async def fulfill_plan_group_subscription(
+    owner_id,
+    user_id,
+    fulfillment_key,
+    group_id,
+    plan_name,
+    duration_minutes,
+    amount=None,
+    duration_text=None,
+    target_chat_ids=None,
+):
+    """Idempotently activate/extend a subscription for one Plan Group.
+
+    Plan Group subscriptions intentionally live in their own collection so a
+    purchase for one target bundle can never extend the clone-wide subscription
+    or another Plan Group. Repeating the same payment is also idempotent.
+    """
+    now = datetime.now(timezone.utc)
+    gid = str(group_id or "").strip()
+    key = str(fulfillment_key or "").strip()
+    if not gid:
+        raise ValueError("group_id is required for Plan Group subscription")
+    if not key:
+        raise ValueError("fulfillment_key is required")
+    added_minutes = max(0, int(duration_minutes or 0))
+    if added_minutes <= 0:
+        raise ValueError("Subscription duration must be greater than zero")
+    clean_targets = []
+    for value in target_chat_ids or []:
+        try:
+            clean_targets.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    clean_targets = list(dict.fromkeys(clean_targets))
+    payment_amount = float(amount or 0)
+
+    already_applied = {
+        "$in": [key, {"$ifNull": ["$fulfillment_keys", []]}]
+    }
+    active_before = {
+        "$and": [
+            {"$eq": [{"$ifNull": ["$active", False]}, True]},
+            {"$gt": [{"$ifNull": ["$expiry_date", now]}, now]},
+        ]
+    }
+    base_expiry = {"$cond": [active_before, "$expiry_date", now]}
+    new_expiry = {"$add": [base_expiry, added_minutes * 60 * 1000]}
+
+    set_fields = {
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": gid,
+        "plan": {"$cond": [already_applied, {"$ifNull": ["$plan", plan_name]}, plan_name]},
+        "active": {"$cond": [already_applied, {"$ifNull": ["$active", True]}, True]},
+        "expiry_date": {"$cond": [already_applied, "$expiry_date", new_expiry]},
+        "target_chat_ids": {"$cond": [already_applied, {"$ifNull": ["$target_chat_ids", clean_targets]}, clean_targets]},
+        "last_renewed_at": {"$cond": [already_applied, "$last_renewed_at", now]},
+        "last_added_minutes": {"$cond": [already_applied, "$last_added_minutes", added_minutes]},
+        "total_duration_minutes": {
+            "$cond": [already_applied, {"$ifNull": ["$total_duration_minutes", 0]}, {"$add": [{"$ifNull": ["$total_duration_minutes", 0]}, added_minutes]}]
+        },
+        "total_paid": {
+            "$cond": [already_applied, {"$ifNull": ["$total_paid", 0]}, {"$add": [{"$ifNull": ["$total_paid", 0]}, payment_amount]}]
+        },
+        "amount": {"$cond": [already_applied, "$amount", payment_amount]},
+        "last_payment_amount": {"$cond": [already_applied, "$last_payment_amount", payment_amount]},
+        "duration_text": {"$cond": [already_applied, "$duration_text", duration_text or ""]},
+        "last_duration_text": {"$cond": [already_applied, "$last_duration_text", duration_text or ""]},
+        "removed_by_admin": {"$cond": [already_applied, {"$ifNull": ["$removed_by_admin", False]}, False]},
+        "start_date": {
+            "$cond": [already_applied, {"$ifNull": ["$start_date", now]}, {"$cond": [active_before, {"$ifNull": ["$start_date", now]}, now]}]
+        },
+        "created_at": {"$ifNull": ["$created_at", now]},
+        "updated_at": {"$cond": [already_applied, {"$ifNull": ["$updated_at", now]}, now]},
+        "fulfillment_keys": {
+            "$cond": [already_applied, {"$ifNull": ["$fulfillment_keys", []]}, {"$concatArrays": [{"$ifNull": ["$fulfillment_keys", []]}, [key]]}]
+        },
+        "last_fulfillment_key": {"$cond": [already_applied, "$last_fulfillment_key", key]},
+    }
+    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
+        {"owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid},
+        [{"$set": set_fields}],
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return {
+        "expiry_date": (result or {}).get("expiry_date"),
+        "subscription": result or {},
+        "fulfillment_key": key,
+        "group_id": gid,
+        "target_chat_ids": clean_targets,
+    }
+
+
+async def active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+    """True when this user has an active Plan Group containing this chat."""
+    now = datetime.now(timezone.utc)
+    return await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "active": True,
+        "expiry_date": {"$gt": now},
+        "target_chat_ids": int(chat_id),
+    })
+
+
+async def expired_plan_group_subscriptions(owner_id=None, limit=5000):
+    now = datetime.now(timezone.utc)
+    query = {"active": True, "expiry_date": {"$lte": now}}
+    if owner_id is not None:
+        query["owner_id"] = int(owner_id)
+    return await c(PLAN_GROUP_SUBS).find(query).sort("expiry_date", 1).to_list(length=limit)
+
+
+async def expire_plan_group_subscription(owner_id, user_id, group_id, expected_expiry=None):
+    query = {
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": str(group_id),
+        "active": True,
+    }
+    if expected_expiry is not None:
+        query["expiry_date"] = expected_expiry
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        query,
+        {"$set": {"active": False, "expired_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}}
+    )
+    return result.modified_count > 0
 
 
 async def active_subscriptions(owner_id, limit=5000):

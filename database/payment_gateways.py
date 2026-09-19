@@ -12,6 +12,7 @@ from utils.crypto import decrypt_secret, encrypt_secret
 CONFIGS = "payment_gateway_configs"
 TRANSACTIONS = "gateway_transactions"
 EVENTS = "gateway_webhook_events"
+RAZORPAY_QR_POOL = "razorpay_qr_pool"
 
 SUPPORTED_GATEWAYS = ("razorpay", "cashfree")
 SECRET_FIELDS = {
@@ -47,6 +48,10 @@ def _events():
     return get_database()[EVENTS]
 
 
+def _razorpay_qr_pool():
+    return get_database()[RAZORPAY_QR_POOL]
+
+
 async def initialize_payment_gateway_indexes():
     await _configs().create_index([("scope", 1), ("owner_id", 1)], unique=True)
     await _transactions().create_index("transaction_id", unique=True)
@@ -58,6 +63,8 @@ async def initialize_payment_gateway_indexes():
     await _events().create_index("created_at", expireAfterSeconds=30 * 24 * 60 * 60)
     await _transactions().create_index([("status", 1), ("fulfillment_lease_until", 1)])
     await _transactions().create_index([("gateway_payment_id", 1)], sparse=True)
+    await _razorpay_qr_pool().create_index("qr_code_id", unique=True)
+    await _razorpay_qr_pool().create_index([("owner_id", 1), ("bot_id", 1), ("plan_id", 1), ("status", 1), ("qr_close_by", 1)])
 
 
 async def get_gateway_config(scope: str, owner_id: int = 0, decrypt: bool = False) -> dict:
@@ -532,6 +539,189 @@ async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
     }
     size = max(1, min(int(limit), 500))
     return await _transactions().find(query).sort("updated_at", 1).limit(size).to_list(length=size)
+
+
+async def expire_due_razorpay_qr_transactions(limit: int = 100) -> list[dict]:
+    """Claim Razorpay UPI QR transactions whose configured close time has passed.
+
+    Only unpaid local transactions are returned. Payment webhooks remain
+    authoritative; a transaction that was already marked paid/fulfilled is
+    never expired here.
+    """
+    now = datetime.now(timezone.utc)
+    rows = await _transactions().find({
+        "gateway": "razorpay",
+        "status": {"$in": ["created", "pending", "verification_pending"]},
+        "checkout_mode": "upi_qr",
+        "qr_close_by": {"$lte": int(now.timestamp())},
+        "fulfilled_at": {"$exists": False},
+    }).sort("qr_close_by", 1).limit(max(1, min(int(limit), 500))).to_list(length=max(1, min(int(limit), 500)))
+    return rows
+
+
+async def mark_transaction_expired(transaction_id: str) -> dict | None:
+    now = datetime.now(timezone.utc)
+    return await _transactions().find_one_and_update(
+        {
+            "transaction_id": str(transaction_id),
+            "status": {"$in": ["created", "pending", "verification_pending"]},
+            "fulfilled_at": {"$exists": False},
+        },
+        {
+            "$set": {
+                "status": "expired",
+                "expired_at": now,
+                "failure_reason": "Razorpay UPI QR expired before payment",
+                "updated_at": now,
+            },
+            "$unset": {"next_gateway_recovery_at": ""},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def list_razorpay_qr_pool_owners() -> list[int]:
+    """Return seller owners whose Razorpay gateway is enabled in UPI QR mode."""
+    rows = await _configs().find(
+        {
+            "scope": "seller",
+            "gateways.razorpay.enabled": True,
+            "gateways.razorpay.checkout_mode": "upi_qr",
+        },
+        {"owner_id": 1},
+    ).to_list(length=5000)
+    return [int(row.get("owner_id")) for row in rows if row.get("owner_id") is not None]
+
+
+async def count_available_razorpay_qr_pool(
+    owner_id: int, plan_id: str, amount: float, currency: str = "INR", *, bot_id: int = 0, minimum_valid_seconds: int = 90
+) -> int:
+    cutoff = int(datetime.now(timezone.utc).timestamp()) + max(0, int(minimum_valid_seconds))
+    query = {"owner_id": int(owner_id), "plan_id": str(plan_id), "amount": float(amount),
+             "currency": str(currency).upper(), "status": "available", "qr_close_by": {"$gt": cutoff}}
+    if int(bot_id or 0): query["bot_id"] = int(bot_id)
+    return int(await _razorpay_qr_pool().count_documents(query))
+
+
+async def create_razorpay_qr_pool_entry(
+    *, owner_id: int, plan_id: str, amount: float, currency: str, qr_code_id: str, bot_id: int = 0,
+    image_url: str = "", image_content: str = "", telegram_file_id: str = "", qr_close_by: int, gateway_response: dict | None = None,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    doc = {
+        "owner_id": int(owner_id),
+        "bot_id": int(bot_id or 0),
+        "plan_id": str(plan_id),
+        "amount": float(amount),
+        "currency": str(currency).upper(),
+        "qr_code_id": str(qr_code_id),
+        "image_url": str(image_url or ""),
+        "image_content": str(image_content or ""),
+        "telegram_file_id": str(telegram_file_id or ""),
+        "qr_close_by": int(qr_close_by),
+        "status": "available",
+        "created_at": now,
+        "updated_at": now,
+        "gateway_response": gateway_response or {},
+    }
+    try:
+        await _razorpay_qr_pool().insert_one(doc)
+    except DuplicateKeyError:
+        existing = await _razorpay_qr_pool().find_one({"qr_code_id": str(qr_code_id)})
+        return existing or doc
+    return doc
+
+
+async def claim_razorpay_qr_pool_entry(
+    owner_id: int, plan_id: str, amount: float, currency: str, transaction_id: str, bot_id: int = 0,
+    minimum_valid_seconds: int = 20 * 60,
+) -> dict | None:
+    if not int(bot_id or 0): return None
+    # Never hand a user a nearly-expired pre-created QR.
+    now = int(datetime.now(timezone.utc).timestamp()) + max(1, int(minimum_valid_seconds))
+    return await _razorpay_qr_pool().find_one_and_update(
+        {"owner_id": int(owner_id), "bot_id": int(bot_id), "plan_id": str(plan_id), "amount": float(amount),
+         "currency": str(currency).upper(), "status": "available", "qr_close_by": {"$gt": now}},
+        {"$set": {"status": "assigned", "transaction_id": str(transaction_id), "assigned_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}},
+        sort=[("qr_close_by", 1)], return_document=ReturnDocument.AFTER,
+    )
+
+
+async def list_available_razorpay_qr_pool_entries(owner_id: int, bot_id: int, plan_id: str, limit: int = 5, minimum_valid_seconds: int = 0) -> list[dict]:
+    now = int(datetime.now(timezone.utc).timestamp()) + max(0, int(minimum_valid_seconds))
+    size = max(1, min(int(limit), 20))
+    return await _razorpay_qr_pool().find({"owner_id": int(owner_id), "bot_id": int(bot_id), "plan_id": str(plan_id), "status": "available", "qr_close_by": {"$gt": now}}).sort("qr_close_by", 1).limit(size).to_list(length=size)
+
+
+async def claim_active_razorpay_qr_transaction_for_cancel(
+    owner_id: int, payer_user_id: int, bot_id: int, plan_id: str
+) -> list[dict]:
+    """Atomically cancel previous active QR transactions for the same user/plan.
+
+    Only transactions still waiting for payment are claimed. A concurrent paid
+    transaction therefore wins the race and is never removed as a stale QR.
+    """
+    results: list[dict] = []
+    query = {
+        "scope": "seller",
+        "owner_id": int(owner_id),
+        "payer_user_id": int(payer_user_id),
+        "gateway": "razorpay",
+        "purpose": "child_subscription",
+        "status": {"$in": ["created", "pending", "verification_pending"]},
+        "reference_id": str(plan_id),
+        "metadata.bot_id": int(bot_id),
+        "checkout_mode": "upi_qr",
+    }
+    while True:
+        tx = await _transactions().find_one_and_update(
+            query,
+            {"$set": {
+                "status": "cancelled",
+                "cancelled_reason": "Replaced by a new QR for the same plan",
+                "cancelled_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+            sort=[("created_at", -1)],
+            return_document=ReturnDocument.AFTER,
+        )
+        if not tx:
+            break
+        results.append(tx)
+    return results
+
+
+async def cache_razorpay_qr_telegram_file_id(qr_code_id: str, telegram_file_id: str) -> dict | None:
+    """Cache the Telegram file_id after the QR image has been uploaded once.
+
+    Telegram file_ids are reusable by the same bot, so subsequent users can
+    receive the already-uploaded QR without another image upload.
+    """
+    if not str(qr_code_id).strip() or not str(telegram_file_id).strip():
+        return None
+    return await _razorpay_qr_pool().find_one_and_update(
+        {"qr_code_id": str(qr_code_id)},
+        {"$set": {"telegram_file_id": str(telegram_file_id), "updated_at": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def get_expired_razorpay_qr_pool_entries(limit: int = 500) -> list[dict]:
+    now = int(datetime.now(timezone.utc).timestamp())
+    size = max(1, min(int(limit), 1000))
+    return await _razorpay_qr_pool().find(
+        {"qr_close_by": {"$lte": now}}
+    ).sort("qr_close_by", 1).limit(size).to_list(length=size)
+
+
+async def delete_razorpay_qr_pool_entry(qr_code_id: str) -> int:
+    result = await _razorpay_qr_pool().delete_one({"qr_code_id": str(qr_code_id)})
+    return int(result.deleted_count or 0)
+
+
+async def delete_razorpay_qr_pool_entries_for_plan(owner_id: int, plan_id: str) -> int:
+    result = await _razorpay_qr_pool().delete_many({"owner_id": int(owner_id), "plan_id": str(plan_id), "status": "available"})
+    return int(result.deleted_count or 0)
 
 
 async def gateway_transaction_stats(scope: str, owner_id: int) -> dict:
