@@ -430,11 +430,19 @@ class CloneLiveSupportMixin:
                 return
             if context.user_data.get("wait_plan_add") or context.user_data.get("wait_plan_edit"):
                 try:
-                    name,dtext,dmins,price,stars=self.parse_plan(text)
+                    name,dtext,dmins,price,stars,_target_chat_ids=self.parse_plan(text)
                     pid=context.user_data.get("wait_plan_edit")
-                    if pid: await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars)
-                    else: await create_plan(owner,name,dtext,dmins,price,stars)
-                    context.user_data.clear(); await update.effective_message.reply_text("✅ Plan saved",reply_markup=self.plans_admin_menu())
+                    add_state=context.user_data.get("wait_plan_add")
+                    if pid:
+                        plan = await get_plan(owner, pid)
+                        await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars)
+                        gid = str((plan or {}).get("group_id") or "")
+                        back = f"a_plan_group_view_{gid}" if gid else "a_plans"
+                    else:
+                        gid = str((add_state or {}).get("group_id") or "") if isinstance(add_state, dict) else ""
+                        await create_plan(owner,name,dtext,dmins,price,stars,group_id=gid or None)
+                        back = f"a_plan_group_view_{gid}" if gid else "a_plans"
+                    context.user_data.clear(); await update.effective_message.reply_text("✅ Plan saved",reply_markup=self.back(back))
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}")
                 return
             if context.user_data.get("wait_channel"):
