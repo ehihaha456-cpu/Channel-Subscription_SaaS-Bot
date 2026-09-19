@@ -1,53 +1,295 @@
-"""Feature callback handler extracted from the legacy clone callback router."""
+"""Seller plan-target bundle management and per-bundle subscription plans."""
+
+import logging
 
 from handlers.common.clone_context import *
+
+logger = logging.getLogger(__name__)
+
+
+def _group_label(group):
+    targets = group.get("targets") or []
+    names = [str(x.get("title") or x.get("chat_id")) for x in targets]
+    return ", ".join(names) if names else ", ".join(str(x) for x in group.get("chat_ids") or [])
+
+
+def _group_plan_text(plans, currency):
+    if not plans:
+        return "📋 No plans added yet."
+    lines = []
+    for p in plans:
+        status = "✅" if p.get("active") else "⏸"
+        lines.append(f"{status} {p['name']} — {p['duration_text']} — {format_currency(currency, p['price'])} — ⭐{int(p.get('stars_price', 0) or 0)}")
+    return "\n".join(lines)
+
+
+async def _main(self, q, owner):
+    # One-time compatibility migration: old global plans used to target every
+    # connected chat. Convert them into one bundle so existing sellers keep the
+    # exact same plan behaviour after the new UI is enabled.
+    groups = await get_plan_groups(owner)
+    if not groups:
+        legacy = await get_plans(owner, group_id=None)
+        legacy = [p for p in legacy if not p.get("group_id")]
+        if legacy:
+            chats = await get_channels(owner)
+            if chats:
+                try:
+                    migrated = await create_plan_group(owner, [int(x["chat_id"]) for x in chats])
+                    for plan in legacy:
+                        await update_plan(owner, plan["plan_id"], group_id=migrated["group_id"], target_chat_ids=migrated["chat_ids"])
+                    groups = await get_plan_groups(owner)
+                except Exception:
+                    pass
+    # Show a compact summary of every plan target and its plans in the header.
+    settings = await get_seller_settings(owner)
+    code = normalize_currency(settings.get("currency")) or "INR"
+    lines = ["📦 Plan Management", "", "📊 Current Plan Summary", ""]
+    if groups:
+        for index, group in enumerate(groups, 1):
+            label = _group_label(group) or "Unnamed group/channel"
+            plans = await get_plans(owner, group_id=str(group["group_id"]))
+            lines.append(f"{index}. {label}:")
+            lines.append(f"   PLAN ID 👉 {str(group.get('plan_list_id') or '')}")
+            lines.append(f"   Plans : {len(plans)}")
+            if plans:
+                for p in plans:
+                    lines.append(
+                        f"      {p['name']} / {p['duration_text']} / "
+                        f"{format_currency(code, p['price'])} / ⭐{int(p.get('stars_price', 0) or 0)}"
+                    )
+            else:
+                lines.append("      No plans added")
+            lines.append("")
+        lines.append("Select a connected group/channel bundle to manage its plans.")
+    else:
+        lines.append("No plan target created yet.")
+        lines.append("Tap ➕ Create New Plan, select one or more connected groups/channels, then add plans.")
+    kb = []
+    for group in groups:
+        label = _group_label(group)
+        gid = str(group["group_id"])
+        kb.append([
+            InlineKeyboardButton(label[:28], callback_data=f"a_plan_group_info_{gid}"),
+            InlineKeyboardButton("📋 View Plans", callback_data=f"a_plan_group_view_{gid}"),
+            InlineKeyboardButton("🗑 Remove", callback_data=f"a_plan_group_del_{gid}"),
+        ])
+    kb.append([InlineKeyboardButton("➕ Create New Plan", callback_data="a_plan_add")])
+    kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_home")])
+    await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def _selection(self, q, owner, context, *, edit_group_id=None):
+    # Preserve edit mode while the seller toggles multiple chats.
+    if edit_group_id is None:
+        edit_group_id = context.user_data.get("plan_group_editing_id")
+    channels = await get_channels(owner)
+    selected = set(int(x) for x in (context.user_data.get("plan_group_selected_chats") or []))
+    title = "✏️ Edit Plan Target" if edit_group_id else "➕ Create New Plan"
+    lines = [title, "", "Select one or more connected group/channel:", ""]
+    kb = []
+    for ch in channels:
+        cid = int(ch["chat_id"])
+        mark = "✅" if cid in selected else "☐"
+        title = str(ch.get("title") or cid)
+        lines.append(f"{mark} {title}")
+        kb.append([InlineKeyboardButton(f"{mark} {title[:35]}", callback_data=f"a_plan_group_toggle_{cid}")])
+    if not channels:
+        lines.append("No connected groups/channels found.")
+    # Back acts as a confirmation when at least one target is selected.
+    # When nothing is selected, it simply returns to Plan Management instead
+    # of trying to save an invalid empty target set (which previously made the
+    # Back button appear unresponsive).
+    if edit_group_id:
+        back_callback = f"a_plan_group_save_edit_{edit_group_id}"
+    else:
+        back_callback = "a_plan_group_save"
+    kb.append([InlineKeyboardButton("⬅ Back", callback_data=back_callback)])
+    await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_plans':
-        await q.edit_message_text('📦 Plan Management', reply_markup=self.plans_admin_menu())
+        await _main(self, q, owner)
         return True
+
     if a == 'a_plan_add':
-        plan_cfg, _ = await effective_plan(self.seller_account(context))
-        existing = len(await get_plans(owner))
-        limit = int(plan_cfg.get('plan_limit', 2))
-        if limit >= 0 and existing >= limit:
-            await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard('a_plans'))
-            return True
-        context.user_data.clear()
-        context.user_data['wait_plan_add'] = True
-        settings = await get_seller_settings(owner)
-        code = normalize_currency(settings.get('currency')) or 'INR'
-        await q.edit_message_text(f'➕ Add Subscription Plan\n\nCurrency: {currency_symbol(code)} {code} — {currency_name(code)}\n\nSend: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nDuration: m = minutes, h = hours, d = days, mo = months, y = years\n\nPrice uses the current bot currency. Changing currency later changes the label, not the numeric price.', reply_markup=self.back('a_plans'))
+        # Do not clear the complete user_data here. Other admin flows may keep
+        # state there, and clearing it can make the callback appear to do
+        # nothing when PTB persistence/other handlers are active. Only reset
+        # the temporary selection state used by this screen.
+        context.user_data.pop('plan_group_selected_chats', None)
+        context.user_data.pop('plan_group_editing_id', None)
+        try:
+            await _selection(self, q, owner, context)
+        except Exception as exc:
+            logger.exception('Failed to open Create New Plan screen owner=%s', owner)
+            try:
+                await q.answer('Unable to open Create New Plan. Please try again.', show_alert=True)
+            except Exception:
+                pass
         return True
-    if a == 'a_plan_list':
-        plans = await get_plans(owner)
+
+    if a.startswith('a_plan_group_toggle_'):
+        try:
+            cid = int(a.replace('a_plan_group_toggle_', ''))
+        except (TypeError, ValueError):
+            await q.answer('Invalid group/channel selection.', show_alert=True)
+            return True
+        selected = set(int(x) for x in (context.user_data.get('plan_group_selected_chats') or []))
+        if cid in selected:
+            selected.remove(cid)
+        else:
+            selected.add(cid)
+        context.user_data['plan_group_selected_chats'] = list(selected)
+        await _selection(self, q, owner, context)
+        return True
+
+    if a in ('a_plan_group_save',) or a.startswith('a_plan_group_save_edit_'):
+        selected = []
+        for value in (context.user_data.get('plan_group_selected_chats') or []):
+            try:
+                cid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if cid not in selected:
+                selected.append(cid)
+        if not selected:
+            # No selection means the seller is leaving/cancelling this target
+            # selection screen. Do not block the Back button with an alert.
+            context.user_data.pop('plan_group_selected_chats', None)
+            context.user_data.pop('plan_group_editing_id', None)
+            await _main(self, q, owner)
+            return True
+
+        try:
+            if a.startswith('a_plan_group_save_edit_'):
+                gid = a.replace('a_plan_group_save_edit_', '', 1)
+                await update_plan_group(owner, gid, selected)
+            else:
+                await create_plan_group(owner, selected)
+        except Exception as exc:
+            logger.exception('Failed to save plan target owner=%s action=%s', owner, a)
+            raise
+
+        context.user_data.pop('plan_group_selected_chats', None)
+        context.user_data.pop('plan_group_editing_id', None)
+        await _main(self, q, owner)
+        return True
+
+    if a.startswith('a_plan_group_info_'):
+        # The group-name button is the Edit button. Open the same multi-select
+        # screen with the bundle's current targets pre-selected.
+        gid = a.replace('a_plan_group_info_', '', 1)
+        group = await get_plan_group(owner, gid)
+        if not group:
+            await q.answer('Plan group not found.', show_alert=True)
+            return True
+        context.user_data.pop('plan_group_selected_chats', None)
+        context.user_data['plan_group_editing_id'] = gid
+        context.user_data['plan_group_selected_chats'] = [
+            int(x) for x in (group.get('chat_ids') or [])
+        ]
+        await _selection(self, q, owner, context, edit_group_id=gid)
+        return True
+
+    if a.startswith('a_plan_group_del_'):
+        gid = a.replace('a_plan_group_del_', '')
+        await delete_plan_group(owner, gid)
+        await _main(self, q, owner)
+        return True
+
+    if a.startswith('a_plan_group_view_'):
+        gid = a.replace('a_plan_group_view_', '')
+        group = await get_plan_group(owner, gid)
+        if not group:
+            await q.answer('Plan group not found.', show_alert=True)
+            return True
+        plans = await get_plans(owner, group_id=gid)
         settings = await get_seller_settings(owner)
         code = normalize_currency(settings.get('currency')) or 'INR'
-        lines = [f'📋 Plans\n\n💱 Currency: {currency_symbol(code)} {code} — {currency_name(code)}\n']
+        lines = [f"📋 Plans — {_group_label(group)}", "", f"💱 Currency: {currency_symbol(code)} {code} — {currency_name(code)}", ""]
         kb = []
         for p in plans:
             lines.append(f"{('✅' if p.get('active') else '⏸')} {p['name']} — {p['duration_text']} — {format_currency(code, p['price'])} — ⭐{int(p.get('stars_price',0) or 0)}")
-            kb.append([InlineKeyboardButton(f"✏ {p['name'][:16]}", callback_data=f"a_plan_edit_{p['plan_id']}"), InlineKeyboardButton('🗑', callback_data=f"a_plan_del_{p['plan_id']}")])
-            kb.append([InlineKeyboardButton('⏸ Disable' if p.get('active') else '▶ Enable', callback_data=f"a_plan_toggle_{p['plan_id']}")])
-        kb.append([InlineKeyboardButton('⬅ Back', callback_data='a_plans')])
-        await q.edit_message_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(kb))
+            kb.append([
+                InlineKeyboardButton(f"✏️ {p['name'][:12]}", callback_data=f"a_plan_edit_{p['plan_id']}"),
+                InlineKeyboardButton("🗑️", callback_data=f"a_plan_del_{p['plan_id']}"),
+                InlineKeyboardButton('⏸️ Disable' if p.get('active') else '▶️ Enable', callback_data=f"a_plan_toggle_{p['plan_id']}"),
+            ])
+        kb.append([InlineKeyboardButton("➕ Add Plan", callback_data=f"a_plan_group_add_{gid}")])
+        kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plans")])
+        await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
         return True
-    if a.startswith('a_plan_edit_'):
+
+    if a.startswith('a_plan_group_add_'):
+        gid = a.replace('a_plan_group_add_', '')
+        if not await get_plan_group(owner, gid):
+            await q.answer('Plan group not found.', show_alert=True)
+            return True
+        plan_cfg, _ = await effective_plan(self.seller_account(context))
+        existing = len(await get_plans(owner, group_id=gid))
+        limit = int(plan_cfg.get('plan_limit', 2))
+        if limit >= 0 and existing >= limit:
+            await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard(f'a_plan_group_view_{gid}'))
+            return True
         context.user_data.clear()
-        context.user_data['wait_plan_edit'] = a.replace('a_plan_edit_', '')
+        context.user_data['wait_plan_add'] = {'group_id': gid}
         settings = await get_seller_settings(owner)
         code = normalize_currency(settings.get('currency')) or 'INR'
-        await q.edit_message_text(f'✏️ Edit Subscription Plan\n\nCurrency: {currency_symbol(code)} {code}\n\nSend new: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nDuration: m = minutes, h = hours, d = days, mo = months, y = years', reply_markup=self.back('a_plan_list'))
+        await q.edit_message_text(f"➕ Add Plan — {_group_label(await get_plan_group(owner, gid))}\n\nCurrency: {currency_symbol(code)} {code} — {currency_name(code)}\n\nSend: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nDuration: m = minutes, h = hours, d = days, mo = months, y = years", reply_markup=self.back(f'a_plan_group_view_{gid}'))
         return True
+
+    if a.startswith('a_plan_edit_'):
+        pid = a.replace('a_plan_edit_', '')
+        plan = await get_plan(owner, pid)
+        if not plan:
+            await q.answer('Plan not found.', show_alert=True)
+            return True
+        context.user_data.clear()
+        context.user_data['wait_plan_edit'] = pid
+        settings = await get_seller_settings(owner)
+        code = normalize_currency(settings.get('currency')) or 'INR'
+        gid = str(plan.get('group_id') or '')
+        back = f'a_plan_group_view_{gid}' if gid else 'a_plans'
+        await q.edit_message_text(f'✏️ Edit Subscription Plan\n\nCurrency: {currency_symbol(code)} {code} — {currency_name(code)}\n\nSend new: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nDuration: m = minutes, h = hours, d = days, mo = months, y = years', reply_markup=self.back(back))
+        return True
+
     if a.startswith('a_plan_del_'):
-        await delete_plan(owner, a.replace('a_plan_del_', ''))
-        await q.edit_message_text('✅ Plan deleted', reply_markup=self.plans_admin_menu())
+        pid = a.replace('a_plan_del_', '')
+        plan = await get_plan(owner, pid)
+        gid = str((plan or {}).get('group_id') or '')
+        await delete_plan(owner, pid)
+        await q.edit_message_text('✅ Plan deleted', reply_markup=self.back(f'a_plan_group_view_{gid}' if gid else 'a_plans'))
         return True
+
     if a.startswith('a_plan_toggle_'):
         pid = a.replace('a_plan_toggle_', '')
         p = await get_plan(owner, pid)
+        if not p:
+            await q.answer('Plan not found.', show_alert=True)
+            return True
         await update_plan(owner, pid, active=not bool(p.get('active')))
-        await q.edit_message_text('✅ Plan status updated', reply_markup=self.plans_admin_menu())
+        gid = str(p.get('group_id') or '')
+        if gid:
+            # Re-render the scoped list after the toggle.
+            group = await get_plan_group(owner, gid)
+            plans = await get_plans(owner, group_id=gid)
+            settings = await get_seller_settings(owner)
+            code = normalize_currency(settings.get('currency')) or 'INR'
+            lines = [f"📋 Plans — {_group_label(group)}", "", f"💱 Currency: {currency_symbol(code)} {code} — {currency_name(code)}", ""]
+            kb=[]
+            for plan in plans:
+                lines.append(f"{('✅' if plan.get('active') else '⏸')} {plan['name']} — {plan['duration_text']} — {format_currency(code, plan['price'])} — ⭐{int(plan.get('stars_price',0) or 0)}")
+                kb.append([
+                    InlineKeyboardButton(f"✏️ {plan['name'][:12]}", callback_data=f"a_plan_edit_{plan['plan_id']}"),
+                    InlineKeyboardButton("🗑️", callback_data=f"a_plan_del_{plan['plan_id']}"),
+                    InlineKeyboardButton('⏸️ Disable' if plan.get('active') else '▶️ Enable', callback_data=f"a_plan_toggle_{plan['plan_id']}"),
+                ])
+            kb.append([InlineKeyboardButton("➕ Add Plan", callback_data=f"a_plan_group_add_{gid}")])
+            kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plans")])
+            await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await _main(self, q, owner)
         return True
     return False

@@ -81,7 +81,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard(f'a_user_view_{user_id}'))
             return True
         await activate_subscription(owner, user_id, plan['name'], plan['duration_minutes'], amount=plan.get('price'), duration_text=plan.get('duration_text'))
-        delivery = await self.deliver_subscription_access(owner, user_id)
+        delivery = await self.deliver_subscription_access(owner, user_id, {'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])]})
         try:
             await context.bot.send_message(user_id, f"🎉 Subscription activated/extended by admin.\nPlan: {plan['name']}\nDuration added: {plan['duration_text']}\n\nNew invite links sent: {delivery.get('sent', 0)}\nAlready joined: {delivery.get('already_member', 0)}")
         except Exception:
@@ -90,7 +90,31 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a.startswith('a_user_remove_'):
         user_id = int(a.replace('a_user_remove_', ''))
+
+        # Clone-wide subscription and Plan Group subscriptions are separate.
+        # Removing a user must deactivate both records and remove the user from
+        # every target chat belonging to their Plan Group subscriptions.
         await remove_subscription(owner, user_id)
+        plan_group_result = await remove_plan_group_subscriptions(owner, user_id)
+
+        for chat_id in plan_group_result.get('target_chat_ids', []):
+            try:
+                member = await context.bot.get_chat_member(chat_id, user_id)
+                if getattr(member, 'status', '') in {'creator', 'administrator'}:
+                    continue
+                await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+            except TelegramError as exc:
+                logger.warning(
+                    'Admin subscription removal failed owner=%s user=%s chat=%s: %s',
+                    owner, user_id, chat_id, exc,
+                )
+            except Exception:
+                logger.exception(
+                    'Unexpected admin subscription removal failure owner=%s user=%s chat=%s',
+                    owner, user_id, chat_id,
+                )
+
         try:
             await context.bot.send_message(user_id, '❌ Your subscription was removed by admin.')
         except Exception:
