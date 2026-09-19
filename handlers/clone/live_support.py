@@ -538,8 +538,9 @@ class CloneLiveSupportMixin:
                 )
                 return
 
-            if context.user_data.get("wait_user_custom_duration"):
-                user_id=int(context.user_data["wait_user_custom_duration"])
+            if context.user_data.get("wait_user_group_duration"):
+                user_id=int(context.user_data["wait_user_group_duration"])
+                gid=str(context.user_data.get("wait_user_group_duration_gid") or "").strip()
                 value=text.strip().lower()
                 try:
                     if value.endswith("mo"):
@@ -563,37 +564,60 @@ class CloneLiveSupportMixin:
                     )
                     return
 
-                seller_account_id = self.seller_account(context)
-                plan_cfg, _ = await effective_plan(seller_account_id)
-                active_now = await active_subscriptions(owner)
-                already_active = any(int(x.get("user_id")) == user_id for x in active_now)
-                sub_limit = int(plan_cfg.get("active_subscriber_limit", 25))
-                if not already_active and sub_limit >= 0 and len(active_now) >= sub_limit:
+                group = await get_plan_group(owner, gid)
+                if not group:
                     context.user_data.clear()
                     await update.effective_message.reply_text(
-                        await plan_limit_warning(seller_account_id),
-                        reply_markup=self.limit_keyboard(f"a_user_view_{user_id}"),
+                        "❌ Plan Group not found or is no longer active.",
+                        reply_markup=self.back(f"a_user_view_{user_id}"),
                     )
                     return
 
-                await activate_subscription(
-                    owner, user_id, "Owner Assigned", duration_minutes,
-                    amount=0, duration_text=value,
+                targets = group.get("targets") or []
+                target_ids = []
+                for item in targets:
+                    try:
+                        target_ids.append(int(item.get("chat_id")))
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                if not target_ids:
+                    target_ids = [int(x) for x in (group.get("chat_ids") or [])]
+
+                if not target_ids:
+                    context.user_data.clear()
+                    await update.effective_message.reply_text(
+                        "❌ This Plan Group has no connected Group/Channel.",
+                        reply_markup=self.back(f"a_user_view_{user_id}"),
+                    )
+                    return
+
+                result = await fulfill_plan_group_subscription(
+                    owner,
+                    user_id,
+                    f"admin_extend:{owner}:{user_id}:{gid}:{uuid4().hex}",
+                    gid,
+                    "Admin Extension",
+                    duration_minutes,
+                    amount=0,
+                    duration_text=value,
+                    target_chat_ids=target_ids,
                 )
-                delivery=await self.deliver_subscription_access(owner,user_id)
                 context.user_data.clear()
+
                 try:
                     await context.bot.send_message(
                         user_id,
-                        "🎉 Subscription activated/extended by admin.\n"
-                        f"Duration added: {value}\n\n"
-                        f"New invite links sent: {delivery.get('sent',0)}\n"
-                        f"Already joined: {delivery.get('already_member',0)}",
+                        "🎉 Plan Group subscription extended by admin.\n"
+                        f"Duration added: {value}\n"
+                        f"New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}",
                     )
                 except Exception:
                     pass
+
                 await self.show_user_details(
-                    _MessageQueryAdapter(update.effective_message), owner, user_id,
+                    _MessageQueryAdapter(update.effective_message),
+                    owner,
+                    user_id,
                 )
                 return
 
