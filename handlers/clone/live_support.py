@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.clone.admin.live_support import _live_support_parse_buttons
+from uuid import uuid4
 
 
 # One FIFO lock per seller/user pair. Telegram can dispatch several updates
@@ -591,33 +592,49 @@ class CloneLiveSupportMixin:
                     )
                     return
 
+                # Give / Extend is intentionally one operation.  A missing
+                # subscription is created, an active one is extended from its
+                # current expiry, and an expired one is reactivated from now.
+                previous = await get_plan_group_subscription(owner, user_id, gid)
+                previous_expiry = (previous or {}).get('expiry_date')
+                if previous_expiry and getattr(previous_expiry, 'tzinfo', None) is None:
+                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                was_active = bool(
+                    previous
+                    and previous.get('active')
+                    and previous_expiry
+                    and previous_expiry > now
+                )
+
                 result = await fulfill_plan_group_subscription(
                     owner,
                     user_id,
                     f"admin_extend:{owner}:{user_id}:{gid}:{uuid4().hex}",
                     gid,
-                    "Admin Extension",
+                    (previous or {}).get('plan') or 'Admin Subscription',
                     duration_minutes,
                     amount=0,
                     duration_text=value,
                     target_chat_ids=target_ids,
                 )
+
+                # Fresh invite links are delivered for every case: new, active
+                # extension, and expired-subscription reactivation.
+                from handlers.clone.admin.users import _restore_plan_group_access_after_admin_extend
+                await _restore_plan_group_access_after_admin_extend(
+                    context.bot, owner, user_id, gid
+                )
                 context.user_data.clear()
 
-                try:
-                    await context.bot.send_message(
-                        user_id,
-                        "🎉 Plan Group subscription extended by admin.\n"
-                        f"Duration added: {value}\n"
-                        f"New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}",
-                    )
-                except Exception:
-                    pass
-
-                await self.show_user_details(
-                    _MessageQueryAdapter(update.effective_message),
-                    owner,
-                    user_id,
+                status_text = 'extended' if was_active else ('reactivated' if previous else 'created')
+                await update.effective_message.reply_text(
+                    '✅ Subscription updated successfully.\n\n'
+                    f'📦 Plan Group: {", ".join(str(x.get("title") or x.get("chat_id")) for x in targets) or gid}\n'
+                    f'📅 Duration added: {value}\n'
+                    f'🔄 Status: {status_text.title()}\n'
+                    f'⏳ New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}',
+                    reply_markup=self.back(f'a_user_view_{user_id}'),
                 )
                 return
 
