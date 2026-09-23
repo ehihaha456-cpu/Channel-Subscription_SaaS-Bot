@@ -60,13 +60,30 @@ async def _claim_precreated_razorpay_qr(tx: dict, plan: dict, owner: int, curren
 async def handle(self, update, context, q, owner, action):
     back_keyboard = self.back(feature_back_callback(context))
     if action.startswith('c_select_'):
+        # The current message is the exact plan list the user came from.
+        # Store its markup so Payment -> Back can restore that same list.
+        try:
+            if q.message is not None:
+                context.user_data['selected_child_plans_back_markup'] = q.message.reply_markup
+                context.user_data['selected_child_plans_back_chat_id'] = int(q.message.chat_id)
+        except Exception:
+            pass
         plan = await get_plan(owner, action.replace('c_select_', ''))
         if not plan:
             await q.answer('Plan not found', show_alert=True)
             return True
         context.user_data['selected_child_plan'] = plan
         bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
-        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+        # These reads are independent; fetch them together so the callback does
+        # not wait through several sequential MongoDB round-trips.
+        gateway_task = asyncio.create_task(get_gateway_config('seller', owner, decrypt=True))
+        settings_task = asyncio.create_task(get_seller_settings(owner))
+        qr_task = asyncio.create_task(get_bot_payment_qr(bot_id)) if bot_id else None
+        gateway_cfg, s, qr_file_id = await asyncio.gather(
+            gateway_task,
+            settings_task,
+            qr_task if qr_task is not None else asyncio.sleep(0, result=''),
+        )
         gateways = gateway_cfg.get('gateways') or {}
         razorpay_settings = gateways.get('razorpay') or {}
         if (razorpay_settings.get('enabled') and
@@ -74,14 +91,14 @@ async def handle(self, update, context, q, owner, action):
                 bot_id):
             # Same plan: replace the user's previous QR. Other plans remain visible
             # and usable until their own QR expires.
-            try:
-                await cancel_previous_razorpay_qr_for_same_plan(
-                    context.bot, owner, q.from_user.id, bot_id, str(plan['plan_id'])
-                )
-            except Exception:
-                logger.exception('Could not replace previous Razorpay QR for same plan')
-        s = await get_seller_settings(owner)
-        qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
+            async def _cancel_previous_qr():
+                try:
+                    await cancel_previous_razorpay_qr_for_same_plan(
+                        context.bot, owner, q.from_user.id, bot_id, str(plan['plan_id'])
+                    )
+                except Exception:
+                    logger.exception('Could not replace previous Razorpay QR for same plan')
+            asyncio.create_task(_cancel_previous_qr())
         if not qr_file_id:
             qr_file_id = str(s.get('upi_qr_file_id') or '')
         currency = normalize_currency(s.get('currency')) or 'INR'
@@ -147,7 +164,7 @@ async def handle(self, update, context, q, owner, action):
                         chat_id=q.message.chat_id,
                         photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                         caption=text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
                     )
                     if not cached_file_id and getattr(sent, 'photo', None):
                         try:
@@ -194,14 +211,19 @@ async def handle(self, update, context, q, owner, action):
             text = f'{text}\n\n{notice}' if text else notice
         if not enabled and (not manual_enabled) and not (stars_enabled and stars_price > 0):
             text = '⚠️ No payment method is currently available. Please contact support.'
-        rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
+        rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')])
         kb = InlineKeyboardMarkup(rows)
         if qr_file_id and manual_enabled:
             try:
                 await q.message.delete()
             except TelegramError:
                 pass
-            await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+            try:
+                await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+            except TelegramError:
+                # Keep the callback usable even if an old/invalid QR file_id exists.
+                logger.exception('Stored manual payment QR could not be sent; falling back to text')
+                await self.safe_query_message(q, text, kb)
         else:
             await self.safe_query_message(q, text, kb)
         return True
@@ -290,7 +312,7 @@ async def handle(self, update, context, q, owner, action):
                     chat_id=q.message.chat_id,
                     photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                     caption=text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
                 )
                 if not cached_file_id and getattr(sent, 'photo', None):
                     try:
@@ -305,7 +327,7 @@ async def handle(self, update, context, q, owner, action):
                     payment_message_id=int(sent.message_id), payment_message_type='photo',
                 )
                 return True
-            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
+            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]))
             await update_gateway_transaction(
                 tx['transaction_id'], payment_message_chat_id=int(q.message.chat_id),
                 payment_message_id=int(q.message.message_id), payment_message_type='text',
@@ -313,7 +335,7 @@ async def handle(self, update, context, q, owner, action):
         except GatewayError as exc:
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
         return True
-        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
+        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]))
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True
