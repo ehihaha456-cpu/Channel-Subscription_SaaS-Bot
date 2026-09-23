@@ -30,6 +30,60 @@ async def _group_label(owner, sub):
 
 
 
+# --- Point 14: callback target validation ---
+async def _callback_user_allowed(owner, user_id):
+    """Ensure a crafted User Management callback can only target a user
+    belonging to the current seller/clone owner scope.
+    """
+    try:
+        return bool(await get_user(owner, int(user_id)))
+    except (TypeError, ValueError):
+        return False
+
+
+async def _callback_group_allowed(owner, group_id):
+    """Ensure a crafted callback cannot select another owner's Plan Group."""
+    try:
+        return bool(await get_plan_group(owner, str(group_id)))
+    except Exception:
+        return False
+
+
+# --- Point 1: restore access after admin extension ---
+async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id):
+    """For an expired subscription that was just extended, send access links
+    for current Plan Group targets where the user is not already a member.
+    """
+    group = await get_plan_group(owner, str(group_id))
+    if not group:
+        return
+    for target in (group.get("targets") or []):
+        try:
+            chat_id = int(target.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            member = await bot.get_chat_member(chat_id, int(user_id))
+            if getattr(member, "status", "") in {"member", "administrator", "creator", "restricted"}:
+                continue
+        except Exception:
+            pass
+        try:
+            invite = await bot.create_chat_invite_link(
+                chat_id=chat_id,
+                name=f"Subscription restore {user_id}",
+            )
+            await bot.send_message(
+                int(user_id),
+                f"🔗 Access link: {invite.invite_link}",
+            )
+        except Exception:
+            logger.exception(
+                "Failed restoring Plan Group access owner=%s user=%s chat=%s",
+                owner, user_id, chat_id,
+            )
+
+
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_users':
         context.user_data.clear()
@@ -38,12 +92,27 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     if a.startswith('a_user_view_'):
-        await self.show_user_details(q, owner, int(a.replace('a_user_view_', '')))
+        try:
+            user_id = int(a.replace('a_user_view_', ''))
+        except (TypeError, ValueError):
+            await q.answer('Invalid user.', show_alert=True)
+            return True
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
+        await self.show_user_details(q, owner, user_id)
         return True
 
     if a.startswith('a_user_manage_') or a.startswith('a_user_give_') or a.startswith('a_user_extend_') or a.startswith('a_user_custom_'):
         prefix = next(x for x in ('a_user_manage_', 'a_user_give_', 'a_user_extend_', 'a_user_custom_') if a.startswith(x))
-        user_id = int(a.replace(prefix, ''))
+        try:
+            user_id = int(a.replace(prefix, ''))
+        except (TypeError, ValueError):
+            await q.answer('Invalid user.', show_alert=True)
+            return True
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
 
         groups = await get_plan_groups(owner)
         if not groups:
@@ -90,6 +159,10 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer('Invalid Plan Group selection.', show_alert=True)
             return True
 
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
+
         group = await get_plan_group(owner, gid)
         if not group:
             await q.edit_message_text(
@@ -123,6 +196,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
         except (TypeError, ValueError):
             await q.answer("Invalid subscription selection.", show_alert=True)
             return True
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
+        if not await _callback_group_allowed(owner, gid):
+            await q.answer('❌ Plan Group is not available in this account.', show_alert=True)
+            return True
+
         duration_text = str(context.user_data.get('user_custom_duration_text') or '').strip().lower()
         try:
             duration_minutes = _duration_minutes(duration_text)
@@ -148,6 +228,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
             duration_text=duration_text,
             target_chat_ids=target_ids,
         )
+        await _restore_plan_group_access_after_admin_extend(
+            context.bot, owner, user_id, gid
+        )
         context.user_data.clear()
         try:
             await context.bot.send_message(
@@ -169,6 +252,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
             user_id = int(user_text)
         except (TypeError, ValueError):
             await q.answer("Invalid subscription selection.", show_alert=True)
+            return True
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
+        if not await _callback_group_allowed(owner, gid):
+            await q.answer('❌ Plan Group is not available in this account.', show_alert=True)
             return True
         result = await remove_plan_group_subscription(owner, user_id, gid)
         if not result.get('removed'):
@@ -223,14 +312,28 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     if a.startswith('a_user_ban_'):
-        user_id = int(a.replace('a_user_ban_', ''))
+        try:
+            user_id = int(a.replace('a_user_ban_', ''))
+        except (TypeError, ValueError):
+            await q.answer('Invalid user.', show_alert=True)
+            return True
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
         context.user_data.clear()
         context.user_data['wait_user_ban_reason'] = user_id
         await q.edit_message_text('🚫 Send ban reason.', reply_markup=self.back(f'a_user_view_{user_id}'))
         return True
 
     if a.startswith('a_user_unban_'):
-        user_id = int(a.replace('a_user_unban_', ''))
+        try:
+            user_id = int(a.replace('a_user_unban_', ''))
+        except (TypeError, ValueError):
+            await q.answer('Invalid user.', show_alert=True)
+            return True
+        if not await _callback_user_allowed(owner, user_id):
+            await q.answer('❌ User is not available in this account.', show_alert=True)
+            return True
         await set_user_ban(owner, user_id, False, '')
         try:
             await context.bot.send_message(user_id, '✅ You have been unbanned.')
