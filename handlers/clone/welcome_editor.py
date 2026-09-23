@@ -7,7 +7,7 @@ import hashlib
 
 from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
-from utils.branding import append_seller_branding
+from utils.branding import append_seller_branding, SEPARATOR
 
 
 # ---------------------------------------------------------------------------
@@ -16,15 +16,16 @@ from utils.branding import append_seller_branding
 # Welcome Message editor can evolve independently from every other editor.
 # The stored schema and feature callback names remain backward compatible.
 # ---------------------------------------------------------------------------
+# Dedicated callback namespace for buttons created by the Welcome Message editor.
+# Legacy c_* callbacks remain supported by the runtime, but newly created
+# Welcome feature buttons use wf_* so they cannot collide with other clone
+# callback routes.
 WELCOME_FEATURE_CALLBACKS: dict[str, str] = {
-    "plans": "c_plans",
-    "buy": "c_buy",
-    "profile": "c_profile",
-    "renew": "c_renew",
-    "referral": "c_referral",
-    "referral_unlock": "c_referral_unlock",
-    "support": "c_support",
-    "home": "c_home",
+    "profile": "wf_profile",
+    "referral": "wf_referral",
+    "referral_unlock": "wf_referral_unlock",
+    "support": "wf_support",
+    "home": "wf_home",
 }
 
 
@@ -44,8 +45,6 @@ def welcome_url_buttons_header() -> str:
         "Button title - popup: Popup text\n"
         "or\n"
         "Button title - alert: Popup text\n\n"
-        "• Add a button with a link to the group rules:\n"
-        "Button title - rules\n\n"
         "• Add a share button:\n"
         "Button title - share: Text to be shared\n\n"
         "• Add a button with copyable text:\n"
@@ -54,12 +53,15 @@ def welcome_url_buttons_header() -> str:
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
-        "plans, buy, profile, renew, referral, referral_unlock, support, home\n\n"
-        "• Show a separate plan list using its PLAN ID:\n"
+        "profile, referral, referral_unlock, support, home\n\n"
+        "• HOW TO ADD PLAN BUTTONS SEPERATE GROUPS:\n"
         "Button title - feature: plans_(PLAN_ID)\n"
         "Example: Premium Channel - feature: plans_1001\n\n"
-        "Each connected group/channel bundle has its own 4-digit PLAN ID in Plan Management.\n"
-        "The PLAN ID works only inside this bot."
+        "Where you get PLAN ID:\n"
+        "Go to 📦 manage plan.\n"
+        "Each separate plan group will have its own 4-digit PLAN ID.\n"
+        "Example: PLAN ID 👉 1001\n"
+        "Use that ID as feature: plans_1001."
     )
 
 
@@ -83,7 +85,10 @@ def _parse_welcome_button_target(target: str, line_no: int, button_no: int) -> d
             return {"text_type": "callback", "value": f"c_plans_list_{plan_list_id}"}
         callback = WELCOME_FEATURE_CALLBACKS.get(feature)
         if not callback:
-            raise ValueError(location + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)} or plans_(PLAN_ID)")
+            raise ValueError(
+                location
+                + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)} or plans_(PLAN_ID)"
+            )
         return {"text_type": "callback", "value": callback}
     if target.startswith("plans:"):
         raw_ids = target.split(":", 1)[1].strip()
@@ -243,7 +248,7 @@ class CloneWelcomeEditorMixin:
     def build_welcome_keyboard(rows):
         return build_welcome_keyboard(rows)
 
-    async def send_welcome(self,message,context,settings,user):
+    async def send_welcome(self,message,context,settings,user,branding_result=None):
         # Seller ka editable welcome text optional hai. Agar seller text remove
         # kare, tab bhi default welcome title aur permanent SaaS branding dikhegi.
         seller_text=(settings.get("welcome_message") or "").strip()
@@ -258,7 +263,18 @@ class CloneWelcomeEditorMixin:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
 
         # Platform branding is controlled by the seller's current plan.
-        text=await append_seller_branding(welcome_text, self.seller_account(context))
+        if branding_result is None:
+            text=await append_seller_branding(welcome_text, self.seller_account(context))
+        else:
+            enabled, branding = branding_result
+            if enabled and branding:
+                text = (
+                    welcome_text
+                    if branding.casefold() in welcome_text.casefold()
+                    else f"{welcome_text}\n\n{SEPARATOR}\n\n{branding}"
+                )
+            else:
+                text = welcome_text
 
         # Seller ke welcome buttons fully removable hain. Empty list ka matlab
         # welcome message ke niche koi button nahi dikhana.

@@ -10,6 +10,20 @@ class CloneUserCallbacksMixin:
         q = update.callback_query
         owner = self.owner(context)
         action = q.data
+
+        # Welcome Message editor feature buttons use a dedicated namespace.
+        # Normalize them to the existing user-feature handlers so profile,
+        # referral, referral-unlock, support and home use the same proven
+        # feature implementations as the built-in clone buttons.
+        welcome_feature_actions = {
+            "wf_profile": "c_profile",
+            "wf_referral": "c_referral",
+            "wf_referral_unlock": "c_referral_unlock",
+            "wf_support": "c_support",
+            "wf_home": "c_home",
+        }
+        action = welcome_feature_actions.get(action, action)
+
         # Special buttons created by the shared message editor.
         if action == "w_rules":
             await q.answer("Group rules are available in the connected group description.", show_alert=True)
@@ -24,6 +38,20 @@ class CloneUserCallbacksMixin:
             return
         await q.answer()
         for handler in _USER_HANDLERS:
-            if await handler.handle(self, update, context, q, owner, action):
+            try:
+                handled = await handler.handle(self, update, context, q, owner, action)
+            except Exception as exc:
+                # A custom Welcome feature button must never become a silent
+                # dead callback. Log the real exception and give the user a
+                # short retry message instead of leaving Telegram spinning.
+                logger.exception("Clone feature callback failed action=%s owner=%s", action, owner)
+                try:
+                    await q.message.reply_text(
+                        "⚠️ This feature could not be opened. Please try again."
+                    )
+                except Exception:
+                    pass
                 return
-        await q.answer("Button action not found", show_alert=True)
+            if handled:
+                return
+        return
