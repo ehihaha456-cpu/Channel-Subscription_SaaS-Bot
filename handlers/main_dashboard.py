@@ -13,7 +13,7 @@ from database.admins import is_admin, get_all_admins
 from database.payments import count_pending_payments, total_revenue
 from database.seller_bots import (
     get_bot, get_bots, get_management_bots, get_bot_by_bot_id, get_all_active_bots,
-    total_bots, set_bot_active, get_decrypted_bot_token, mark_bot_suspended,
+    total_bots, clone_bot_runtime_counts, set_bot_active, get_decrypted_bot_token, mark_bot_suspended,
     restore_bot_from_suspension, clear_bot_suspension_marker,
 )
 from database.seller_data import (
@@ -116,21 +116,27 @@ def seller_dashboard_keyboard(record=None):
 
 async def owner_dashboard_text():
     async def build():
-        sellers, bots, users, pending, revenue = await asyncio.gather(
-            total_sellers(), total_bots(), total_users(),
-            count_pending_payments(), total_revenue(),
+        sellers, users, pending, revenue, bot_counts = await asyncio.gather(
+            total_sellers(),
+            total_users(),
+            count_pending_payments(),
+            total_revenue(),
+            clone_bot_runtime_counts(),
         )
-        return sellers, bots, users, pending, revenue
+        return sellers, users, pending, revenue, bot_counts
 
-    sellers, bots, users, pending, revenue = await performance_runtime.cached(
-        "owner_dashboard_summary", 20, build
-    )
+    # Keep the dashboard values consistent with the current database state.
+    # The clone-bot breakdown is calculated as Configured = Running + Offline/Error.
+    sellers, users, pending, revenue, bot_counts = await build()
 
     return (
         "👑 Owner Dashboard\n\n"
         "Platform overview:\n\n"
         f"🏪 Total Sellers: {sellers}\n"
-        f"🤖 Connected Clone Bots: {bots}\n"
+        "🤖 Clone Bots\n"
+        f"• Configured: {bot_counts['configured']}\n"
+        f"• Running: 🟢 {bot_counts['running']}\n"
+        f"• Offline/Error: 🔴 {bot_counts['offline_error']}\n"
         f"👥 Main Bot Users: {users}\n"
         f"📨 Pending Main Payments: {pending}\n"
         f"💰 Main Bot Revenue: ₹{revenue:g}\n\n"
@@ -428,7 +434,25 @@ async def _owner_access_link_for_channel(bot_record: dict, channel: dict) -> str
 async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = None):
     seller = await get_seller(owner_id)
     if not seller:
-        return None, None
+        # Seller Search intentionally includes every Main Bot user.  Such a
+        # user may have no clone bot and no seller registry row yet, so build a
+        # read-only seller profile from the Main Bot users collection instead of
+        # returning "Seller not found".
+        profile = await users_collection().find_one({"user_id": int(owner_id)})
+        if not profile:
+            return None, None
+        seller = {
+            "owner_id": int(owner_id),
+            "first_name": profile.get("first_name") or profile.get("name") or "Unknown",
+            "username": profile.get("username") or profile.get("telegram_username"),
+            "active": False,
+            "approved": False,
+            "suspended": False,
+            "plan": None,
+            "expiry_date": None,
+            "created_at": profile.get("created_at") or profile.get("joined_at"),
+            "updated_at": profile.get("updated_at") or profile.get("created_at") or profile.get("joined_at"),
+        }
 
     bots = await get_management_bots(owner_id)
     if selected_bot_id is not None:

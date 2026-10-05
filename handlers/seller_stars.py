@@ -7,6 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, U
 from telegram.ext import MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 
 from database.payment_gateways import get_gateway_config
+from config import ADMIN_IDS
 from database.seller_subscriptions import (
     get_paid_plan,
     process_verified_plan_purchase,
@@ -93,6 +94,28 @@ async def seller_stars_success(update: Update, context: ContextTypes.DEFAULT_TYP
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        if purchase.get("status") == "activated":
+            expiry = purchase.get("expiry_date")
+            expiry_text = expiry.strftime("%d %b %Y, %I:%M %p UTC") if hasattr(expiry, "strftime") else "-"
+            notice = (
+                "💳 Seller Plan Activated\n\n"
+                f"Seller ID: {owner_id}\n"
+                f"Plan: {plan.get('name', plan_id)}\n"
+                f"Duration: {int(plan.get('duration_days', 30) or 30)} Days\n"
+                f"Payment: ⭐ {int(payment.total_amount)} Stars\n"
+                "Source: Telegram Stars\n"
+                f"Expiry: {expiry_text}"
+            )
+            for admin_id in {int(value) for value in ADMIN_IDS}:
+                try:
+                    await context.bot.send_message(admin_id, notice)
+                except Exception:
+                    logger.exception(
+                        "Seller paid-plan activation owner notice failed seller_id=%s admin_id=%s",
+                        owner_id,
+                        admin_id,
+                    )
 
         if purchase.get("status") == "activated" and purchase.get("decision") == "same_plan_extended":
             expiry = purchase.get("expiry_date")
