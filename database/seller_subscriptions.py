@@ -13,7 +13,7 @@ DEFAULT_FREE = {
     "price": 0.0,
     "duration_days": 0,
     "bot_limit": 1,
-    "active_subscriber_limit": 25,
+    "active_subscriber_limit": 30,
     "channel_limit": 1,
     "plan_limit": 2,
     "admin_limit": 1,
