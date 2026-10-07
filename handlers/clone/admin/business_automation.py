@@ -386,8 +386,6 @@ def _home_keyboard(enabled: bool):
 async def _home(owner: int):
     settings = await get_seller_settings(owner)
     enabled = bool(settings.get("business_automation_enabled"))
-    connected = await count_active_official_business_connections(owner)
-    connection_status = "🟢 Connected" if connected else "🔴 Not Connected"
     text = (
         "💼 Business Automation\n\n"
         "Connect your Telegram Business Account and automate customer conversations.\n\n"
@@ -398,8 +396,7 @@ async def _home(owner: int):
         "4. Enter your Clone Bot username and select it.\n"
         "5. Grant all permissions except Manage Gifts and Manage Stars.\n"
         "6. Return here after Telegram confirms the connection.\n\n"
-        f"Automation: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
-        f"Business Account: {connection_status}\n\n"
+        f"Automation: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n\n"
         "After connecting, you can configure and control Welcome Message, Auto Reply, and Reply Templates from here. You can also manage Settings and view Statistics."
     )
     return text, _home_keyboard(enabled)
@@ -639,7 +636,22 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
 
     if action == "ba_home":
         text, markup = await _home(owner); await q.edit_message_text(text, reply_markup=markup); return True
+
+    # Broadcast / Invite Link inside Business Automation has been removed.
+    # Redirect stale callbacks from older messages back to the Business Automation home.
+    if (
+        action == "ba_broadcast"
+        or action in {"ba_broadcast_select", "ba_resend_active_select"}
+        or action.startswith("ba_broadcast_run_")
+        or action.startswith("ba_resend_active_run_")
+    ):
+        await q.answer("Broadcast / Invite Link is no longer available in Business Automation.", show_alert=True)
+        text, markup = await _home(owner)
+        await q.edit_message_text(text, reply_markup=markup)
+        return True
+
     if action == "ba_accounts":
+
         accounts = await get_business_accounts(owner)
         lines = [
             "📱 Connected Accounts",
