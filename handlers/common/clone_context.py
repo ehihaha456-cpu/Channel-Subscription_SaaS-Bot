@@ -16,7 +16,8 @@ from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandl
 from database.seller_subscriptions import (
     effective_plan, plan_limit_warning, current_plan_text, get_config,
     seller_access_state, usage_warning, bot_runtime_allowed,
-    seller_active_subscriber_count, seller_active_subscriber_ids,
+    seller_active_subscriber_count, seller_active_subscriber_ids, seller_subscriber_limit_status,
+    save_pending_limit_selection, pending_limit_selections, clear_pending_limit_selection,
 )
 from database.payment_gateways import (
     SUPPORTED_GATEWAYS, create_gateway_transaction, get_gateway_config,
@@ -168,7 +169,7 @@ def _seller_razorpay_webhook_url(owner_id: int) -> str:
 
 
 def _seller_razorpay_text(g: dict) -> str:
-    mode = str(g.get("checkout_mode") or "upi_qr").lower()
+    mode = str(g.get("checkout_mode") or "payment_link").lower()
     mode_text = "UPI QR (30 minutes)" if mode == "upi_qr" else "Payment Link"
     return (
         "💳 Razorpay\n\n"
@@ -181,8 +182,8 @@ def _seller_razorpay_text(g: dict) -> str:
     )
 
 
-def _seller_razorpay_keyboard(enabled: bool, checkout_mode: str = "upi_qr") -> InlineKeyboardMarkup:
-    mode = str(checkout_mode or "upi_qr").lower()
+def _seller_razorpay_keyboard(enabled: bool, checkout_mode: str = "payment_link") -> InlineKeyboardMarkup:
+    mode = str(checkout_mode or "payment_link").lower()
     switch_label = "🔄 Switch to Payment Link" if mode == "upi_qr" else "🔄 Switch to UPI QR (30 min)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable", callback_data="a_pg_toggle_razorpay")],
