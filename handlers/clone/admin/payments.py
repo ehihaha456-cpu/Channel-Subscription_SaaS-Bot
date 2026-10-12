@@ -224,14 +224,41 @@ async def handle(self, update, context, q, owner, staff, a, role):
             return True
         try:
             seller_account_id = self.seller_account(context)
-            plan_cfg, _ = await effective_plan(seller_account_id)
-            active_now = await active_subscriptions(owner)
-            already_active = any((int(x.get('user_id')) == int(p['user_id']) for x in active_now))
-            sub_limit = int(plan_cfg.get('active_subscriber_limit', 25))
-            if not already_active and sub_limit >= 0 and (len(active_now) >= sub_limit):
+            limit_status = await seller_subscriber_limit_status(seller_account_id, int(p['user_id']), scope_owner_id=owner, group_id=str(p.get("group_id") or ""))
+            if limit_status.get('at_limit') and not limit_status.get('already_active'):
+                # Keep this manual payment pending. The seller can upgrade the
+                # plan and press Approve again once capacity is available.
                 await release_processing_payment(owner, pid, 'seller subscriber limit reached')
-                await q.answer('Seller plan limit reached', show_alert=True)
-                await context.bot.send_message(seller_account_id, await plan_limit_warning(seller_account_id), reply_markup=self.limit_keyboard('a_pending'))
+                await q.answer()
+                main_username = str(MAIN_BOT_USERNAME or '').lstrip('@').strip()
+                buy_url = (
+                    f'https://t.me/{main_username}?start=sellerplan'
+                    if main_username else 'https://t.me/'
+                )
+                warning_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton('💎 Buy/Change Plan', url=buy_url)],
+                    [InlineKeyboardButton('👤 Profile', callback_data='a_seller_profile')],
+                ])
+                count = int(limit_status.get('count', 0))
+                limit = int(limit_status.get('limit', 0))
+                warning_text = (
+                    '⚠️ Plan Usage Warning\n\n'
+                    f'👥 Active Subscribers: {count}/{limit}\n\n'
+                    'According to your plan\n'
+                    'Your subscriber limit is full\n'
+                    'Please upgrade your plan.'
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=seller_account_id,
+                        text=warning_text,
+                        reply_markup=warning_keyboard,
+                    )
+                except Exception:
+                    logger.exception(
+                        'Could not send plan usage warning seller=%s payment=%s',
+                        seller_account_id, pid,
+                    )
                 return True
             group_id = str(p.get('group_id') or '').strip()
             target_ids = set()
