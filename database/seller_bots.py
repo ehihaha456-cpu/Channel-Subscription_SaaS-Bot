@@ -79,55 +79,6 @@ async def get_bots(owner_id: int):
     ).sort("created_at", 1).to_list(length=None)
 
 
-async def get_management_bots(owner_id: int):
-    """Return all non-removed clone bots for owner-management screens.
-
-    Paused clones must remain visible so the owner can resume them. This is
-    intentionally separate from get_bots(), which continues to represent only
-    active/connected clones for quota and normal seller UI logic.
-    """
-    return await seller_bots_collection().find(
-        {"owner_id": int(owner_id), "status": {"$ne": "removed"}}
-    ).sort("created_at", 1).to_list(length=None)
-
-
-async def mark_bot_suspended(bot_id: int, was_active: bool):
-    """Pause a clone because its seller was suspended, remembering prior state."""
-    await seller_bots_collection().update_one(
-        {"bot_id": int(bot_id)},
-        {"$set": {
-            "active": False,
-            "status": "seller_suspended",
-            "runtime_status": "seller_suspended",
-            "pre_suspend_active": bool(was_active),
-            "updated_at": datetime.now(timezone.utc),
-        }}
-    )
-
-
-async def restore_bot_from_suspension(bot_id: int) -> bool:
-    """Restore only clones that were active before seller suspension."""
-    result = await seller_bots_collection().update_one(
-        {"bot_id": int(bot_id), "status": "seller_suspended", "pre_suspend_active": True},
-        {"$set": {
-            "active": True,
-            "status": "active",
-            "runtime_status": "stopped",
-            "updated_at": datetime.now(timezone.utc),
-        }, "$unset": {"pre_suspend_active": ""}}
-    )
-    return bool(result.modified_count)
-
-
-async def clear_bot_suspension_marker(bot_id: int):
-    """Clear suspension state for clones that were already paused."""
-    await seller_bots_collection().update_one(
-        {"bot_id": int(bot_id)},
-        {"$set": {"status": "paused", "runtime_status": "paused", "updated_at": datetime.now(timezone.utc)},
-         "$unset": {"pre_suspend_active": ""}}
-    )
-
-
 async def count_owner_bots(owner_id: int):
     return await seller_bots_collection().count_documents(
         {"owner_id": int(owner_id), "active": True, "status": {"$ne": "removed"}}
@@ -413,45 +364,77 @@ async def bot_exists(owner_id: int):
     return await count_owner_bots(owner_id) > 0
 
 
-async def total_bots():
-    """Count currently configured clone bots, excluding preserved removed records."""
-    return await seller_bots_collection().count_documents(
-        {"active": True, "status": {"$ne": "removed"}}
-    )
+async def get_management_bots(owner_id: int):
+    """Return all currently connected clone records for management UI.
+
+    Paused/suspended bots remain connected and therefore remain visible to
+    management. Only explicitly removed bots are excluded.
+    """
+    return await seller_bots_collection().find({
+        "owner_id": int(owner_id),
+        "status": {"$ne": "removed"},
+    }).sort("created_at", 1).to_list(length=None)
 
 
 async def clone_bot_runtime_counts():
-    """Return exact configured/running/offline-error clone bot counts.
-
-    A configured bot is an active, non-removed clone record. A configured bot
-    is considered running only when its persisted runtime_status is ``running``;
-    every other configured state is grouped into Offline/Error.
-    """
-    collection = seller_bots_collection()
-    match = {"active": True, "status": {"$ne": "removed"}}
-    rows = await collection.aggregate([
-        {"$match": match},
-        {
-            "$group": {
-                "_id": None,
-                "configured": {"$sum": 1},
-                "running": {
-                    "$sum": {
-                        "$cond": [
-                            {"$eq": [{"$toLower": {"$ifNull": ["$runtime_status", ""]}}, "running"]},
-                            1,
-                            0,
-                        ]
-                    }
-                },
-            }
-        },
-    ]).to_list(length=1)
-    row = rows[0] if rows else {}
-    configured = int(row.get("configured", 0) or 0)
-    running = int(row.get("running", 0) or 0)
+    """Return platform clone-bot counts used by the owner dashboard."""
+    col = seller_bots_collection()
+    configured = await col.count_documents({"status": {"$ne": "removed"}})
+    running = await col.count_documents({
+        "status": {"$ne": "removed"},
+        "active": True,
+        "runtime_status": "running",
+    })
     return {
-        "configured": configured,
-        "running": running,
-        "offline_error": max(0, configured - running),
+        "configured": int(configured),
+        "running": int(running),
+        "offline_error": max(0, int(configured) - int(running)),
     }
+
+
+async def mark_bot_suspended(bot_id: int, was_active: bool):
+    """Mark a clone as seller-suspended while remembering its prior state."""
+    await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id)},
+        {"$set": {
+            "status": "seller_suspended",
+            "seller_suspension_was_active": bool(was_active),
+            "active": False,
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
+
+
+async def restore_bot_from_suspension(bot_id: int) -> bool:
+    """Restore a clone only when it was running before seller suspension."""
+    record = await get_bot_by_bot_id(int(bot_id))
+    if not record or record.get("status") != "seller_suspended":
+        return False
+    was_active = bool(record.get("seller_suspension_was_active"))
+    if not was_active:
+        return False
+    await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id)},
+        {"$set": {
+            "status": "registered",
+            "active": True,
+            "updated_at": datetime.now(timezone.utc),
+        }, "$unset": {"seller_suspension_was_active": ""}},
+    )
+    return True
+
+
+async def clear_bot_suspension_marker(bot_id: int):
+    """Restore a pre-paused clone's normal paused state after seller unsuspend."""
+    await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id)},
+        {"$set": {"status": "paused", "active": False, "updated_at": datetime.now(timezone.utc)},
+         "$unset": {"seller_suspension_was_active": ""}},
+    )
+
+
+async def total_bots():
+    """Count currently connected clone bots, excluding preserved removed records."""
+    return await seller_bots_collection().count_documents(
+        {"active": True, "status": {"$ne": "removed"}}
+    )

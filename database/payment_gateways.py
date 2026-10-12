@@ -109,11 +109,17 @@ async def save_gateway_config(
         if isinstance(value, str):
             value = value.strip()
         if key == "mode":
-            # Automatic gateways always operate in live mode.
-            value = "live"
+            value = str(value or "live").strip().lower()
+            if value not in VALID_MODES:
+                raise ValueError("Gateway mode must be test or live")
         item[key] = value
 
-    item["mode"] = "live"
+    # Keep an explicitly selected mode; old configurations default safely to LIVE.
+    item["mode"] = str(item.get("mode") or "live").strip().lower()
+    if item["mode"] not in VALID_MODES:
+        item["mode"] = "live"
+    if gateway == "razorpay" and any(k in values for k in ("key_id", "key_secret")):
+        item.pop("qr_prewarm_paused", None)
 
     if item.get("enabled") and not gateway_is_ready(gateway, item):
         missing = ", ".join(gateway_missing_fields(gateway, item))
@@ -249,6 +255,14 @@ async def get_transaction_by_gateway_order(gateway: str, gateway_order_id: str) 
     return await _transactions().find_one({"gateway": gateway, "gateway_order_id": str(gateway_order_id)})
 
 
+async def get_transaction_by_gateway_payment(gateway: str, gateway_payment_id: str) -> dict | None:
+    """Find a transaction by the provider's unique payment/charge reference."""
+    return await _transactions().find_one({
+        "gateway": str(gateway),
+        "gateway_payment_id": str(gateway_payment_id),
+    })
+
+
 async def claim_transaction_success(transaction_id: str, gateway_payment_id: str, raw_event: dict | None = None) -> dict | None:
     now = datetime.now(timezone.utc)
     return await _transactions().find_one_and_update(
@@ -256,6 +270,60 @@ async def claim_transaction_success(transaction_id: str, gateway_payment_id: str
         {"$set": {"status": "paid", "gateway_payment_id": str(gateway_payment_id or ""), "paid_at": now, "raw_success": raw_event or {}, "updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
+
+
+async def has_earlier_paid_child_transaction(transaction: dict) -> bool:
+    """Return True when an older paid child-subscription transaction is waiting.
+
+    Recovery sorting alone is not enough: a newer webhook can arrive while a
+    recovery job is processing an older paid_unfulfilled transaction. This
+    guard serializes fulfillment by seller payment time across clone bots.
+    """
+    transaction_id = str(transaction.get("transaction_id") or "")
+    metadata = transaction.get("metadata") or {}
+    seller_id = int(metadata.get("seller_account_id") or transaction.get("owner_id") or 0)
+    if not transaction_id or not seller_id:
+        return False
+
+    query = {
+        "purpose": "child_subscription",
+        "fulfilled_at": {"$exists": False},
+        "transaction_id": {"$ne": transaction_id},
+        "status": {"$in": ["paid", "paid_unfulfilled", "fulfilling"]},
+        "$or": [
+            {"owner_id": seller_id},
+            {"metadata.seller_account_id": seller_id},
+        ],
+    }
+    older = await _transactions().find_one(
+        query,
+        sort=[("paid_at", 1), ("created_at", 1)],
+        projection={"transaction_id": 1, "paid_at": 1, "created_at": 1},
+    )
+    if not older:
+        return False
+
+    current_key = (
+        transaction.get("paid_at") or transaction.get("created_at")
+    )
+    older_key = older.get("paid_at") or older.get("created_at")
+    if current_key is None or older_key is None:
+        # Missing timestamps are treated conservatively as older work.
+        return True
+    if getattr(current_key, "tzinfo", None) is None:
+        current_key = current_key.replace(tzinfo=timezone.utc)
+    if getattr(older_key, "tzinfo", None) is None:
+        older_key = older_key.replace(tzinfo=timezone.utc)
+    if older_key < current_key:
+        return True
+    if older_key == current_key:
+        older_created = older.get("created_at")
+        current_created = transaction.get("created_at")
+        if older_created and current_created and older_created < current_created:
+            return True
+        # Equal timestamps are uncommon; transaction ID gives deterministic order.
+        return str(older.get("transaction_id") or "") < transaction_id
+    return False
 
 
 async def claim_transaction_fulfillment(
@@ -538,7 +606,9 @@ async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
         ],
     }
     size = max(1, min(int(limit), 500))
-    return await _transactions().find(query).sort("updated_at", 1).limit(size).to_list(length=size)
+    # Preserve first-paid-first-served ordering for verified payments waiting
+    # on subscriber capacity; retry timestamps must not move a buyer to the back.
+    return await _transactions().find(query).sort([("paid_at", 1), ("created_at", 1)]).limit(size).to_list(length=size)
 
 
 async def expire_due_razorpay_qr_transactions(limit: int = 100) -> list[dict]:
