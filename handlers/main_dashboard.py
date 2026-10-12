@@ -34,7 +34,7 @@ from database.sellers import (
 from database.users import total_users, users_collection
 from services.bot_manager import bot_manager
 from services.clone_backup import create_clone_backup
-from database.seller_subscriptions import effective_plan, seller_usage, seller_active_subscriber_count
+from database.seller_subscriptions import effective_plan, seller_usage, seller_active_subscriber_count, clone_active_subscriber_count
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from database.mongo import get_database
@@ -79,7 +79,7 @@ def seller_dashboard_keyboard(record=None):
     if record:
         active = bool(record.get("active"))
         rows.extend([
-            [InlineKeyboardButton("👤 Seller Profile", callback_data="main_seller_profile")],
+            [InlineKeyboardButton("👤 Profile", callback_data="main_seller_profile")],
             [InlineKeyboardButton("🤖 My Bot", callback_data="seller_my_bot")],
             [
                 InlineKeyboardButton(
@@ -95,7 +95,7 @@ def seller_dashboard_keyboard(record=None):
             [InlineKeyboardButton("📜 Plan History", callback_data="seller_plan_history")],
         ])
     else:
-        rows.append([InlineKeyboardButton("👤 Seller Profile", callback_data="main_seller_profile")])
+        rows.append([InlineKeyboardButton("👤 Profile", callback_data="main_seller_profile")])
         rows.append([
             InlineKeyboardButton("➕ Create / Connect Clone Bot", callback_data="seller_connect")
         ])
@@ -454,7 +454,8 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             "updated_at": profile.get("updated_at") or profile.get("created_at") or profile.get("joined_at"),
         }
 
-    bots = await get_management_bots(owner_id)
+    all_management_bots = await get_management_bots(owner_id)
+    bots = list(all_management_bots)
     if selected_bot_id is not None:
         bots = [b for b in bots if int(b.get("bot_id") or 0) == int(selected_bot_id)]
         if not bots:
@@ -469,10 +470,12 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
 
     total_users_count = channel_count = plan_count = 0
     pending_count = success_count = 0
-    # Use the same seller-wide active-subscriber logic as Seller Profile/limits.
-    # This includes normal subscriptions + Plan Group subscriptions and
-    # de-duplicates users across clone bots/groups.
-    active_count = await seller_active_subscriber_count(owner_id)
+    # Seller-level profile shows seller-wide figures only when no specific
+    # clone is selected.  When Owner opens Manage Clone Bot -> Profile, all
+    # clone-specific usage must come strictly from that selected bot scope.
+    active_count = 0
+    if selected_bot_id is None:
+        active_count = await seller_active_subscriber_count(owner_id)
     today_revenue = total_revenue_value = 0.0
     bot_lines = []
     running_count = paused_count = 0
@@ -480,21 +483,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     for index, bot in enumerate(bots, 1):
         scope = int(bot.get("data_owner_id") or owner_id)
         users = await db["seller_users"].count_documents({"owner_id": scope})
-        normal_active_ids, group_active_ids = await asyncio.gather(
-            db["seller_subscriptions"].distinct(
-                "user_id", {"owner_id": scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-            db["seller_plan_group_subscriptions"].distinct(
-                "user_id", {"owner_id": scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-        )
-        active_ids = set()
-        for value in [*(normal_active_ids or []), *(group_active_ids or [])]:
-            try:
-                active_ids.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        active = len(active_ids)
+        active = await clone_active_subscriber_count(scope)
         channels = await db["seller_channels"].count_documents({"owner_id": scope, "active": True})
         plans = await db["seller_plans"].count_documents({"owner_id": scope, "active": {"$ne": False}})
         pending = await db["seller_payments"].count_documents({"owner_id": scope, "status": "pending"})
@@ -526,6 +515,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         else: paused_count += 1
         token = await get_decrypted_bot_token(int(bot["bot_id"])) or ""
         if token:
+            # Preserve the existing Seller Details display: show the complete stored API token.
             token_display = token
             token_status = "Valid / Stored"
         else:
@@ -548,7 +538,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             f"   Bot ID: <code>{int(bot.get('bot_id') or 0)}</code>\n"
             f"   API Token: <code>{escape(token_display)}</code>\n"
             f"   Token Status: {escape(token_status)}\n"
-            f"   👥 Users: {users} | 💎 Active: {active} | 💰 Revenue: ₹{revenue:g}\n"
+            f"   👥 Users: {users} | 💎 Active: {active} / {int(plan.get('active_subscriber_limit', 25) or 0)} | 💰 Revenue: ₹{revenue:g}\n"
             f"   📢 Connected Channels/Groups:\n"
             + ("\n".join(channel_lines) if channel_lines else "   None")
         )
@@ -557,9 +547,19 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     if expiry and expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
     activated = (assignment or {}).get("created_at")
     if activated and activated.tzinfo is None: activated = activated.replace(tzinfo=timezone.utc)
-    remaining = "Unlimited"
-    plan_status = "✅ Active"
-    if expiry:
+    # A removed owner subscription must not fall back to the default Free plan.
+    # Keep the removal state on the seller record after deleting its assignment.
+    removal_record = await db["sellers"].find_one(
+        {"owner_id": int(owner_id)},
+        {"subscription_removed_by_owner": 1},
+    )
+    subscription_removed = bool(
+        (removal_record or seller).get("subscription_removed_by_owner")
+        and assignment is None
+    )
+    remaining = "N/A" if subscription_removed else "Unlimited"
+    plan_status = "❌ Removed by Owner" if subscription_removed else "✅ Active"
+    if expiry and not subscription_removed:
         seconds = int((expiry - now).total_seconds())
         if seconds <= 0:
             remaining, plan_status = "Expired", "❌ Expired"
@@ -609,18 +609,19 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         f"✅ Approved: {'Yes' if seller.get('approved') else 'No'}\n"
         f"🚫 Suspended: {'Yes' if suspended else 'No'}\n\n"
         "💎 Plan Details\n"
-        f"📦 Plan: {escape(str(plan.get('name','Free')))}\n📌 Status: {plan_status}\n"
-        f"📅 Activated: {activated.astimezone(ist).strftime('%d-%m-%Y') if activated else '-'}\n"
-        f"⏳ Expiry: {expiry.astimezone(ist).strftime('%d-%m-%Y %I:%M %p') if expiry else 'No expiry'}\n"
+        f"📦 Plan: {escape('Removed by Owner' if subscription_removed else str(plan.get('name', 'Free')))}\n"
+        f"📌 Status: {plan_status}\n"
+        f"📅 Activated: {activated.astimezone(ist).strftime('%d-%m-%Y') if activated and not subscription_removed else ('Removed' if subscription_removed else '-')}\n"
+        f"⏳ Expiry: {expiry.astimezone(ist).strftime('%d-%m-%Y %I:%M %p') if expiry and not subscription_removed else ('Removed' if subscription_removed else 'No expiry')}\n"
         f"⌛ Remaining: {remaining}\n"
         f"💳 Last Payment Method: {escape(payment_method)}\n"
         f"🧾 Last Transaction ID: <code>{escape(transaction_id)}</code>\n\n"
-        "📊 Usage & Limitations — All Clone Bots\n"
-        f"🤖 Clone Bots: {len(bots)} / {limit_value('bot_limit',1)}\n"
-        f"👥 Active Subscribers: {active_count} / {limit_value('active_subscriber_limit',25)}\n"
-        f"📢 Channels / Groups: {channel_count} / {limit_value('channel_limit',1)}\n"
-        f"📦 Subscription Plans: {plan_count} / {limit_value('plan_limit',2)}\n"
-        f"👮 Admins / Staff: {staff_count} / {limit_value('admin_limit',1)}\n\n"
+        "📊 Seller Limitations\n"
+        f"🤖 Clone Bots: {len(all_management_bots)} / {limit_value('bot_limit',1)}\n"
+        f"👥 Active Subscribers: {limit_value('active_subscriber_limit',25)}\n"
+        f"📢 Channels / Groups: {limit_value('channel_limit',1)}\n"
+        f"📦 Subscription Plans: {limit_value('plan_limit',2)}\n"
+        f"👮 Admins / Staff: {limit_value('admin_limit',1)}\n\n"
         "📈 Seller Statistics — Combined\n"
         f"🤖 Running Bots: {running_count} | Stopped: {paused_count}\n"
         f"👥 Total Users: {total_users_count}\n💳 Pending Payments: {pending_count}\n"
@@ -630,13 +631,12 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     )
 
     keyboard = [
-        [InlineKeyboardButton("⏳ Extend Subscription", callback_data=f"sub_mgmt_extend_{owner_id}")],
+        [InlineKeyboardButton("💎 Change / Extend Plan", callback_data=f"sub_mgmt_extend_{owner_id}")],
+        [InlineKeyboardButton("❌ Remove Subscription", callback_data=f"main_seller_remove_subscription_{owner_id}")],
+        [InlineKeyboardButton("💬 Contact Seller", callback_data=f"main_owner_message_seller_{owner_id}")],
         [InlineKeyboardButton("✅ Unsuspend Seller" if suspended else "🚫 Suspend Seller",
             callback_data=f"main_seller_unsuspend_{owner_id}" if suspended else f"main_seller_suspend_{owner_id}")],
-        [InlineKeyboardButton("💬 Message Seller", callback_data=f"main_owner_message_seller_{owner_id}")],
-        [InlineKeyboardButton("💎 Change / Extend Plan", callback_data=f"sub_mgmt_extend_{owner_id}")],
         [InlineKeyboardButton("📜 Subscription History", callback_data=f"sub_mgmt_history_{owner_id}")],
-        [InlineKeyboardButton("💰 Seller Revenue", callback_data="sub_mgmt_revenue")],
     ]
     for bot in bots:
         bot_id = int(bot.get("bot_id") or 0)
@@ -650,10 +650,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             label = f"▶ Resume ({bot_name})"
             callback = f"main_seller_resumebot_{owner_id}_{bot_id}"
         keyboard.append([InlineKeyboardButton(label[:64], callback_data=callback)])
-    keyboard += [
-        [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")],
-        [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
-    ]
+    keyboard.append([InlineKeyboardButton("⬅ Back to Sellers", callback_data="main_owner_sellers")])
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -918,10 +915,24 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             raise ApplicationHandlerStop
 
         context.user_data.clear()
-        text, markup = await _owner_clone_backup_form(record)
-        await update.effective_message.reply_text(
-            text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
-        )
+        try:
+            text, markup = await _owner_clone_backup_form(record)
+            await update.effective_message.reply_text(
+                text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
+            )
+        except Exception:
+            logger.exception(
+                "Owner clone backup search result failed for identifier=%s bot_id=%s",
+                raw, record.get("bot_id"),
+            )
+            await update.effective_message.reply_text(
+                "⚠️ Clone Bot was found, but its backup details could not be loaded. "
+                "The error has been logged. Please try again.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Search Again", callback_data="main_owner_clone_backups")],
+                    [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
+                ]),
+            )
         raise ApplicationHandlerStop
 
     if context.user_data.get("owner_seller_search"):
@@ -1040,8 +1051,10 @@ async def _owner_clone_backup_form(record):
     is also current instead of relying only on the registration snapshot.
     """
     bot_id = int(record.get("bot_id") or 0)
-    seller_id = int(record.get("owner_id") or record.get("seller_account_id") or 0)
+    seller_id = int(record.get("seller_account_id") or record.get("owner_id") or 0)
     data_scope_id = int(record.get("data_owner_id") or record.get("owner_id") or 0)
+    db = get_database()
+    active_count = total_users_count = channel_count = plan_count = pending_count = success_count = 0
 
     seller = (await get_seller(seller_id)) if seller_id else {}
     seller = seller or {}
@@ -1104,6 +1117,15 @@ async def _owner_clone_backup_form(record):
         f'<a href="tg://user?id={seller_id}">{escape(seller_name)}</a>'
         if seller_id else escape(seller_name)
     )
+
+    if bot_id and data_scope_id:
+        selected_scope = int(data_scope_id)
+        active_count = await clone_active_subscriber_count(selected_scope)
+        total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
+        channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
+        plan_count = await db["seller_plans"].count_documents({"owner_id": selected_scope, "active": {"$ne": False}})
+        pending_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "pending"})
+        success_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "approved"})
 
     expiry = (assignment or {}).get("expiry_date")
     plan_status = "Active"
@@ -1488,7 +1510,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "When a new seller joins through your link, your seller-plan reward is added automatically.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?url={link}")],
-                [InlineKeyboardButton("⬅ Seller Profile", callback_data="main_seller_profile")],
+                [InlineKeyboardButton("⬅ Profile", callback_data="main_seller_profile")],
             ]),
             disable_web_page_preview=True,
         )
@@ -1596,6 +1618,58 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Owner access only.")
             return
         await seller_owner_view(query, int(action.replace("main_seller_view_", "")))
+        return
+
+    if action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
+        # Delete the current assignment and persist an explicit removal marker.
+        # Without the marker, effective_plan() falls back to Free / Active / Unlimited.
+        db = get_database()
+        await db["seller_plan_assignments"].delete_one({"owner_id": seller_id})
+        removed_at = datetime.now(timezone.utc)
+        await db["sellers"].update_one(
+            {"owner_id": int(seller_id)},
+            {"$set": {
+                "subscription_removed_by_owner": True,
+                "subscription_removed_at": removed_at,
+                "subscription_removed_by": int(user_id),
+                "updated_at": removed_at,
+            }},
+            upsert=False,
+        )
+        await query.answer("Seller subscription removed.", show_alert=True)
+        try:
+            await query.get_bot().send_message(
+                chat_id=int(seller_id),
+                text=(
+                    "⚠️ Seller Subscription Removed by Owner\n\n"
+                    "Your seller subscription has been removed by the owner.\n\n"
+                    "Your current seller plan is no longer active.\n\n"
+                    "Please contact support or the owner if you need assistance."
+                ),
+            )
+        except TelegramError:
+            logger.warning("Could not notify seller %s about subscription removal", seller_id, exc_info=True)
+        await seller_owner_view(query, seller_id)
+        return
+
+    if action.startswith("main_seller_remove_subscription_") and not action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
+        await query.edit_message_text(
+            "⚠️ Remove Seller Subscription\n\n"
+            f"Seller ID: {seller_id}\n\n"
+            "This will remove the seller's current plan assignment. Continue?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Confirm Remove", callback_data=f"main_seller_remove_subscription_confirm_{seller_id}")],
+                [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
+            ]),
+        )
         return
 
     if action.startswith("main_seller_suspend_"):
