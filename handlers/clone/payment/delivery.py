@@ -2,9 +2,215 @@
 
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
+from database.seller_subscriptions import save_pending_limit_selection
+from database.payment_gateways import (
+    create_gateway_transaction,
+    get_transaction_by_gateway_payment,
+    update_gateway_transaction,
+    claim_transaction_fulfillment,
+    mark_transaction_fulfillment_retry,
+)
 
 
 class ClonePaymentDeliveryMixin:
+    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount=None, plan: dict | None = None, purchased: bool = False, bot_id: int | None = None) -> dict:
+        """Notify the buyer and seller from the exact clone bot when its limit is full."""
+        owner_id = int(owner_id)
+        user_id = int(user_id)
+        bot_id = int(bot_id or 0)
+        running = self.get_running(bot_id) if bot_id else None
+        if not running:
+            running = self.get_running(owner_id)
+        if not running:
+            record = await get_bot_by_data_owner_id(owner_id)
+            resolved_bot_id = int((record or {}).get("bot_id") or bot_id or 0)
+            started = await self.start_bot(resolved_bot_id) if resolved_bot_id else False
+            running = self.get_running(resolved_bot_id) if started and resolved_bot_id else None
+        if not running:
+            return {"sent": 0, "error": "Clone bot is not running"}
+
+        seller_account_id = int(running.application.bot_data.get("seller_account_id", owner_id))
+        status = await seller_subscriber_limit_status(
+            seller_account_id, user_id, scope_owner_id=owner_id
+        )
+        count = int(status.get("count", 0))
+        limit = int(status.get("limit", 0))
+        pct = int((count / limit) * 100) if limit > 0 else 0
+        pct = max(0, pct)
+        try:
+            user = await running.application.bot.get_chat(user_id)
+            username = f"@{user.username}" if getattr(user, "username", None) else (getattr(user, "full_name", None) or str(user_id))
+        except Exception:
+            username = str(user_id)
+        safe_user = html.escape(str(username))
+        safe_plan = html.escape(str(plan_name or "Plan"))
+        # Resolve the selected plan's target bundle to its actual connected chat
+        # titles. Never display the internal group_id as a user-facing name.
+        group_names = []
+        selected_group_id = str((plan or {}).get("group_id") or "").strip()
+        if selected_group_id:
+            try:
+                target_group = await get_plan_group(owner_id, selected_group_id)
+            except Exception:
+                target_group = None
+            if target_group:
+                targets = target_group.get("targets") or []
+                group_names = [
+                    str(target.get("title") or "").strip()
+                    for target in targets
+                    if isinstance(target, dict) and str(target.get("title") or "").strip()
+                ]
+                # Keep a predictable display order (e.g. Testing 1, Testing 2).
+                group_names = sorted(dict.fromkeys(group_names), key=str.casefold)
+        # Legacy fallback only: don't leak an ID-like value when the bundle
+        # could not be resolved from the database.
+        if not group_names:
+            legacy_name = str((plan or {}).get("group_name") or "").strip()
+            if legacy_name and legacy_name != selected_group_id:
+                group_names = [legacy_name]
+        group_display = (
+            f"{html.escape(', '.join(group_names))} ({safe_plan})"
+            if group_names else safe_plan
+        )
+        main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
+        buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 Renew / Upgrade Plan", url=buy_url)],
+        ])
+        seller_text = (
+            "⚠️ Active Subscriber Limit Warning\n\n"
+            f"👤 User: {safe_user}\n"
+            f"👈 This user {'has purchased' if purchased else 'is trying to purchase'} your plan.\n\n"
+            f"📦 Plan Group: {group_display}\n\n"
+            f"👥 Active Subscribers: {count} / {limit}\n"
+            f"📊 Usage: {pct}%\n\n"
+            "Your active subscriber limit has been reached.\n"
+            "Please upgrade your plan."
+        )
+        # Buyer-facing warning is sent by the calling flow. Sending it here as
+        # well duplicates the warning when a plan-selection callback also replies.
+        # This helper is responsible only for notifying the seller.
+        bot = running.application.bot
+        sent = 0
+        try:
+            await bot.send_message(chat_id=seller_account_id, text=seller_text, reply_markup=keyboard)
+            sent = 1
+        except Exception:
+            logger.exception("Could not notify seller subscriber limit owner=%s", seller_account_id)
+        return {"sent": sent, "count": count, "limit": limit, "usage_percent": pct}
+
+    async def resume_pending_limited_purchases(self, seller_id: int) -> dict:
+        """Resume blocked plan selections with the same payment page as a fresh selection."""
+        from database.seller_subscriptions import pending_limit_selections, clear_pending_limit_selection
+        from database.seller_bots import get_bot_by_data_owner_id
+        from types import SimpleNamespace
+        from handlers.clone.user.payments import handle as handle_clone_user_payment
+
+        pending = await pending_limit_selections(int(seller_id))
+        resumed = 0
+        for item in pending:
+            scope = int(item.get("scope_owner_id") or 0)
+            user_id = int(item.get("user_id") or 0)
+            plan_id = str(item.get("plan_id") or "")
+            if not scope or not user_id or not plan_id:
+                continue
+
+            record = await get_bot_by_data_owner_id(scope)
+            if not record:
+                continue
+            bot_id = int(record.get("bot_id") or 0)
+            running = self.get_running(bot_id) or self.get_running(scope)
+            if not running and bot_id:
+                started = await self.start_bot(bot_id)
+                running = self.get_running(bot_id) if started else None
+            if not running:
+                continue
+
+            plan = await get_plan(scope, plan_id)
+            if not plan:
+                await clear_pending_limit_selection(seller_id, scope, user_id)
+                continue
+
+            status = await seller_subscriber_limit_status(
+                int(seller_id), user_id, scope_owner_id=scope,
+                group_id=str(plan.get("group_id") or ""),
+            )
+            if status.get("at_limit") and not status.get("already_active"):
+                continue
+
+            bot = running.application.bot
+            try:
+                # Recreate the payment page through the normal plan-selection
+                # handler. Avoid a separate "available" message so a race where
+                # capacity fills again cannot leave a misleading success notice.
+
+                class _ResumeMessage:
+                    def __init__(self, chat_id):
+                        self.chat_id = int(chat_id)
+                        self.chat = SimpleNamespace(id=int(chat_id))
+                        self.reply_markup = None
+                        self.photo = self.video = self.animation = None
+                        self.document = self.audio = None
+
+                    async def delete(self):
+                        return None
+
+                    async def reply_text(inner_self, text, reply_markup=None, **kwargs):
+                        return await bot.send_message(
+                            chat_id=inner_self.chat_id, text=text,
+                            reply_markup=reply_markup, **kwargs
+                        )
+
+                class _ResumeQuery:
+                    def __init__(self):
+                        self.from_user = SimpleNamespace(id=user_id)
+                        self.message = _ResumeMessage(user_id)
+
+                    async def answer(self, *args, **kwargs):
+                        return None
+
+                    async def edit_message_text(self, text, reply_markup=None, **kwargs):
+                        return await bot.send_message(
+                            chat_id=user_id, text=text,
+                            reply_markup=reply_markup, **kwargs
+                        )
+
+                    async def edit_message_caption(self, caption, reply_markup=None, **kwargs):
+                        return await bot.send_message(
+                            chat_id=user_id, text=caption,
+                            reply_markup=reply_markup, **kwargs
+                        )
+
+                fake_context = SimpleNamespace(
+                    application=running.application,
+                    bot=bot,
+                    user_data={"selected_child_plan": plan},
+                )
+                fake_query = _ResumeQuery()
+                handled = await handle_clone_user_payment(
+                    self, None, fake_context, fake_query, scope,
+                    f"c_select_{plan_id}",
+                )
+                if handled:
+                    # Re-check after rendering: capacity can fill between the
+                    # pre-check and the plan handler. Keep the selection queued
+                    # if that happened, and never clear another group's pending
+                    # selection just because the handler returned True.
+                    final_status = await seller_subscriber_limit_status(
+                        int(seller_id), user_id, scope_owner_id=scope,
+                        group_id=str(plan.get("group_id") or ""),
+                    )
+                    if final_status.get("at_limit") and not final_status.get("already_active"):
+                        continue
+                    await clear_pending_limit_selection(seller_id, scope, user_id)
+                    resumed += 1
+            except Exception:
+                logger.exception(
+                    "Could not resume pending limited purchase seller=%s user=%s scope=%s",
+                    seller_id, user_id, scope,
+                )
+        return {"resumed": resumed, "pending": len(pending)}
+
     async def stars_precheckout(self, update, context):
         query = update.pre_checkout_query
         try:
@@ -18,6 +224,9 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
                 raise ValueError('plan changed')
+            # This Stars invoice may have been opened while capacity was available.
+            # If the limit fills before checkout completes, accept the verified
+            # payment and queue fulfillment (same behavior as automatic gateways).
             await query.answer(ok=True)
         except Exception:
             await query.answer(ok=False, error_message='This Stars invoice is no longer valid. Reopen the payment page.')
@@ -26,8 +235,9 @@ class ClonePaymentDeliveryMixin:
         payment = update.effective_message.successful_payment
         if not payment or payment.currency != 'XTR':
             return
+        transaction_id = None
         try:
-            kind, scope, owner_text, user_text, plan_id = payment.invoice_payload.split(':', 4)
+            kind, scope, owner_text, user_text, plan_id = str(payment.invoice_payload or '').split(':', 4)
             owner = int(owner_text)
             user_id = int(user_text)
             if kind != 'stars' or scope != 'clone' or owner != self.owner(context) or user_id != int(update.effective_user.id):
@@ -36,57 +246,66 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not plan or expected <= 0 or payment.total_amount != expected:
                 raise ValueError('price mismatch')
-            reference = payment.telegram_payment_charge_id
-            group_id = str(plan.get('group_id') or '').strip()
-            target_ids = [int(x) for x in (plan.get('target_chat_ids') or [])]
-            now = datetime.now(timezone.utc)
-            if group_id:
-                previous = await get_plan_group_subscription(owner, user_id, group_id)
-                previous_expiry = (previous or {}).get('expiry_date')
-                if previous_expiry and previous_expiry.tzinfo is None:
-                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-                was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
-            else:
-                previous = await get_subscription(owner, user_id)
-                previous_expiry = (previous or {}).get('expiry_date')
-                if previous_expiry and previous_expiry.tzinfo is None:
-                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-                was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
-            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
-            if group_id:
-                result = await fulfill_plan_group_subscription(
-                    owner, user_id, f'stars:{reference}', group_id,
-                    plan['name'], plan['duration_minutes'], amount=0,
-                    duration_text=plan['duration_text'], target_chat_ids=target_ids,
+
+            charge_id = str(payment.telegram_payment_charge_id or '').strip()
+            if not charge_id:
+                raise ValueError('missing Telegram Stars charge ID')
+
+            # Stars and external gateways now share the same durable fulfillment
+            # queue, limit guard, retry handling, FIFO recovery and invite delivery.
+            tx = await get_transaction_by_gateway_payment('telegram_stars', charge_id)
+            if tx and (tx.get('status') == 'fulfilled' or tx.get('fulfilled_at') is not None):
+                return
+            if not tx:
+                seller_account_id = self.seller_account(context)
+                bot_id = int(context.application.bot_data.get('bot_id') or 0)
+                tx = await create_gateway_transaction(
+                    scope='seller',
+                    owner_id=seller_account_id,
+                    payer_user_id=user_id,
+                    gateway='telegram_stars',
+                    amount=float(payment.total_amount),
+                    currency='XTR',
+                    purpose='child_subscription',
+                    reference_id=charge_id,
+                    metadata={
+                        'plan_id': str(plan_id),
+                        'data_owner_id': int(owner),
+                        'seller_account_id': int(seller_account_id),
+                        'bot_id': bot_id,
+                        'plan_amount': float(plan.get('price') or 0),
+                        'stars_amount': int(payment.total_amount),
+                        'stars_charge_id': charge_id,
+                    },
                 )
-            else:
-                result = await fulfill_subscription_payment(
-                    owner, user_id, f'stars:{reference}', plan['name'],
-                    plan['duration_minutes'], amount=0,
-                    duration_text=plan['duration_text'],
+            transaction_id = str(tx['transaction_id'])
+            # Keep the original paid_at timestamp on redelivered Telegram updates
+            # so a retry cannot move an older purchase behind newer pending users.
+            if not tx.get('paid_at'):
+                await update_gateway_transaction(
+                    transaction_id,
+                    status='paid',
+                    gateway_payment_id=charge_id,
+                    paid_at=datetime.now(timezone.utc),
+                    payment_provider='telegram_stars',
+                    raw_success={'invoice_payload': str(payment.invoice_payload), 'total_amount': int(payment.total_amount)},
                 )
-            await record_payment_subscription_snapshot(
-                owner, reference,
-                (result.get('subscription') or {}).get('start_date') or now,
-                result.get('expiry_date'),
-            )
-            details = {
-                'plan_name': plan['name'],
-                'amount': 0,
-                'stars_amount': payment.total_amount,
-                'gateway': 'Telegram Stars',
-                'transaction_id': reference,
-                'payment_date': now,
-                'expiry_date': result.get('expiry_date'),
-                'duration': plan['duration_text'],
-                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
-                'was_already_active': was_active,
-                'previous_expiry': previous_expiry,
-            }
-            await self.deliver_subscription_access(owner, user_id, details)
-            await self.notify_automatic_payment_success(owner, user_id, details)
+            work = await claim_transaction_fulfillment(transaction_id)
+            if not work:
+                return
+            try:
+                from services.payment_gateways import fulfill_transaction
+                await fulfill_transaction(work)
+            except Exception as exc:
+                await mark_transaction_fulfillment_retry(transaction_id, str(exc))
+                raise
         except Exception:
-            logger.exception('Clone Stars fulfillment failed owner=%s user=%s', context.application.bot_data.get('seller_owner_id'), update.effective_user.id)
+            logger.exception(
+                'Clone Stars fulfillment failed owner=%s user=%s transaction=%s',
+                context.application.bot_data.get('seller_owner_id'),
+                update.effective_user.id,
+                transaction_id,
+            )
             await update.effective_message.reply_text(
                 '⚠️ Your Stars payment was received, but activation needs support review. Keep this receipt and contact support.'
             )
@@ -293,18 +512,23 @@ class ClonePaymentDeliveryMixin:
             "reason": reason,
         }
 
-    async def deliver_subscription_access(self, owner_id:int, user_id:int, success_details:dict|None=None):
-        """Send fresh invite links only for chats the user has not joined yet.
+    async def deliver_subscription_access(self, owner_id:int, user_id:int, success_details:dict|None=None, bot_id:int|None=None):
+        """Send invite links using the exact clone that owns this subscription.
 
         When ``success_details`` is supplied by an automatic gateway payment,
         the access message also includes the user and subscription receipt
         details. Manual/admin delivery keeps the existing compact message.
         """
-        running=self.get_running(int(owner_id))
+        owner_id = int(owner_id)
+        bot_id = int(bot_id or 0)
+        running = self.get_running(bot_id) if bot_id else None
         if not running:
-            record=await get_bot_by_data_owner_id(int(owner_id))
-            started=await self.start_bot(int(record["bot_id"])) if record else False
-            running=self.get_running(int(owner_id)) if started else None
+            running = self.get_running(owner_id)
+        if not running:
+            record=await get_bot_by_data_owner_id(owner_id)
+            resolved_bot_id=int((record or {}).get("bot_id") or bot_id or 0)
+            started=await self.start_bot(resolved_bot_id) if resolved_bot_id else False
+            running=self.get_running(resolved_bot_id) if started and resolved_bot_id else None
         if not running:
             return {"sent":0,"already_member":0,"failed":0,"error":"Clone bot is not running"}
 
