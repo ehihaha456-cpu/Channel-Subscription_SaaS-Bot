@@ -8,6 +8,7 @@ from database.payment_gateways import (
 )
 from services.payment_gateways import cancel_previous_razorpay_qr_for_same_plan
 from handlers.common.feature_navigation import feature_back_callback
+from database.seller_subscriptions import save_pending_limit_selection
 import io
 import time
 import qrcode
@@ -72,6 +73,32 @@ async def handle(self, update, context, q, owner, action):
         if not plan:
             await q.answer('Plan not found', show_alert=True)
             return True
+
+        # Enforce capacity before opening any payment-method UI or starting QR work.
+        # Only a live, non-removed subscription to this exact Plan Group is renewal.
+        seller_account_id = self.seller_account(context)
+        limit_status = await seller_subscriber_limit_status(
+            seller_account_id,
+            int(q.from_user.id),
+            scope_owner_id=owner,
+            group_id=str(plan.get("group_id") or ""),
+        )
+        if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await save_pending_limit_selection(
+                seller_account_id, owner, int(q.from_user.id),
+                str(plan.get('plan_id') or action.replace('c_select_', '')),
+                str(plan.get('name') or 'Plan'),
+            )
+            await self.notify_subscriber_limit(
+                owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan
+            )
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
+            return True
+
         context.user_data['selected_child_plan'] = plan
         bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
         # These reads are independent; fetch them together so the callback does
@@ -87,7 +114,7 @@ async def handle(self, update, context, q, owner, action):
         gateways = gateway_cfg.get('gateways') or {}
         razorpay_settings = gateways.get('razorpay') or {}
         if (razorpay_settings.get('enabled') and
-                str(razorpay_settings.get('checkout_mode') or 'upi_qr').lower() == 'upi_qr' and
+                str(razorpay_settings.get('checkout_mode') or 'payment_link').lower() == 'upi_qr' and
                 bot_id):
             # Same plan: replace the user's previous QR. Other plans remain visible
             # and usable until their own QR expires.
@@ -113,6 +140,8 @@ async def handle(self, update, context, q, owner, action):
         stars_enabled = bool(gateway_cfg.get('stars_enabled', False))
         rows = []
         text = ''
+        tracked_gateway_tx_id = None
+        gateway_checkout_ready = False
         if enabled:
             gateway = enabled[0]
             tx = await create_gateway_transaction(
@@ -124,18 +153,21 @@ async def handle(self, update, context, q, owner, action):
                     'plan_name': plan['name'],
                     'description': f"{plan['name']} subscription",
                     'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
-                'group_id': str(plan.get('group_id') or ''),
-                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
+                    'data_owner_id': int(owner),
+                    'seller_account_id': int(self.seller_account(context)),
                     'group_id': str(plan.get('group_id') or ''),
                     'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
                 },
             )
+            tracked_gateway_tx_id = str(tx.get('transaction_id') or '')
             try:
                 checkout = None
-                if gateway == 'razorpay':
+                if (gateway == 'razorpay' and
+                        str(razorpay_settings.get('checkout_mode') or 'payment_link').lower() == 'upi_qr'):
                     checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
                 if checkout is None:
                     checkout = await create_checkout(tx)
+                gateway_checkout_ready = bool(checkout and checkout.get('checkout_url'))
                 if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
                     image = None
                     image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
@@ -203,8 +235,9 @@ async def handle(self, update, context, q, owner, action):
                 f"💳 Payment\n\nPlan: {plan['name']}\n{stars_line}"
             )
         if manual_enabled:
-            context.user_data['waiting_child_screenshot'] = True
             manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount and send your payment screenshot here."
+            # The user can send the screenshot directly in this chat; no upload button is needed.
+            context.user_data['waiting_child_screenshot'] = True
             text = f'{text}\n\n{manual_text}' if text else f'💳 Payment\n\n{manual_text}'
         if not enabled and currency != 'INR':
             notice = f'⚠️ Automatic checkout is currently unavailable for {currency} in this bot. Use Manual Payment or Telegram Stars.'
@@ -225,15 +258,51 @@ async def handle(self, update, context, q, owner, action):
                 logger.exception('Stored manual payment QR could not be sent; falling back to text')
                 await self.safe_query_message(q, text, kb)
         else:
-            await self.safe_query_message(q, text, kb)
+            payment_page_message = await self.safe_query_message(q, text, kb)
+            # Persist the exact message containing the Payment Link so the paid
+            # webhook can replace this same clone-bot message with the limit
+            # notice when capacity is full. Prefer the message returned by the
+            # Telegram edit operation, and fall back to the callback message.
+            if tracked_gateway_tx_id and gateway_checkout_ready and q.message is not None:
+                try:
+                    saved_message = payment_page_message or q.message
+                    await update_gateway_transaction(
+                        tracked_gateway_tx_id,
+                        payment_message_chat_id=int(saved_message.chat_id),
+                        payment_message_id=int(saved_message.message_id),
+                        payment_message_type='text',
+                    )
+                except Exception:
+                    logger.exception(
+                        'Could not save payment page message transaction_id=%s',
+                        tracked_gateway_tx_id,
+                    )
         return True
     if action.startswith('c_star_'):
+        context.user_data.pop('waiting_child_screenshot', None)
         plan_id = action.replace('c_star_', '')
         plan = await get_plan(owner, plan_id)
         cfg = await get_gateway_config('seller', owner, decrypt=True)
         stars = int((plan or {}).get('stars_price', 0) or 0)
         if not cfg.get('stars_enabled') or not plan or stars <= 0:
             await q.answer('Telegram Stars is unavailable for this plan.', show_alert=True)
+            return True
+        seller_account_id = self.seller_account(context)
+        limit_status = await seller_subscriber_limit_status(
+            seller_account_id, int(q.from_user.id), scope_owner_id=owner,
+            group_id=str(plan.get("group_id") or ""),
+        )
+        if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await save_pending_limit_selection(
+                seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or plan_id),
+                str(plan.get('name') or 'Plan'),
+            )
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), stars, plan=plan)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
             return True
         await context.bot.send_invoice(
             chat_id=q.from_user.id,
@@ -246,6 +315,7 @@ async def handle(self, update, context, q, owner, action):
         )
         return True
     if action.startswith('c_pg_'):
+        context.user_data.pop('waiting_child_screenshot', None)
         try:
             _, _, gateway, plan_id = action.split('_', 3)
         except ValueError:
@@ -254,6 +324,17 @@ async def handle(self, update, context, q, owner, action):
         plan = await get_plan(owner, plan_id)
         if not plan:
             await q.answer('Plan not found', show_alert=True)
+            return True
+        seller_account_id = self.seller_account(context)
+        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner, group_id=str(plan.get("group_id") or ""))
+        if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or plan_id), str(plan.get('name') or 'Plan'))
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
             return True
         s = await get_seller_settings(owner)
         currency = normalize_currency(s.get('currency')) or 'INR'
@@ -275,6 +356,8 @@ async def handle(self, update, context, q, owner, action):
                 'plan_id': plan_id, 'plan_name': plan['name'],
                 'description': f"{plan['name']} subscription",
                 'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
+                'data_owner_id': int(owner),
+                'seller_account_id': int(self.seller_account(context)),
                 'group_id': str(plan.get('group_id') or ''),
                 'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
             },
@@ -282,7 +365,12 @@ async def handle(self, update, context, q, owner, action):
         try:
             checkout = None
             if gateway == 'razorpay':
-                checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
+                # The pre-created QR pool is only valid in explicit UPI QR mode.
+                # In Payment Link mode, always create a Razorpay Payment Link.
+                current_gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+                current_razorpay = ((current_gateway_cfg.get('gateways') or {}).get('razorpay') or {})
+                if str(current_razorpay.get('checkout_mode') or 'payment_link').lower() == 'upi_qr':
+                    checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
             if checkout is None:
                 checkout = await create_checkout(tx)
             if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
@@ -336,6 +424,27 @@ async def handle(self, update, context, q, owner, action):
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
         return True
         await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]))
+        return True
+    if action.startswith('c_manual_'):
+        plan_id = action.replace('c_manual_', '', 1)
+        plan = await get_plan(owner, plan_id)
+        if not plan:
+            await q.answer('Plan not found', show_alert=True)
+            return True
+        seller_account_id = self.seller_account(context)
+        status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner, group_id=str(plan.get("group_id") or ""))
+        if status.get('at_limit') and not status.get('already_active'):
+            await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan_id), str(plan.get('name') or 'Plan'))
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
+            return True
+        context.user_data['selected_child_plan'] = plan
+        context.user_data['waiting_child_screenshot'] = True
+        await q.message.reply_text('📷 Upload your payment screenshot.', reply_markup=back_keyboard)
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True
