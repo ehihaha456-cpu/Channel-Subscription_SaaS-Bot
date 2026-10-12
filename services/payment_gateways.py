@@ -17,11 +17,13 @@ from paytmchecksum import PaytmChecksum
 from config import PUBLIC_BASE_URL
 from database.payment_gateways import (
     claim_transaction_fulfillment,
+    has_earlier_paid_child_transaction,
     claim_transaction_success,
     claim_transaction_notification,
     complete_transaction_notification,
     fail_transaction_notification,
     get_gateway_config,
+    save_gateway_config,
     get_gateway_transaction,
     get_transaction_by_gateway_order,
     mark_transaction_failed,
@@ -41,8 +43,8 @@ from database.payment_gateways import (
     claim_active_razorpay_qr_transaction_for_cancel,
 )
 from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
-from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
-from database.seller_bots import get_decrypted_bot_token, get_bots
+from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase, seller_subscriber_limit_status
+from database.seller_bots import get_decrypted_bot_token, get_bots, get_bot_by_data_owner_id
 from database.platform_features import create_invoice, audit
 
 
@@ -166,7 +168,9 @@ async def test_gateway_connection(scope: str, owner_id: int, gateway: str) -> di
     """Validate stored credentials without creating or charging a payment."""
     cfg = await get_gateway_config(scope, owner_id, decrypt=True)
     settings = (cfg.get("gateways") or {}).get(gateway) or {}
-    mode = "live"
+    mode = str(settings.get("mode") or "live").strip().lower()
+    if mode not in {"test", "live"}:
+        mode = "live"
     if gateway == "razorpay":
         key_id, key_secret = settings.get("key_id"), settings.get("key_secret")
         if not key_id or not key_secret:
@@ -220,7 +224,7 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
 
     auth = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
-    mode = str(s.get("checkout_mode") or "upi_qr").lower()
+    mode = str(s.get("checkout_mode") or "payment_link").lower()
 
     if mode == "upi_qr":
         close_minutes = 30 if bool((tx.get("metadata") or {}).get("qr_prewarm")) else 20
@@ -288,7 +292,9 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
 
 
 async def _create_cashfree(tx: dict, s: dict) -> dict:
-    mode = "live"
+    mode = str(s.get("mode") or "live").strip().lower()
+    if mode not in {"test", "live"}:
+        mode = "live"
     base = _cashfree_base(mode)
     amount = round(float(tx["amount"]), 2)
     if amount <= 0:
@@ -735,11 +741,18 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
                         gateway_response=checkout.get("gateway_response") or {},
                     )
                     made += 1
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "Razorpay QR prewarm/cache failed owner_id=%s bot_id=%s plan_id=%s",
                         owner_id, bot_id, plan_id,
                     )
+                    error_text = str(exc).lower()
+                    if "401" in error_text or "authentication failed" in error_text or "bad_request_error" in error_text:
+                        try:
+                            await save_gateway_config("seller", owner_id, "razorpay", {"qr_prewarm_paused": True})
+                            logger.error("Razorpay QR prewarm paused after authentication failure owner_id=%s; replace credentials to retry", owner_id)
+                        except Exception:
+                            logger.exception("Could not pause failing Razorpay QR prewarm owner_id=%s", owner_id)
                     break
             # IMPORTANT: never send prewarmed QR images to the seller/owner chat.
             # The previous Telegram file_id cache implementation had to send a
@@ -753,7 +766,9 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
         try:
             cfg = await get_gateway_config("seller", owner_id, decrypt=True)
             settings = (cfg.get("gateways") or {}).get("razorpay") or {}
-            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower() != "upi_qr":
+            if (not settings.get("enabled")
+                    or settings.get("qr_prewarm_paused")
+                    or str(settings.get("checkout_mode") or "payment_link").lower() != "upi_qr"):
                 return 0
             plans = await get_plans(owner_id, True)
             bots = await get_bots(owner_id)
@@ -889,12 +904,14 @@ async def _delete_pending_payment_message(tx: dict) -> None:
         return
     try:
         from services.bot_manager import bot_manager
-        running = bot_manager.get_running(int(tx.get("owner_id") or 0))
+        data_owner_id = int((tx.get("metadata") or {}).get("data_owner_id") or tx.get("owner_id") or 0)
+        bot_id = int((tx.get("metadata") or {}).get("bot_id") or 0)
+        running = bot_manager.get_running(data_owner_id) or (bot_manager.get_running(bot_id) if bot_id else None)
         if not running:
-            record = await get_bot_by_data_owner_id(int(tx.get("owner_id") or 0))
+            record = await get_bot_by_data_owner_id(data_owner_id)
             if record:
-                started = await bot_manager.start_bot(int(record.get("bot_id") or 0))
-                running = bot_manager.get_running(int(tx.get("owner_id") or 0)) if started else None
+                started = await bot_manager.start_bot(int(record.get("bot_id") or bot_id or 0))
+                running = (bot_manager.get_running(data_owner_id) or (bot_manager.get_running(bot_id) if bot_id else None)) if started else None
         if not running:
             return
         await running.application.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -1016,14 +1033,147 @@ async def fulfill_transaction(tx: dict) -> None:
                 )
         return
     if tx["purpose"] == "child_subscription":
-        await _delete_pending_payment_message(tx)
-        seller_id = tx["owner_id"]
+        # Do not let a newer webhook steal capacity from an older paid purchase
+        # that is still waiting in the fulfillment queue.
+        if await has_earlier_paid_child_transaction(tx):
+            await mark_transaction_fulfillment_retry(
+                tx["transaction_id"],
+                "Waiting for an earlier paid subscription transaction (FIFO)",
+            )
+            return
+
+        seller_id = int((tx.get("metadata") or {}).get("data_owner_id") or tx["owner_id"])
         plan = await get_plan(seller_id, tx["metadata"]["plan_id"])
         if not plan:
             raise GatewayError("Child subscription plan no longer exists")
+        tx_metadata = tx.get("metadata") or {}
+        payment_amount = float(
+            tx_metadata.get("plan_amount", tx.get("amount", 0)) or 0
+        )
+        stars_amount = int(tx_metadata.get("stars_amount") or 0)
+        seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
+        scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
+        limit_status = await seller_subscriber_limit_status(
+            seller_account_id,
+            int(tx["payer_user_id"]),
+            scope_owner_id=scope_owner_id,
+            group_id=str(plan.get("group_id") or ""),
+        )
+        if limit_status.get("at_limit") and not limit_status.get("already_active"):
+            # Payment is already verified by the gateway. Do NOT mark it failed:
+            # retain it as paid_unfulfilled so the recovery job can activate it
+            # automatically as soon as subscriber capacity becomes available.
+            await mark_transaction_fulfillment_retry(
+                tx["transaction_id"], "Verified payment waiting for seller subscriber capacity"
+            )
+
+            # Replace the existing payment screen in the SAME clone bot chat.
+            # Never use the main-bot runtime sender for clone subscription payments.
+            if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_buyer"):
+                try:
+                    limit_text = (
+                        "⚠️ Active Subscriber Limit Reached\n\n"
+                        "✅ Your payment has been verified successfully.\n"
+                        "Your subscription is waiting because the seller's active subscriber limit is full.\n\n"
+                        "💾 Your payment and plan details are saved. You do not need to pay again or select the plan again.\n"
+                        "🔔 Your subscription confirmation and group invite link will be sent automatically as soon as a slot becomes available."
+                    )
+                    from services.bot_manager import bot_manager
+                    bot_id = int((tx.get("metadata") or {}).get("bot_id") or 0)
+                    # Resolve the exact clone runtime first. Seller/data-owner IDs
+                    # are not guaranteed to equal a clone bot ID.
+                    running = bot_manager.get_running(bot_id) if bot_id else None
+                    if not running:
+                        record = await get_bot_by_data_owner_id(seller_id)
+                        if record:
+                            resolved_bot_id = int(record.get("bot_id") or bot_id or 0)
+                            running = bot_manager.get_running(resolved_bot_id) if resolved_bot_id else None
+                            if not running and resolved_bot_id:
+                                started = await bot_manager.start_bot(resolved_bot_id)
+                                if started:
+                                    running = bot_manager.get_running(resolved_bot_id)
+                    if not running:
+                        raise GatewayError("Clone bot is unavailable for pending-limit notice")
+                    bot = running.application.bot
+                    chat_id = int(tx.get("payment_message_chat_id") or tx["payer_user_id"])
+                    message_id = int(tx.get("payment_message_id") or 0)
+                    edited = False
+                    if message_id:
+                        try:
+                            if tx.get("payment_message_type") == "photo":
+                                await bot.edit_message_caption(
+                                    chat_id=chat_id, message_id=message_id,
+                                    caption=limit_text, reply_markup=None,
+                                )
+                            else:
+                                await bot.edit_message_text(
+                                    chat_id=chat_id, message_id=message_id,
+                                    text=limit_text, reply_markup=None,
+                                )
+                            edited = True
+                        except Exception as edit_exc:
+                            logger.warning(
+                                "Could not edit payment screen for limit notice transaction=%s: %s",
+                                tx["transaction_id"], edit_exc,
+                            )
+                    if not edited and str(tx.get("gateway") or "").lower() == "telegram_stars":
+                        # Telegram's successful_payment update does not carry the
+                        # original invoice message ID. For Stars, send one durable,
+                        # idempotently-claimed notice rather than losing the warning.
+                        await bot.send_message(chat_id=int(tx["payer_user_id"]), text=limit_text)
+                        edited = True
+                    if not edited:
+                        # For external gateway checkout, preserve the existing
+                        # single-message behavior: edit the original payment page.
+                        raise GatewayError(
+                            "Original payment page could not be edited; refusing to send a duplicate message"
+                        )
+                    await complete_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_buyer",
+                        {"status": "edited" if tx.get("payment_message_id") else "sent"},
+                    )
+                except Exception as exc:
+                    await fail_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_buyer", str(exc)
+                    )
+                    logger.exception("Buyer subscriber-limit notice failed transaction=%s", tx["transaction_id"])
+
+            if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_seller"):
+                try:
+                    from services.bot_manager import bot_manager
+                    notice = await bot_manager.notify_subscriber_limit(
+                        seller_id,
+                        int(tx["payer_user_id"]),
+                        plan.get("name", "Subscription"),
+                        tx.get("amount", 0),
+                        plan=plan,
+                        purchased=True,
+                        bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
+                    )
+                    await complete_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_seller", notice
+                    )
+                    await audit(
+                        "child_gateway_subscriber_limit",
+                        tx["payer_user_id"],
+                        seller_id,
+                        {"transaction_id": tx["transaction_id"], **notice},
+                    )
+                except Exception as exc:
+                    await fail_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_seller", str(exc)
+                    )
+                    logger.exception("Subscriber-limit notification failed transaction=%s", tx["transaction_id"])
+            return
+
+        # Capacity is available now; remove the old pending/limit message before
+        # sending the normal success receipt and private invite link.
+        await _delete_pending_payment_message(tx)
+
         payment = await create_automatic_payment(
             seller_id, tx["payer_user_id"], plan, tx["gateway"],
             tx["transaction_id"], tx.get("gateway_payment_id", ""),
+            stars_amount=stars_amount or None,
         )
 
         # Capture the state before activation so every payment method can show
@@ -1051,7 +1201,7 @@ async def fulfill_transaction(tx: dict) -> None:
         if group_id:
             subscription_result = await fulfill_plan_group_subscription(
                 seller_id, tx["payer_user_id"], f"gateway:{tx['transaction_id']}",
-                group_id, plan["name"], plan["duration_minutes"], tx["amount"],
+                group_id, plan["name"], plan["duration_minutes"], payment_amount,
                 plan.get("duration_text"), target_chat_ids=target_chat_ids,
             )
         else:
@@ -1061,7 +1211,7 @@ async def fulfill_transaction(tx: dict) -> None:
                 f"gateway:{tx['transaction_id']}",
                 plan["name"],
                 plan["duration_minutes"],
-                tx["amount"],
+                payment_amount,
                 plan.get("duration_text"),
             )
         expiry = subscription_result.get("expiry_date")
@@ -1073,7 +1223,7 @@ async def fulfill_transaction(tx: dict) -> None:
         )
 
         invoice = await create_invoice(seller_id, tx["payer_user_id"], payment, "Seller")
-        await audit("child_gateway_payment_paid", tx["payer_user_id"], seller_id, {"transaction_id": tx["transaction_id"], "gateway": tx["gateway"], "invoice_no": invoice.get("invoice_no")})
+        await audit("child_gateway_payment_paid", tx["payer_user_id"], seller_id, {"transaction_id": tx["transaction_id"], "gateway": tx["gateway"], "invoice_no": invoice.get("invoice_no"), "stars_amount": stars_amount})
         await mark_transaction_fulfilled(
             tx["transaction_id"],
             {"expiry_date": expiry, "invoice_no": invoice.get("invoice_no")},
@@ -1089,7 +1239,8 @@ async def fulfill_transaction(tx: dict) -> None:
                     tx["payer_user_id"],
                     success_details={
                         "plan_name": plan.get("name", "Subscription"),
-                        "amount": tx.get("amount", 0),
+                        "amount": payment_amount,
+                        "stars_amount": stars_amount,
                         "gateway": tx.get("gateway", ""),
                         "transaction_id": tx.get("transaction_id", ""),
                         "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
@@ -1100,6 +1251,7 @@ async def fulfill_transaction(tx: dict) -> None:
                         "group_id": group_id,
                         "target_chat_ids": target_chat_ids,
                     },
+                    bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
                 )
                 if delivery.get("error") or (
                     int(delivery.get("sent", 0) or 0) == 0
@@ -1136,7 +1288,8 @@ async def fulfill_transaction(tx: dict) -> None:
                     tx["payer_user_id"],
                     {
                         "plan_name": plan.get("name", "Subscription"),
-                        "amount": tx.get("amount", 0),
+                        "amount": payment_amount,
+                        "stars_amount": stars_amount,
                         "gateway": tx.get("gateway", ""),
                         "transaction_id": tx.get("gateway_payment_id") or tx.get("transaction_id", ""),
                         "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
