@@ -536,81 +536,55 @@ class ClonePaymentDeliveryMixin:
         timezone_name = await self.seller_timezone(int(owner_id))
         connected_channels=await get_channels(int(owner_id))
         target_ids = set()
-        selected_group_id = str((success_details or {}).get("group_id") or "").strip()
         if success_details and success_details.get("target_chat_ids"):
             try:
                 target_ids = {int(x) for x in success_details.get("target_chat_ids") or []}
             except (TypeError, ValueError):
                 target_ids = set()
-        # Defensive fallback: derive targets from the selected Plan Group bundle.
-        # If a Plan Group was selected but cannot be resolved, NEVER fall back to
-        # every connected chat, as that can leak an unrelated group's invite link.
-        if success_details and selected_group_id and not target_ids:
-            try:
-                target_group = await get_plan_group(int(owner_id), selected_group_id)
-                for target in (target_group or {}).get("targets") or []:
-                    if not isinstance(target, dict):
-                        continue
-                    try:
-                        target_ids.add(int(target.get("chat_id")))
-                    except (TypeError, ValueError):
-                        continue
-            except Exception:
-                logger.exception(
-                    "Could not resolve selected Plan Group targets owner=%s group=%s",
-                    owner_id, selected_group_id,
-                )
-        if success_details and selected_group_id and not target_ids:
-            return {
-                "sent": 0, "already_member": 0, "failed": 0,
-                "error": "Selected Plan Group targets could not be resolved; unrelated groups were not used",
-            }
         if target_ids:
-            connected_channels = [
-                ch for ch in connected_channels
-                if int(ch.get("chat_id", 0)) in target_ids
-            ]
+            connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id", 0)) in target_ids]
         if not connected_channels:
-            return {"sent":0,"already_member":0,"failed":0,"error":"No selected Plan Group channel/group is connected to this clone bot" if selected_group_id else "No channel/group is connected to this clone bot"}
+            return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
 
-        # Automatic invite delivery is controlled only by the clone bot's
-        # current Telegram permission. There is no stored enable/disable
-        # switch anymore. A chat is eligible only when the clone bot is an
-        # administrator/creator and has Invite Users permission.
+        # Keep every purchased Plan Group target in the result. Permission
+        # failures must be reported per group, not silently omitted.
         me = await bot.get_me()
-        channels=[]
-        for channel in connected_channels:
-            chat_id=int(channel["chat_id"])
+        channels = list(connected_channels)
+        permission_by_chat = {}
+        for channel in channels:
+            chat_id = int(channel["chat_id"])
             try:
                 bot_member = await bot.get_chat_member(chat_id, int(me.id))
                 bot_status = getattr(bot_member, "status", "")
                 can_invite = bool(getattr(bot_member, "can_invite_users", False))
-                if bot_status == "creator" or (bot_status == "administrator" and can_invite):
-                    channels.append(channel)
-                else:
+                permission_by_chat[chat_id] = (
+                    bot_status == "creator"
+                    or (bot_status == "administrator" and can_invite)
+                )
+                if not permission_by_chat[chat_id]:
                     logger.warning(
                         "Invite delivery skipped: missing Telegram invite permission owner=%s chat=%s status=%s can_invite=%s",
                         owner_id, chat_id, bot_status, can_invite,
                     )
             except TelegramError as exc:
+                permission_by_chat[chat_id] = False
                 logger.warning(
                     "Invite permission check failed owner=%s chat=%s: %s",
                     owner_id, chat_id, exc,
                 )
-        if not channels:
-            return {
-                "sent":0,
-                "already_member":0,
-                "failed":0,
-                "error":"No connected channel/group has the required Telegram invite permission",
-            }
 
         links=[]
+        failed_names=[]
         already_member=0
         failed=0
 
         for ch in channels:
             chat_id=int(ch["chat_id"])
+            title = str(ch.get("title") or "Premium Channel/Group")
+            if not permission_by_chat.get(chat_id, False):
+                failed += 1
+                failed_names.append(title)
+                continue
             try:
                 member=await bot.get_chat_member(chat_id,int(user_id))
                 status=getattr(member,"status","")
@@ -640,10 +614,11 @@ class ClonePaymentDeliveryMixin:
                 await save_invite(owner_id, user_id, chat_id, invite.invite_link)
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
             except TelegramError as exc:
-                failed+=1
+                failed += 1
+                failed_names.append(title)
                 logger.warning("Invite creation failed owner=%s chat=%s user=%s: %s",owner_id,chat_id,user_id,exc)
 
-        if links:
+        if links or failed_names:
             try:
                 if success_details:
                     try:
@@ -666,12 +641,14 @@ class ClonePaymentDeliveryMixin:
                             "Your new purchase has been added to your existing subscription.\n\n"
                             f"📅 Previous Expiry: {_format_dt(success_details.get('previous_expiry'))}\n"
                             f"📅 New Expiry: {_format_dt(success_details.get('expiry_date'))}\n\n"
-                            "🔗 A fresh private invite link has been generated for you."
+                            + ("🔗 Fresh private invite link(s) are listed below."
+                             if links else "🔗 No invite link could be generated; failed groups are listed below.")
                         )
                     else:
                         subscription_note = (
                             f"⏳ Expiry Date: {_format_dt(success_details.get('expiry_date'))}\n\n"
-                            "🔗 Your fresh private invite link has been generated."
+                            + ("🔗 Your fresh private invite link(s) are listed below."
+                               if links else "🔗 No invite link could be generated; failed groups are listed below.")
                         )
 
                     success_amount_line = (
@@ -701,6 +678,8 @@ class ClonePaymentDeliveryMixin:
                         f"{subscription_note}\n\n"
                         "Join using your private invite link(s):\n\n"
                         + "\n\n".join(links)
+                        + ("\n\n" if links and failed_names else "")
+                        + ("\n".join(f"📢 {name} : invite failed (chat not found or invite permission unavailable)." for name in failed_names) if failed_names else "")
                     )
                 else:
                     text = (
