@@ -126,7 +126,10 @@ async def recover_failed_invite_deliveries_job() -> None:
             if not claimed:
                 continue
 
-            from database.seller_data import fulfill_subscription_payment, get_plan, get_subscription
+            from database.seller_data import (
+                fulfill_subscription_payment, fulfill_plan_group_subscription,
+                get_plan, get_subscription, get_plan_group_subscription,
+            )
             from services.bot_manager import bot_manager
 
             seller_id = int(tx.get("owner_id") or 0)
@@ -136,33 +139,54 @@ async def recover_failed_invite_deliveries_job() -> None:
             if not plan:
                 raise GatewayError("Child subscription plan no longer exists")
 
-            # Ensure the subscription exists before retrying access delivery.
-            # This repairs already-fulfilled gateway transactions from older
-            # code where the payment record was saved but activation was skipped.
-            subscription_result = await fulfill_subscription_payment(
-                seller_id,
-                user_id,
-                f"gateway:{transaction_id}",
-                plan.get("name", "Subscription"),
-                int(plan.get("duration_minutes", 0) or 0),
-                tx.get("amount", 0),
-                plan.get("duration_text"),
-            )
-            expiry = subscription_result.get("expiry_date")
+            # Recover only targets captured at checkout. Never use the seller's
+            # current connected-group list as a fallback: groups added later are
+            # not part of an older purchase.
+            metadata = tx.get("metadata") or {}
+            group_id = str(metadata.get("group_id") or plan.get("group_id") or "").strip()
+            target_chat_ids = [int(x) for x in (metadata.get("target_chat_ids") or [])]
+            if group_id and not target_chat_ids:
+                # Legacy transaction: use the user's saved Plan Group subscription
+                # snapshot, not the current Plan Group configuration.
+                saved_sub = await get_plan_group_subscription(seller_id, user_id, group_id)
+                target_chat_ids = [int(x) for x in ((saved_sub or {}).get("target_chat_ids") or [])]
+
+            # Re-apply idempotently in the correct subscription scope. This must
+            # never extend a clone-wide subscription for a Plan Group purchase.
+            if group_id:
+                subscription_result = await fulfill_plan_group_subscription(
+                    seller_id,
+                    user_id,
+                    f"gateway:{transaction_id}",
+                    group_id,
+                    plan.get("name", "Subscription"),
+                    int(plan.get("duration_minutes", 0) or 0),
+                    tx.get("amount", 0),
+                    plan.get("duration_text"),
+                    target_chat_ids=target_chat_ids,
+                )
+            else:
+                subscription_result = await fulfill_subscription_payment(
+                    seller_id,
+                    user_id,
+                    f"gateway:{transaction_id}",
+                    plan.get("name", "Subscription"),
+                    int(plan.get("duration_minutes", 0) or 0),
+                    tx.get("amount", 0),
+                    plan.get("duration_text"),
+                )
+
+            if group_id and not target_chat_ids:
+                raise GatewayError(
+                    "Saved Plan Group targets are missing; refusing to send unrelated group links"
+                )
 
             delivery = await bot_manager.deliver_subscription_access(
                 seller_id,
                 user_id,
-                success_details={
-                    "plan_name": plan.get("name", "Subscription"),
-                    "amount": tx.get("amount", 0),
-                    "gateway": tx.get("gateway", ""),
-                    "transaction_id": tx.get("gateway_payment_id") or transaction_id,
-                    "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
-                    "expiry_date": expiry,
-                    "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
-                },
+                success_details=None,
                 bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
+                target_chat_ids=target_chat_ids,
             )
             if delivery.get("error") or (
                 int(delivery.get("sent", 0) or 0) == 0
