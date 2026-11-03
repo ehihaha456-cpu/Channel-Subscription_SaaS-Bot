@@ -1,4 +1,5 @@
 import logging
+import asyncio
 
 from telegram import (
     Update,
@@ -40,7 +41,17 @@ async def handle_payment_screenshot(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    if not update.message or not update.message.photo:
+    message = update.message
+    if not message:
+        return
+
+    # Accept Telegram photos and image files sent as documents.
+    photo_file_id = None
+    if message.photo:
+        photo_file_id = message.photo[-1].file_id
+    elif message.document and (message.document.mime_type or "").lower().startswith("image/"):
+        photo_file_id = message.document.file_id
+    else:
         return
 
     if await is_admin(update.effective_user.id):
@@ -67,29 +78,40 @@ async def handle_payment_screenshot(
         context.application.bot_data[lock_key] = lock
 
     async with lock:
-        photo = update.message.photo[-1].file_id
-
         duration_minutes = int(plan.get("duration_minutes", 1440))
         duration_text = plan.get("duration_text", "1d")
         plan_name = plan.get("name", "Premium").replace("_", "-")
 
-        try:
-            payment = await create_payment(
-                user_id=user.id,
-                plan=plan_name,
-                amount=plan["price"],
-                screenshot_file_id=photo,
-                duration_minutes=duration_minutes,
-                duration_text=duration_text,
-            )
-        except Exception:
-            logger.exception(
-                "Payment screenshot submission failed user_id=%s plan=%s",
-                user.id,
-                plan_name,
-            )
+        payment = None
+        last_error = None
+        # Retry the idempotent upsert; a retry updates the same pending request.
+        for attempt in range(1, 4):
+            try:
+                payment = await create_payment(
+                    user_id=user.id,
+                    plan=plan_name,
+                    amount=plan["price"],
+                    screenshot_file_id=photo_file_id,
+                    duration_minutes=duration_minutes,
+                    duration_text=duration_text,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.exception(
+                    "Payment screenshot save attempt %s/3 failed user_id=%s plan=%s",
+                    attempt,
+                    user.id,
+                    plan_name,
+                )
+                if attempt < 3:
+                    await asyncio.sleep(attempt)
+
+        if payment is None:
             await update.message.reply_text(
-                "❌ Payment submission failed temporarily. Please try again."
+                "⚠️ Screenshot upload could not be saved after 3 attempts. "
+                "Please send the screenshot again in this same chat. "
+                "You do not need to select the plan again."
             )
             return
 
@@ -118,26 +140,40 @@ async def handle_payment_screenshot(
             f"🧾 Payment ID: {payment_id}"
         )
 
-        admins = await get_all_admins()
+        try:
+            admins = await get_all_admins()
+        except Exception:
+            logger.exception("Could not load admins for payment_id=%s", payment_id)
+            await update.message.reply_text(
+                "Your screenshot was saved, but admin notification is delayed. "
+                "Please do not submit it again; your request is pending."
+            )
+            return
+
         notified_admins = 0
 
         for admin in admins:
-            try:
-                await context.bot.send_photo(
-                    chat_id=admin["admin_id"],
-                    photo=photo,
-                    caption=caption,
-                    reply_markup=keyboard,
-                )
-                notified_admins += 1
-            except Exception:
-                logger.exception(
-                    "Failed to notify payment admin admin_id=%s "
-                    "payment_id=%s user_id=%s",
-                    admin.get("admin_id"),
-                    payment_id,
-                    user.id,
-                )
+            for attempt in range(1, 4):
+                try:
+                    await context.bot.send_document(
+                        chat_id=admin["admin_id"],
+                        document=photo_file_id,
+                        caption=caption,
+                        reply_markup=keyboard,
+                    )
+                    notified_admins += 1
+                    break
+                except Exception:
+                    logger.exception(
+                        "Admin notification attempt %s/3 failed admin_id=%s "
+                        "payment_id=%s user_id=%s",
+                        attempt,
+                        admin.get("admin_id"),
+                        payment_id,
+                        user.id,
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(attempt)
 
         if notified_admins == 0:
             logger.error(
@@ -167,7 +203,7 @@ def payment_upload_handlers():
             pattern=r"^upload_payment$",
         ),
         MessageHandler(
-            filters.PHOTO,
+            filters.PHOTO | filters.Document.IMAGE,
             handle_payment_screenshot,
         ),
     ]
