@@ -2,6 +2,8 @@
 
 from handlers.common.clone_context import *
 from uuid import uuid4
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 def _duration_minutes(value: str):
@@ -51,16 +53,62 @@ async def _callback_group_allowed(owner, group_id):
 
 
 # --- Point 1: restore access after admin extension ---
-async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id):
+async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id, expiry_date=None):
     """Send fresh Plan Group invite links after Give/Extend.
 
     This is intentionally used for all three states: no previous subscription,
     active subscription, and expired subscription. Expired/kicked users are
     unbanned first so the generated invite can be used normally.
     """
+    # Resolve expiry from the persisted subscription if the caller did not
+    # provide it (or the fulfillment response omitted it). The database record
+    # is the source of truth for the expiry used by Telegram and the revoker.
+    if isinstance(expiry_date, str):
+        try:
+            expiry_date = datetime.fromisoformat(expiry_date.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            expiry_date = None
+    if expiry_date is None:
+        try:
+            saved_subscription = await get_plan_group_subscription(owner, int(user_id), str(group_id))
+            expiry_date = (saved_subscription or {}).get("expiry_date")
+        except Exception:
+            logger.exception(
+                "Failed reading saved subscription expiry owner=%s user=%s group=%s",
+                owner, user_id, group_id,
+            )
+    if isinstance(expiry_date, str):
+        try:
+            expiry_date = datetime.fromisoformat(expiry_date.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            expiry_date = None
+    if expiry_date is not None and getattr(expiry_date, "tzinfo", None) is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    if expiry_date is not None:
+        expiry_date = expiry_date.astimezone(timezone.utc)
+
     group = await get_plan_group(owner, str(group_id))
     if not group:
         return {"sent": 0, "links": []}
+    if expiry_date is None:
+        logger.error(
+            "Give/Extend: subscription expiry missing in both result and database owner=%s user=%s group=%s",
+            owner, user_id, group_id,
+        )
+        return {"sent": 0, "links": [], "error": "expiry_missing"}
+
+    # Extend existing recorded links to the newly calculated subscription expiry
+    # before creating fresh links. The expiry worker can then revoke all links
+    # for this subscription at the same final expiry time.
+    if expiry_date is not None:
+        try:
+            from database.subscription_invites import update_active_invite_expiry
+            await update_active_invite_expiry(owner, user_id, group_id, expiry_date)
+        except Exception:
+            logger.exception(
+                "Failed updating existing invite expiry owner=%s user=%s group=%s",
+                owner, user_id, group_id,
+            )
 
     links = []
     for target in (group.get("targets") or []):
@@ -79,11 +127,44 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
         except Exception:
             pass
         try:
+            # Ask Telegram itself to expire this invite at the subscription's
+            # actual expiry. The scheduler still revokes recorded links as a
+            # fallback, but the link no longer depends on that worker running.
+            telegram_expire_date = None
+            if expiry_date is not None:
+                normalized_expiry = expiry_date
+                if isinstance(normalized_expiry, str):
+                    normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
+                if getattr(normalized_expiry, "tzinfo", None) is None:
+                    # MongoDB datetimes in this project are stored as naive UTC when
+                    # decoded by PyMongo. Match the expiry worker/database convention.
+                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
+                normalized_expiry = normalized_expiry.astimezone(timezone.utc)
+                if normalized_expiry <= datetime.now(timezone.utc):
+                    raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
+                # python-telegram-bot expects a datetime here and serializes it
+                # to Telegram's Unix timestamp. Keep the exact subscription expiry.
+                telegram_expire_date = normalized_expiry
+
+            # Never fall back to an invite without Telegram-side expiry.
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
                 member_limit=1,
+                expire_date=telegram_expire_date,
                 name=f"Subscription access {user_id}",
             )
+            from database.subscription_invites import record_subscription_invite
+            saved = await record_subscription_invite(
+                owner, user_id, chat_id, invite.invite_link,
+                expiry_date, group_id=group_id,
+            )
+            if not saved:
+                # Do not deliver a link that cannot be tracked for revocation.
+                try:
+                    await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite.invite_link)
+                except Exception:
+                    logger.exception("Could not revoke untracked invite owner=%s user=%s chat=%s", owner, user_id, chat_id)
+                raise RuntimeError("Invite expiry record was not saved; invite revoked/not delivered")
             links.append(f"📢 {title}\n{invite.invite_link}")
         except Exception:
             logger.exception(
@@ -283,7 +364,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
 
         # All three cases must deliver fresh invite links: new subscription,
         # active extension, and expired-subscription reactivation.
-        await _restore_plan_group_access_after_admin_extend(context.bot, owner, user_id, gid)
+        saved_expiry = result.get("expiry_date") or (result.get("subscription") or {}).get("expiry_date")
+        await _restore_plan_group_access_after_admin_extend(context.bot, owner, user_id, gid, saved_expiry)
         context.user_data.clear()
 
         status_text = 'extended' if was_active else ('reactivated' if previous else 'created')
@@ -315,6 +397,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer('❌ Plan Group is not available in this account.', show_alert=True)
             return True
         result = await remove_plan_group_subscription(owner, user_id, gid)
+        if result.get('removed'):
+            try:
+                from database.subscription_invites import revoke_subscription_invites
+                await revoke_subscription_invites(context.bot, owner, user_id=user_id, group_id=gid)
+            except Exception:
+                logger.exception("Invite revocation on admin Plan Group removal failed owner=%s user=%s group=%s", owner, user_id, gid)
         if not result.get('removed'):
             await q.edit_message_text('❌ Plan Group subscription is no longer active.', reply_markup=self.back(f'a_user_view_{user_id}'))
             return True
