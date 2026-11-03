@@ -11,10 +11,16 @@ from database.subscriptions import (
     release_expiry_claim,
     release_expiry_notification,
 )
+from services.membership_access import kick_then_unban
 from services.channel_service import (
     revoke_channel_access,
     send_expiry_notification,
 )
+
+
+async def running_bot_send_warning(chat_id: int, text: str):
+    from services.channel_service import bot as main_bot
+    await main_bot.send_message(chat_id=chat_id, text=text)
 from database.seller_data import (
     active_plan_group_subscriptions_for_chat,
     expire_plan_group_subscription,
@@ -29,6 +35,7 @@ from database.seller_data import (
     get_seller_settings,
 )
 from database.subscription_guard import is_whitelisted
+from database.channels import get_all_channels
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -64,26 +71,28 @@ async def check_expired_users():
                 send_notification=False,
             )
 
-            # Do not mark the subscription expired while any configured
-            # channel removal failed. The claim is released for a later retry.
+            # Expiry and subscriber notification must not be blocked by a
+            # failed chat removal. Report each failure to the platform admins;
+            # access-removal retry can be handled separately by operations.
             if result["failed_chat_ids"]:
-                await release_expiry_claim(
-                    user_id,
-                    claim_token,
-                    error=(
-                        "Failed channel removals: "
-                        + ",".join(
-                            str(chat_id)
-                            for chat_id in result["failed_chat_ids"]
-                        )
-                    ),
-                )
-                logger.warning(
-                    "Expiry retry scheduled user_id=%s failed_channels=%s",
-                    user_id,
-                    result["failed_chat_ids"],
-                )
-                continue
+                from config import ADMIN_IDS
+                names = {}
+                try:
+                    names = {int(x.get("chat_id")): str(x.get("title") or x.get("chat_id")) for x in await get_all_channels()}
+                except Exception:
+                    pass
+                details = getattr(result, "get", lambda *_: [])("failed_details", [])
+                detail_by_id = {int(x.get("chat_id")): str(x.get("error") or "Unknown Telegram error") for x in details if x.get("chat_id") is not None}
+                warning = ["⚠️ Subscription Access Removal Failed", "", f"Subscriber ID: {user_id}"]
+                for chat_id in result["failed_chat_ids"]:
+                    warning.extend([f"• {names.get(int(chat_id), str(chat_id))}", f"  Chat ID: {chat_id}", f"  Problem: {detail_by_id.get(int(chat_id), 'Bot could not remove the member. Check bot membership and admin permissions.')}"])
+                warning.extend(["", "Please add the bot to the group/channel and grant the required Ban Users permission."])
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await running_bot_send_warning(int(admin_id), "\n".join(warning))
+                    except Exception:
+                        logger.exception("Could not send expiry removal warning admin=%s user=%s", admin_id, user_id)
+                logger.warning("Expiry access removal failed; expiry notification will still be sent user_id=%s failed_channels=%s", user_id, result["failed_chat_ids"])
 
             completed = await complete_expiry_claim(
                 user_id,
@@ -228,6 +237,7 @@ async def check_expired_plan_group_subscriptions():
         if not running:
             continue
         bot = running.application.bot
+
         target_ids = []
         for value in row.get("target_chat_ids") or []:
             try:
@@ -235,35 +245,226 @@ async def check_expired_plan_group_subscriptions():
             except (TypeError, ValueError):
                 pass
         target_ids = list(dict.fromkeys(target_ids))
+
+        # Revoke links belonging to THIS expired Plan Group first. Do not gate
+        # this on another active Plan Group for the same chat: links are created
+        # per subscription and old links must not remain reusable after expiry.
+        try:
+            from database.subscription_invites import (
+                active_invites_for_user,
+                revoke_subscription_invites,
+                mark_invite_revoked,
+            )
+            invite_rows = await active_invites_for_user(owner_id, user_id)
+            group_rows = [
+                r for r in invite_rows
+                if str(r.get("group_id") or "") == group_id
+            ]
+            # Revoke links for this user's expired Plan Group using target chat IDs too.
+            # Some older/current subscription records can carry a different internal
+            # group_id from the invite record; group_id-only matching misses those links.
+            # Never revoke a chat's links if another active Plan Group still covers it.
+            revoked_count = 0
+            candidate_rows = [
+                r for r in invite_rows
+                if str(r.get("group_id") or "") == group_id
+                or int(r.get("chat_id") or 0) in target_ids
+            ]
+            for invite_row in candidate_rows:
+                try:
+                    chat_id = int(invite_row.get("chat_id") or 0)
+                    invite_link = str(invite_row.get("invite_link") or "")
+                    if not chat_id or not invite_link:
+                        continue
+                    # CRITICAL: the Plan Group subscription being processed may be
+                    # expired while this particular invite belongs to a newer payment.
+                    # Never revoke a link before its own recorded Telegram expiry.
+                    invite_expiry = invite_row.get("expiry_date")
+                    if invite_expiry is None:
+                        logger.warning(
+                            "Skipping Plan Group invite revoke: expiry missing owner=%s user=%s chat=%s link_suffix=%s group=%s",
+                            owner_id, user_id, chat_id, invite_link[-12:], invite_row.get("group_id"),
+                        )
+                        continue
+                    if isinstance(invite_expiry, str):
+                        try:
+                            invite_expiry = datetime.fromisoformat(invite_expiry.replace("Z", "+00:00"))
+                        except ValueError:
+                            logger.warning("Skipping Plan Group invite revoke: invalid expiry owner=%s user=%s chat=%s link_suffix=%s", owner_id, user_id, chat_id, invite_link[-12:])
+                            continue
+                    if not isinstance(invite_expiry, datetime):
+                        logger.warning("Skipping Plan Group invite revoke: unsupported expiry type owner=%s user=%s chat=%s link_suffix=%s", owner_id, user_id, chat_id, invite_link[-12:])
+                        continue
+                    if invite_expiry.tzinfo is None:
+                        # Mongo legacy naive timestamps in this worker are UTC.
+                        invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                    else:
+                        invite_expiry = invite_expiry.astimezone(timezone.utc)
+                    if invite_expiry > datetime.now(timezone.utc):
+                        logger.info(
+                            "Skipping premature Plan Group invite revoke owner=%s user=%s chat=%s link_suffix=%s invite_expiry=%s",
+                            owner_id, user_id, chat_id, invite_link[-12:], invite_expiry.isoformat(),
+                        )
+                        continue
+                    # For links tagged to this group, revoke directly. For links tagged
+                    # to another group or legacy untagged links, preserve them if another
+                    # active Plan Group covers the same target chat.
+                    row_group = str(invite_row.get("group_id") or "")
+                    if row_group != group_id and await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                        continue
+                    try:
+                        await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite_link)
+                    except Exception as exc:
+                        message = str(exc).lower()
+                        already_invalid = any(term in message for term in (
+                            "invite link is already revoked", "invite link is invalid",
+                            "invite link has expired", "invite link not found",
+                        ))
+                        if not already_invalid:
+                            logger.warning(
+                                "Plan Group invite revoke failed owner=%s user=%s chat=%s link_suffix=%s error=%s",
+                                owner_id, user_id, chat_id, invite_link[-12:], exc,
+                            )
+                            continue
+                    if await mark_invite_revoked(owner_id, invite_link):
+                        revoked_count += 1
+                except Exception:
+                    logger.exception(
+                        "Plan Group invite revoke candidate failed owner=%s user=%s group=%s",
+                        owner_id, user_id, group_id,
+                    )
+
+            # Compatibility for old records created before group_id was stored.
+            # Only use untagged records on this group's targets, and preserve a
+            # chat if another still-active Plan Group covers it.
+            legacy_rows = [
+                r for r in invite_rows
+                if not r.get("group_id") and int(r.get("chat_id") or 0) in target_ids
+            ]
+            legacy_checked = 0
+            legacy_revoked = 0
+            for invite_row in legacy_rows:
+                try:
+                    chat_id = int(invite_row.get("chat_id"))
+                    invite_link = str(invite_row.get("invite_link") or "")
+                    invite_expiry = invite_row.get("expiry_date")
+                    if invite_expiry is None:
+                        logger.warning(
+                            "Skipping legacy invite revoke: expiry missing owner=%s user=%s chat=%s link_suffix=%s",
+                            owner_id, user_id, chat_id, invite_link[-12:],
+                        )
+                        continue
+                    if isinstance(invite_expiry, str):
+                        try:
+                            invite_expiry = datetime.fromisoformat(invite_expiry.replace("Z", "+00:00"))
+                        except ValueError:
+                            continue
+                    if not isinstance(invite_expiry, datetime):
+                        continue
+                    if invite_expiry.tzinfo is None:
+                        invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                    else:
+                        invite_expiry = invite_expiry.astimezone(timezone.utc)
+                    if invite_expiry > datetime.now(timezone.utc):
+                        logger.info(
+                            "Skipping premature legacy invite revoke owner=%s user=%s chat=%s link_suffix=%s invite_expiry=%s",
+                            owner_id, user_id, chat_id, invite_link[-12:], invite_expiry.isoformat(),
+                        )
+                        continue
+                    if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                        continue
+                    legacy_checked += 1
+                    try:
+                        await bot.revoke_chat_invite_link(
+                            chat_id=chat_id,
+                            invite_link=str(invite_row.get("invite_link") or ""),
+                        )
+                    except Exception as exc:
+                        message = str(exc).lower()
+                        already_invalid = any(term in message for term in (
+                            "invite link is already revoked", "invite link is invalid",
+                            "invite link has expired", "invite link not found",
+                        ))
+                        if not already_invalid:
+                            logger.warning(
+                                "Legacy invite revoke failed owner=%s user=%s chat=%s link_suffix=%s error=%s",
+                                owner_id, user_id, chat_id,
+                                str(invite_row.get("invite_link", ""))[-12:], exc,
+                            )
+                            continue
+                    if await mark_invite_revoked(owner_id, invite_row.get("invite_link")):
+                        legacy_revoked += 1
+                except Exception:
+                    logger.exception(
+                        "Legacy invite revoke processing failed owner=%s user=%s group=%s",
+                        owner_id, user_id, group_id,
+                    )
+
+            logger.info(
+                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s target_chats=%s group_records=%s group_revoked=%s legacy_checked=%s legacy_revoked=%s total_revoked=%s",
+                owner_id, user_id, group_id, target_ids, len(group_rows),
+                revoked_count, legacy_checked, legacy_revoked,
+                revoked_count + legacy_revoked,
+            )
+        except Exception:
+            logger.exception(
+                "Plan Group invite revocation failed owner=%s user=%s group=%s",
+                owner_id, user_id, group_id,
+            )
+
         channels = {int(x.get("chat_id")): str(x.get("title") or "Group/Channel") for x in await get_seller_channels(owner_id)}
         removed_names = []
-        failed = False
+        failed = []
         for chat_id in target_ids:
             # Keep access when the same target is covered by another active Plan Group.
             if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
                 continue
             try:
-                member = await bot.get_chat_member(chat_id, user_id)
-                if getattr(member, "status", "") in {"creator", "administrator"} or await is_whitelisted(owner_id, chat_id, user_id):
+                if await is_whitelisted(owner_id, chat_id, user_id):
                     continue
-                await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
-                removed_names.append(channels.get(chat_id, str(chat_id)))
+                removal_state = await kick_then_unban(bot, chat_id, user_id)
+                if removal_state == "removed":
+                    removed_names.append(channels.get(chat_id, str(chat_id)))
+                elif removal_state == "unbanned_existing":
+                    logger.info(
+                        "Recovered previously banned Plan Group subscriber owner=%s user=%s group=%s chat=%s",
+                        owner_id, user_id, group_id, chat_id,
+                    )
             except Exception as exc:
-                failed = True
+                failed.append((chat_id, str(exc)))
                 logger.warning("Plan Group expiry removal failed owner=%s user=%s group=%s chat=%s: %s", owner_id, user_id, group_id, chat_id, exc)
         if failed:
-            continue
+            # Notify the seller with the exact chat and Telegram error. Do not
+            # expose technical removal failures to the subscriber.
+            failed_lines = ["⚠️ Subscription Access Removal Failed", "", f"Subscriber ID: {user_id}", f"Plan Group: {group_id}", ""]
+            for chat_id, error_text in failed:
+                failed_lines.extend([
+                    f"• {channels.get(chat_id, str(chat_id))}",
+                    f"  Chat ID: {chat_id}",
+                    f"  Problem: {error_text}",
+                ])
+            failed_lines.extend(["", "Please ensure the bot is a member/admin and has Ban Users permission in the listed group/channel."])
+            try:
+                await bot.send_message(owner_id, "\n".join(failed_lines))
+            except Exception:
+                logger.exception("Could not send Plan Group removal warning owner=%s user=%s group=%s", owner_id, user_id, group_id)
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
-            continue
+            # Another expiry path may have already marked this row inactive after
+            # access was removed. Do not suppress the user's expiry notice solely
+            # because this worker lost the state-update race.
+            logger.info(
+                "Plan Group expiry state already updated; continuing notification check owner=%s user=%s group=%s expiry=%s",
+                owner_id, user_id, group_id, row.get("expiry_date"),
+            )
         try:
             group = await get_plan_group(owner_id, group_id) or {}
-            # Only show chats from this expired Plan Group that were actually removed.
-            if removed_names:
-                display_names = removed_names
-            else:
-                display_names = [channels.get(int(x), str(x)) for x in target_ids if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, int(x))]
+            # Always show every configured group/channel in this Plan Group,
+            # regardless of whether access removal succeeded or failed.
+            display_names = [
+                channels.get(int(chat_id), str(chat_id))
+                for chat_id in target_ids
+            ]
             settings = await get_seller_settings(owner_id)
             timezone_name = str(settings.get("timezone") or "Asia/Kolkata")
             try:
@@ -276,7 +477,7 @@ async def check_expired_plan_group_subscriptions():
             expiry_text = expiry.astimezone(display_tz).strftime('%d-%m-%Y %I:%M:%S %p') + f" {timezone_name}" if expiry else "-"
             lines = ["⏰ Your subscription has expired.", "", "🔊 Group/Channel:"]
             lines.extend(f"• {name}" for name in display_names)
-            lines.extend(["", f"📅 Expired On: {expiry_text}", "", "❌ Your access to the applicable group/channel(s) has been removed.", "", "Use 🔄 Renew Plan to continue."])
+            lines.extend(["", f"📅 Expired On: {expiry_text}", "", "Use 🔄 Renew Plan to restore your access."])
             await bot.send_message(
                 user_id,
                 "\n".join(lines),
