@@ -14,6 +14,13 @@ import time
 import qrcode
 
 
+def _business_send_kwargs(query):
+    """Attach Business connection only when payment was opened from a Business chat."""
+    message = getattr(query, "message", None)
+    connection_id = getattr(message, "business_connection_id", None)
+    return {"business_connection_id": str(connection_id)} if connection_id else {}
+
+
 def _razorpay_qr_photo(checkout: dict):
     """Build the QR locally from Razorpay's returned UPI URI; no image download."""
     content = str(checkout.get("qr_image_content") or "").strip()
@@ -197,6 +204,7 @@ async def handle(self, update, context, q, owner, action):
                         photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                         caption=text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
+                        **_business_send_kwargs(q),
                     )
                     if not cached_file_id and getattr(sent, 'photo', None):
                         try:
@@ -252,7 +260,10 @@ async def handle(self, update, context, q, owner, action):
             except TelegramError:
                 pass
             try:
-                payment_page_message = await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+                payment_page_message = await context.bot.send_photo(
+                    chat_id=q.message.chat_id, photo=qr_file_id, caption=text, reply_markup=kb,
+                    **_business_send_kwargs(q),
+                )
                 if manual_enabled:
                     context.user_data['child_payment_page_chat_id'] = int(payment_page_message.chat_id)
                     context.user_data['child_payment_page_message_id'] = int(payment_page_message.message_id)
@@ -313,6 +324,51 @@ async def handle(self, update, context, q, owner, action):
                 reply_markup=back_keyboard,
             )
             return True
+        business_connection_id = getattr(q.message, 'business_connection_id', None)
+        if business_connection_id:
+            # Business-chat purchases must stay in the connected account chat.
+            # A normal send_invoice to q.from_user.id fails when the buyer has
+            # never opened /start with this clone bot. Telegram supports Stars
+            # invoice links created on behalf of a Business connection.
+            payload = f"stars:clone:{owner}:{q.from_user.id}:{plan_id}"
+            try:
+                invoice_url = await context.bot.create_invoice_link(
+                    title=f"{plan['name']} Subscription"[:32],
+                    description=f"{plan['duration_text']} access subscription"[:255],
+                    payload=payload,
+                    currency='XTR',
+                    prices=[LabeledPrice(plan['name'][:32], stars)],
+                    business_connection_id=str(business_connection_id),
+                )
+                await context.bot.send_message(
+                    chat_id=int(q.message.chat_id),
+                    text=(
+                        f"⭐ {plan['name']} Subscription\n\n"
+                        f"Duration: {plan['duration_text']}\n"
+                        f"Price: ⭐ {stars} Stars\n\n"
+                        "Tap the button below to complete your payment."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(f"⭐ Pay {stars} Stars", url=invoice_url)
+                    ]]),
+                    business_connection_id=str(business_connection_id),
+                    disable_web_page_preview=True,
+                )
+                logger.info(
+                    'Business Stars invoice link sent owner=%s user=%s plan=%s chat=%s',
+                    owner, q.from_user.id, plan_id, q.message.chat_id,
+                )
+            except Exception:
+                logger.exception(
+                    'Business Stars invoice link failed owner=%s user=%s plan=%s connection=%s',
+                    owner, q.from_user.id, plan_id, business_connection_id,
+                )
+                await q.message.reply_text(
+                    '⚠️ Telegram Stars payment could not be opened in this chat. Please try again.'
+                )
+            return True
+
+        # Preserve the original clone-bot invoice flow for normal bot chats.
         await context.bot.send_invoice(
             chat_id=q.from_user.id,
             title=f"{plan['name']} Subscription",
@@ -410,6 +466,7 @@ async def handle(self, update, context, q, owner, action):
                     photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                     caption=text,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
+                    **_business_send_kwargs(q),
                 )
                 if not cached_file_id and getattr(sent, 'photo', None):
                     try:
