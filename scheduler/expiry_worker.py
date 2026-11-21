@@ -30,6 +30,9 @@ from database.seller_data import (
     claim_plan_group_expiry_reminder,
     complete_plan_group_expiry_reminder,
     release_plan_group_expiry_reminder,
+    claim_plan_group_expiry_notification,
+    complete_plan_group_expiry_notification,
+    release_plan_group_expiry_notification,
     get_channels as get_seller_channels,
     get_plan_group,
     get_seller_settings,
@@ -213,12 +216,32 @@ async def check_expired_plan_group_subscriptions():
                             "",
                             "🔄 Please renew your plan before it expires to continue accessing the premium channel/group.",
                         ])
+                        reminder_text = "\n".join(lines)
+                        reminder_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{gid}")]])
                         try:
+                            # Primary clone-bot delivery remains unchanged.
                             await running.application.bot.send_message(
                                 uid,
-                                "\n".join(lines),
-                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{gid}")]]),
+                                reminder_text,
+                                reply_markup=reminder_keyboard,
                             )
+                            # Also mirror the reminder into the user's connected
+                            # Official Business chat, if one is registered.
+                            try:
+                                from handlers.clone.business_notifications import send_business_notification
+                                delivery = await send_business_notification(
+                                    running.application.bot, owner_id, uid, reminder_text,
+                                    reply_markup=reminder_keyboard,
+                                )
+                                logger.info(
+                                    "Plan Group reminder Business delivery owner=%s user=%s group=%s result=%s",
+                                    owner_id, uid, gid, delivery,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Plan Group reminder Business delivery failed owner=%s user=%s group=%s",
+                                    owner_id, uid, gid,
+                                )
                             await complete_plan_group_expiry_reminder(owner_id, uid, gid, token, expiry)
                         except Exception as exc:
                             await release_plan_group_expiry_reminder(owner_id, uid, gid, token, str(exc))
@@ -450,42 +473,73 @@ async def check_expired_plan_group_subscriptions():
                 logger.exception("Could not send Plan Group removal warning owner=%s user=%s group=%s", owner_id, user_id, group_id)
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
-            # Another expiry path may have already marked this row inactive after
-            # access was removed. Do not suppress the user's expiry notice solely
-            # because this worker lost the state-update race.
             logger.info(
                 "Plan Group expiry state already updated; continuing notification check owner=%s user=%s group=%s expiry=%s",
                 owner_id, user_id, group_id, row.get("expiry_date"),
             )
-        try:
-            group = await get_plan_group(owner_id, group_id) or {}
-            # Always show every configured group/channel in this Plan Group,
-            # regardless of whether access removal succeeded or failed.
-            display_names = [
-                channels.get(int(chat_id), str(chat_id))
-                for chat_id in target_ids
-            ]
-            settings = await get_seller_settings(owner_id)
-            timezone_name = str(settings.get("timezone") or "Asia/Kolkata")
-            try:
-                display_tz = ZoneInfo(timezone_name)
-            except (ZoneInfoNotFoundError, ValueError):
-                display_tz = ZoneInfo("Asia/Kolkata")
-            expiry = row.get("expiry_date")
-            if expiry and expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=timezone.utc)
-            expiry_text = expiry.astimezone(display_tz).strftime('%d-%m-%Y %I:%M:%S %p') + f" {timezone_name}" if expiry else "-"
-            lines = ["⏰ Your subscription has expired.", "", "🔊 Group/Channel:"]
-            lines.extend(f"• {name}" for name in display_names)
-            lines.extend(["", f"📅 Expired On: {expiry_text}", "", "Use 🔄 Renew Plan to restore your access."])
-            await bot.send_message(
-                user_id,
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{group_id}"), InlineKeyboardButton("👤 Profile", callback_data="c_profile")],
-                ]),
+
+        # One atomic claim prevents duplicate notifications when multiple workers
+        # process the same expired subscription concurrently.
+        expiry_notice_token = await claim_plan_group_expiry_notification(
+            owner_id, user_id, group_id, row.get("expiry_date")
+        )
+        if not expiry_notice_token:
+            logger.info(
+                "Plan Group expiry notification already claimed/sent; skipping owner=%s user=%s group=%s expiry=%s",
+                owner_id, user_id, group_id, row.get("expiry_date"),
             )
-        except Exception:
-            logger.exception("Plan Group expiry notification failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
+        else:
+            try:
+                settings = await get_seller_settings(owner_id)
+                timezone_name = str(settings.get("timezone") or "Asia/Kolkata")
+                try:
+                    display_tz = ZoneInfo(timezone_name)
+                except (ZoneInfoNotFoundError, ValueError):
+                    display_tz = ZoneInfo("Asia/Kolkata")
+                expiry = row.get("expiry_date")
+                if expiry and expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                expiry_text = expiry.astimezone(display_tz).strftime('%d-%m-%Y %I:%M:%S %p') + f" {timezone_name}" if expiry else "-"
+                display_names = [
+                    channels.get(int(chat_id), str(chat_id))
+                    for chat_id in target_ids
+                ]
+                lines = ["⏰ Your subscription has expired.", "", "🔊 Group/Channel:"]
+                lines.extend(f"• {name}" for name in display_names)
+                lines.extend(["", f"📅 Expired On: {expiry_text}", "", "Use 🔄 Renew Plan to restore your access."])
+                expiry_notice = "\n".join(lines)
+                expiry_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{group_id}"), InlineKeyboardButton("👤 Profile", callback_data="c_profile")],
+                ])
+                # Keep the existing clone-bot notification and mirror it to
+                # Official Business chat without changing payment/access flows.
+                await bot.send_message(user_id, expiry_notice, reply_markup=expiry_keyboard)
+                try:
+                    from handlers.clone.business_notifications import send_business_notification
+                    delivery = await send_business_notification(
+                        bot, owner_id, user_id, expiry_notice,
+                        reply_markup=expiry_keyboard,
+                    )
+                    logger.info(
+                        "Plan Group expiry Business delivery owner=%s user=%s group=%s result=%s",
+                        owner_id, user_id, group_id, delivery,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Plan Group expiry Business delivery failed owner=%s user=%s group=%s",
+                        owner_id, user_id, group_id,
+                    )
+                await complete_plan_group_expiry_notification(
+                    owner_id, user_id, group_id, row.get("expiry_date"), expiry_notice_token
+                )
+            except Exception as exc:
+                await release_plan_group_expiry_notification(
+                    owner_id, user_id, group_id, row.get("expiry_date"),
+                    expiry_notice_token, str(exc),
+                )
+                logger.exception(
+                    "Plan Group expiry notification failed owner=%s user=%s group=%s",
+                    owner_id, user_id, group_id,
+                )
         logger.info("Plan Group subscription expired owner=%s user=%s group=%s expiry=%s removed=%s", owner_id, user_id, group_id, row.get("expiry_date"), removed_names)
 
