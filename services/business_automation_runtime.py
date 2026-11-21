@@ -244,6 +244,9 @@ class BusinessAutomationRuntime:
                         bot_record = await get_bot_by_data_owner_id(int(owner_id))
                     username = str((bot_record or {}).get("bot_username") or "").lstrip("@")
                     feature = value.removeprefix("c_")
+                    plan_match = re.fullmatch(r"plans_list_(\d{4})", feature)
+                    if plan_match:
+                        feature = f"plans_{plan_match.group(1)}"
                     if username:
                         value = f"https://t.me/{username}?start={feature}"
                         item_type = "url"
@@ -582,6 +585,7 @@ class BusinessAutomationRuntime:
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
         try:
             if not event.is_private or event.out:
+                logger.debug("Business Automation incoming ignored owner=%s account=%s private=%s outgoing=%s", owner_id, account_user_id, getattr(event, "is_private", None), getattr(event, "out", None))
                 return
             sender = await event.get_sender()
             peer_id = int(event.sender_id or 0)
@@ -589,23 +593,28 @@ class BusinessAutomationRuntime:
                 return
 
             current_message_id = int(getattr(event, "id", 0) or 0)
+            logger.info("Business Automation incoming received owner=%s account=%s peer=%s message_id=%s", owner_id, account_user_id, peer_id, current_message_id)
             self._remember_message_peer(owner_id, account_user_id, current_message_id, peer_id)
-            history_was_cleared = await self._history_was_cleared(
-                owner_id, account_user_id, peer_id, client, current_message_id
-            )
+            # Chat-clear updates are already handled by _handle_raw_update and
+            # _handle_deleted. Avoid querying Telegram history on every incoming
+            # message: those extra get_messages calls (plus a settling sleep) add
+            # noticeable latency to welcome delivery. Explicit delete events reset
+            # the persisted welcome claim immediately.
+            history_was_cleared = False
 
-            await record_business_contact(
-                owner_id, peer_id, mode="normal",
-                account_user_id=account_user_id, chat_id=peer_id,
+            # These independent database reads can run concurrently.
+            settings, welcome, auto_replies = await asyncio.gather(
+                get_seller_settings(owner_id),
+                get_business_welcome(owner_id),
+                list_business_auto_replies(owner_id),
             )
-
-            settings = await get_seller_settings(owner_id)
-            welcome = await get_business_welcome(owner_id)
-            auto_replies = await list_business_auto_replies(owner_id)
             if not settings.get("business_automation_enabled"):
+                logger.info("Business Automation skipped: disabled owner=%s account=%s", owner_id, account_user_id)
                 return
             if not self._inside_working_hours(settings):
+                logger.info("Business Automation skipped: outside working hours owner=%s account=%s", owner_id, account_user_id)
                 return
+            logger.info("Business Automation config loaded owner=%s account=%s welcome_enabled=%s auto_reply_count=%s", owner_id, account_user_id, welcome.get("enabled", True), len(auto_replies))
 
             first_contact = await claim_business_welcome(
                 owner_id,
@@ -616,11 +625,20 @@ class BusinessAutomationRuntime:
                 current_message_id=current_message_id,
             )
 
+            # Claim/create the welcome conversation record before writing the
+            # generic contact record. The latter used to create the document first,
+            # causing the atomic first-contact claim to return False every time.
+            await record_business_contact(
+                owner_id, peer_id, mode="normal",
+                account_user_id=account_user_id, chat_id=peer_id,
+            )
+
             delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
             if delay:
                 await asyncio.sleep(delay)
 
             welcome_sent = False
+            logger.info("Business Automation welcome decision owner=%s account=%s peer=%s first_contact=%s enabled=%s", owner_id, account_user_id, peer_id, first_contact, welcome.get("enabled", True))
             if welcome.get("enabled", True) and first_contact:
                 text = await append_seller_branding(str(welcome.get("text") or "").strip(), owner_id)
                 media_file_id = str(welcome.get("media_file_id") or "")
@@ -642,6 +660,9 @@ class BusinessAutomationRuntime:
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
+                    logger.info("Business Automation welcome sent owner=%s account=%s peer=%s message_ids=%s", owner_id, account_user_id, peer_id, sent_message_ids)
+                else:
+                    logger.warning("Business Automation welcome has no text/media owner=%s account=%s", owner_id, account_user_id)
 
             # Keyword replies run after the first welcome. Exact matching avoids
             # accidental replies when a keyword appears inside an unrelated sentence.
@@ -649,6 +670,7 @@ class BusinessAutomationRuntime:
                 incoming_text = " ".join(str(getattr(event, "raw_text", "") or "").strip().lower().split())
                 match = next((x for x in auto_replies if x.get("enabled", True) and _keyword_in_message(str(x.get("keyword") or ""), incoming_text)), None)
                 if match:
+                    logger.info("Business Automation auto-reply matched owner=%s account=%s peer=%s keyword=%r", owner_id, account_user_id, peer_id, match.get("keyword"))
                     text = str(match.get("text") or "").strip()
                     media_file_id = str(match.get("media_file_id") or "")
                     media_items = list(match.get("media") or [])
@@ -663,6 +685,9 @@ class BusinessAutomationRuntime:
                             user=sender,
                         )
                         await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
+                        logger.info("Business Automation auto-reply sent owner=%s account=%s peer=%s", owner_id, account_user_id, peer_id)
+                else:
+                    logger.info("Business Automation auto-reply no keyword match owner=%s account=%s peer=%s", owner_id, account_user_id, peer_id)
         except asyncio.CancelledError:
             raise
         except Exception:
